@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+src/sueca_solver/target/
+.*/
+checkpoints/
+*.csv

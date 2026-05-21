@@ -22,9 +22,7 @@ from src.engine.sueca_engine import SuecaGame, GameResult
 class Bot(Protocol):
     """Protocol for a Sueca-playing agent."""
 
-    def select_card(
-        self, game: SuecaGame, seat: int, rng: np.random.Generator
-    ) -> Card:
+    def select_card(self, game: SuecaGame, seat: int, rng: np.random.Generator) -> Card:
         """Given a game state and seat, return the card to play."""
         ...
 
@@ -42,9 +40,7 @@ class DealRecord:
     seed: int
 
 
-def generate_deals(
-    gen: int, n_deals: int = 16, base_seed: int = 0
-) -> list[DealRecord]:
+def generate_deals(gen: int, n_deals: int = 16, base_seed: int = 0) -> list[DealRecord]:
     """Generate duplicate deals for a generation.
 
     Args:
@@ -191,9 +187,7 @@ def evaluate_genome_on_deals(
                 )
             )
 
-        results.append(
-            (rotations[0], rotations[1], rotations[2], rotations[3])
-        )
+        results.append((rotations[0], rotations[1], rotations[2], rotations[3]))
 
     return results
 

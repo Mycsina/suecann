@@ -1,14 +1,21 @@
 """Thorough tests for src/wann/logical_nodes.py."""
+
 from __future__ import annotations
 import pytest
 from src.wann.logical_nodes import (
-    AggregationFn, ActivationFn,
-    aggregate, activate, apply_sign, _clamp01,
-    ALL_AGGREGATIONS, ALL_ACTIVATIONS,
+    AggregationFn,
+    ActivationFn,
+    aggregate,
+    activate,
+    apply_sign,
+    _clamp01,
+    ALL_AGGREGATIONS,
+    ALL_ACTIVATIONS,
 )
 
 
 # ─── Clamping ───────────────────────────────────────────────────────────────
+
 
 class TestClamp:
     def test_clamp_negative(self):
@@ -26,6 +33,7 @@ class TestClamp:
 
 
 # ─── Aggregation functions ─────────────────────────────────────────────────
+
 
 class TestAggregationEmpty:
     """All aggregation functions return 0.0 for empty inputs."""
@@ -81,6 +89,7 @@ class TestAggregationInvalid:
 
 
 # ─── Activation functions ──────────────────────────────────────────────────
+
 
 class TestActivationIdentity:
     def test_passthrough_in_range(self):
@@ -165,6 +174,7 @@ class TestActivationInvalid:
 
 # ─── Compound logical behavior ─────────────────────────────────────────────
 
+
 class TestCompoundLogic:
     """Verify that aggregation + activation compose to correct logical gates."""
 
@@ -173,14 +183,18 @@ class TestCompoundLogic:
         for a, b, expected in [(1, 1, 1), (1, 0, 0), (0, 1, 0), (0, 0, 0)]:
             agg = aggregate(AggregationFn.MIN, [float(a), float(b)])
             result = activate(ActivationFn.THRESHOLD, agg)
-            assert result == float(expected), f"AND({a},{b}) = {result}, expected {expected}"
+            assert result == float(
+                expected
+            ), f"AND({a},{b}) = {result}, expected {expected}"
 
     def test_or_gate(self):
         """MAX + THRESHOLD = OR gate."""
         for a, b, expected in [(1, 1, 1), (1, 0, 1), (0, 1, 1), (0, 0, 0)]:
             agg = aggregate(AggregationFn.MAX, [float(a), float(b)])
             result = activate(ActivationFn.THRESHOLD, agg)
-            assert result == float(expected), f"OR({a},{b}) = {result}, expected {expected}"
+            assert result == float(
+                expected
+            ), f"OR({a},{b}) = {result}, expected {expected}"
 
     def test_not_gate(self):
         """NOT activation inverts Boolean signals."""
@@ -192,10 +206,13 @@ class TestCompoundLogic:
         for a, b, expected in [(1, 1, 0), (1, 0, 1), (0, 1, 1), (0, 0, 1)]:
             agg = aggregate(AggregationFn.MIN, [float(a), float(b)])
             result = activate(ActivationFn.NOT, agg)
-            assert result == float(expected), f"NAND({a},{b}) = {result}, expected {expected}"
+            assert result == float(
+                expected
+            ), f"NAND({a},{b}) = {result}, expected {expected}"
 
 
 # ─── Sign-only connections ──────────────────────────────────────────────────
+
 
 class TestSignLogic:
     def test_positive_passthrough(self):
@@ -225,11 +242,20 @@ class TestSignLogic:
 
 # ─── Enum completeness ─────────────────────────────────────────────────────
 
+
 class TestEnumCompleteness:
     def test_all_aggregations_list(self):
         assert len(ALL_AGGREGATIONS) == 3
-        assert set(ALL_AGGREGATIONS) == {AggregationFn.SUM, AggregationFn.MIN, AggregationFn.MAX}
+        assert set(ALL_AGGREGATIONS) == {
+            AggregationFn.SUM,
+            AggregationFn.MIN,
+            AggregationFn.MAX,
+        }
 
     def test_all_activations_list(self):
         assert len(ALL_ACTIVATIONS) == 3
-        assert set(ALL_ACTIVATIONS) == {ActivationFn.IDENTITY, ActivationFn.NOT, ActivationFn.THRESHOLD}
+        assert set(ALL_ACTIVATIONS) == {
+            ActivationFn.IDENTITY,
+            ActivationFn.NOT,
+            ActivationFn.THRESHOLD,
+        }

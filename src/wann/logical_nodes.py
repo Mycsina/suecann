@@ -21,6 +21,7 @@ import numpy as np
 # Aggregation functions — combine a list of incoming signals into one value.
 # ---------------------------------------------------------------------------
 
+
 class AggregationFn(IntEnum):
     """Available aggregation functions for WANN nodes."""
 
@@ -57,6 +58,7 @@ def aggregate(fn_id: int, inputs: list[float] | np.ndarray) -> float:
 # ---------------------------------------------------------------------------
 # Activation functions — transform aggregated value, clamped to [0, 1].
 # ---------------------------------------------------------------------------
+
 
 class ActivationFn(IntEnum):
     """Available activation functions for WANN nodes."""
@@ -101,6 +103,7 @@ def _clamp01(x: float) -> float:
 # ---------------------------------------------------------------------------
 # Sign-only connection logic.
 # ---------------------------------------------------------------------------
+
 
 def apply_sign(signal: float, sign: int) -> float:
     """Apply sign-based inversion to a signal.

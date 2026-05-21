@@ -53,8 +53,11 @@ def _pick_random_enabled_connection(
 
 
 def _pick_random_node(
-    genome: Genome, rng: np.random.Generator, exclude_inputs: bool = True,
-    exclude_bias: bool = True, exclude_outputs: bool = True,
+    genome: Genome,
+    rng: np.random.Generator,
+    exclude_inputs: bool = True,
+    exclude_bias: bool = True,
+    exclude_outputs: bool = True,
 ) -> NodeGene | None:
     """Pick a random node gene."""
     candidates = list(genome.node_genes.values())
@@ -69,9 +72,7 @@ def _pick_random_node(
     return candidates[rng.integers(len(candidates))]
 
 
-def mutate_add_node(
-    genome: Genome, rng: np.random.Generator
-) -> bool:
+def mutate_add_node(genome: Genome, rng: np.random.Generator) -> bool:
     """Split a random enabled connection, inserting a new hidden node.
 
     The original connection (src→dst) is disabled. Two new connections are
@@ -104,17 +105,13 @@ def mutate_add_node(
 
     # Add new_node → dst (sign=original_sign).
     inno2 = genome.next_innovation
-    genome.add_connection(
-        ConnGene.make(inno2, node_id, conn.dst, sign=conn.sign)
-    )
+    genome.add_connection(ConnGene.make(inno2, node_id, conn.dst, sign=conn.sign))
     genome.next_innovation = max(genome.next_innovation, inno2 + 1)
 
     return True
 
 
-def mutate_add_connection(
-    genome: Genome, rng: np.random.Generator
-) -> bool:
+def mutate_add_connection(genome: Genome, rng: np.random.Generator) -> bool:
     """Add a new connection between two unconnected nodes.
 
     Avoids creating cycles by only allowing connections from lower-depth
@@ -141,7 +138,8 @@ def mutate_add_connection(
             # Don't connect anything->input or anything->bias.
             dst_node = genome.node_genes.get(dst)
             if dst_node is not None and dst_node.node_type in (
-                NodeType.INPUT, NodeType.BIAS,
+                NodeType.INPUT,
+                NodeType.BIAS,
             ):
                 continue
             candidates.append((src, dst))
@@ -157,9 +155,7 @@ def mutate_add_connection(
     return True
 
 
-def mutate_toggle_connection(
-    genome: Genome, rng: np.random.Generator
-) -> bool:
+def mutate_toggle_connection(genome: Genome, rng: np.random.Generator) -> bool:
     """Enable or disable a random connection."""
     conn = _pick_random_connection(genome, rng)
     if conn is None:
@@ -171,9 +167,7 @@ def mutate_toggle_connection(
     return True
 
 
-def mutate_flip_sign(
-    genome: Genome, rng: np.random.Generator
-) -> bool:
+def mutate_flip_sign(genome: Genome, rng: np.random.Generator) -> bool:
     """Flip the sign of a random connection (+1 → -1 or vice versa)."""
     conn = _pick_random_connection(genome, rng)
     if conn is None:
@@ -186,9 +180,7 @@ def mutate_flip_sign(
     return True
 
 
-def mutate_change_activation(
-    genome: Genome, rng: np.random.Generator
-) -> bool:
+def mutate_change_activation(genome: Genome, rng: np.random.Generator) -> bool:
     """Change the activation function of a random non-input node."""
     node = _pick_random_node(genome, rng)
     if node is None:
@@ -202,9 +194,7 @@ def mutate_change_activation(
     return True
 
 
-def mutate_change_aggregation(
-    genome: Genome, rng: np.random.Generator
-) -> bool:
+def mutate_change_aggregation(genome: Genome, rng: np.random.Generator) -> bool:
     """Change the aggregation function of a random non-input node."""
     node = _pick_random_node(genome, rng)
     if node is None:

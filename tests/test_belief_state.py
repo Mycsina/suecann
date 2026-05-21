@@ -1,4 +1,5 @@
 """Thorough tests for src/engine/belief_state.py."""
+
 from __future__ import annotations
 import numpy as np
 import pytest
@@ -128,8 +129,10 @@ class TestHandFeatures:
 
     def test_trump_power(self):
         """Trump power with highest trump = 7 (rank 8) → 8/9."""
-        h0 = [Card(Suit.HEARTS, r) for r in list(Rank)[:8]] + \
-             [Card(Suit.DIAMONDS, Rank.SEVEN), Card(Suit.DIAMONDS, Rank.KING)]
+        h0 = [Card(Suit.HEARTS, r) for r in list(Rank)[:8]] + [
+            Card(Suit.DIAMONDS, Rank.SEVEN),
+            Card(Suit.DIAMONDS, Rank.KING),
+        ]
         remaining = [c for c in build_deck() if c not in h0]
         h3, h2, h1 = remaining[:10], remaining[10:20], remaining[20:30]
         game = SuecaGame([h0, h1, h2, h3], trump=Suit.DIAMONDS)
@@ -235,6 +238,10 @@ class TestPartnerWinning:
         vec = encode(vs)
         # Partner winning depends on what seat 3 played, but A♥ is top rank.
         # If seat 3 didn't play trump, seat 0 is winning.
-        s3_card = game.trick_history[0][1].card if game.trick_history else game.current_trick[1].card
+        s3_card = (
+            game.trick_history[0][1].card
+            if game.trick_history
+            else game.current_trick[1].card
+        )
         if s3_card.suit != Suit.DIAMONDS:  # didn't trump
             assert vec[7] == 1.0

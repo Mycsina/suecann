@@ -12,7 +12,7 @@ Neurosymbolic AI that evolves Weight-Agnostic Neural Networks (WANNs) to play **
 
 ## Tooling
 
-- **Python 3.14t** (free-threaded), managed by `uv`
+- **Python 3.13** (stable GIL-enabled), managed by `uv`
 - **Testing**: `uv run pytest tests/ -v`
 - **Dependencies**: numpy, graphviz, seaborn, matplotlib, pytest
 
@@ -95,10 +95,10 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 ### Evolution
 
 - **Duplicate deals**: 16 deals per generation × 4 seat rotations = 64 games/genome. Deals are **re-seeded each generation** (`seed=gen`) to prevent overfitting.
-- **Delta-fitness**: Each genome is compared against a RandomBot baseline on the exact same deal/seat/opponents (Common Random Numbers). Fitness = mean(genome_points − baseline_points) + Oracle Tax. This eliminates deal-luck variance.
+- **Delta-fitness**: Each genome is compared against a RandomBot baseline on the exact same deal/seat/opponents (Common Random Numbers). Fitness = mean(genome_card_points − baseline_card_points) + Oracle Tax. This eliminates deal-luck variance.
 - **Oracle Tax warm-up**: Penalty for illegal intents starts at −0.25 (gen 0), ramps linearly to −3.0 by `curriculum_gens`.
 - **Rank-based selection**: Raw fitness converted to normalized ranks before tournament selection for noise robustness.
-- **Multi-objective Pareto ranking**: 80% of the time, rank by (performance, simplicity); 20% by performance only. Prevents bloat.
+- **Multi-objective Pareto ranking**: 80% of the time, rank by (performance, simplicity) Pareto front with lexicographic tie-breaking (using Min-Max normalized fitness); 20% by performance only. Prevents bloat while maintaining selection pressure.
 - **Adaptive curriculum**: Phase transitions gated by population performance:
   - Phase 0 → 1: median delta > 0.5 (beating RandomBot)
   - Phase 1 → 2: median delta > 0.0 (beating HeuristicBot)

@@ -51,7 +51,9 @@ class PopConfig:
     # Seed genomes
     seed_fraction: float = 0.10  # fraction of pop seeded with heuristic strategies
     # Multi-objective ranking
-    pareto_complexity_prob: float = 0.80  # prob of ranking by (perf, complexity) vs (perf, max_perf)
+    pareto_complexity_prob: float = (
+        0.80  # prob of ranking by (perf, complexity) vs (perf, max_perf)
+    )
 
 
 # --- Seed genome strategies ---
@@ -64,43 +66,78 @@ class PopConfig:
 SEED_STRATEGIES: list[tuple[str, list[tuple[int, int, int]]]] = [
     # Aggressive: always play strongest card (bias → FORCE_HIGH)
     ("aggressive", [(BIAS_ID, OUTPUT_START + 2, +1)]),
-
     # Take Cheaply: always try to win cheaply (bias → TAKE_CHEAPLY)
     ("take_cheaply", [(BIAS_ID, OUTPUT_START + 1, +1)]),
-
     # Partner Aware: duck when partner wins, else force high
-    ("partner_aware", [
-        (INPUT_START + 7, OUTPUT_START + 0, +1),   # Is_Partner_Winning(+1) → DUCK_OR_DUMP
-        (INPUT_START + 7, OUTPUT_START + 2, -1),    # Is_Partner_Winning(-1) → FORCE_HIGH
-    ]),
-
+    (
+        "partner_aware",
+        [
+            (
+                INPUT_START + 7,
+                OUTPUT_START + 0,
+                +1,
+            ),  # Is_Partner_Winning(+1) → DUCK_OR_DUMP
+            (
+                INPUT_START + 7,
+                OUTPUT_START + 2,
+                -1,
+            ),  # Is_Partner_Winning(-1) → FORCE_HIGH
+        ],
+    ),
     # Trump Cutter: cut when void in led suit and have trump
-    ("trump_cutter", [
-        (INPUT_START + 0, OUTPUT_START + 4, -1),    # Has_Led_Suit(-1) → CUT_LOW
-        (INPUT_START + 1, OUTPUT_START + 4, +1),    # Has_Trump(+1) → CUT_LOW
-    ]),
-
+    (
+        "trump_cutter",
+        [
+            (INPUT_START + 0, OUTPUT_START + 4, -1),  # Has_Led_Suit(-1) → CUT_LOW
+            (INPUT_START + 1, OUTPUT_START + 4, +1),  # Has_Trump(+1) → CUT_LOW
+        ],
+    ),
     # Feeder: feed points to winning partner
-    ("feeder", [
-        (INPUT_START + 7, OUTPUT_START + 3, +1),    # Is_Partner_Winning(+1) → FEED_PARTNER
-    ]),
-
+    (
+        "feeder",
+        [
+            (
+                INPUT_START + 7,
+                OUTPUT_START + 3,
+                +1,
+            ),  # Is_Partner_Winning(+1) → FEED_PARTNER
+        ],
+    ),
     # Position-aware attacker: force high when leading
-    ("lead_attacker", [
-        (INPUT_START + 5, OUTPUT_START + 2, +1),    # Am_I_Leading(+1) → FORCE_HIGH
-    ]),
-
+    (
+        "lead_attacker",
+        [
+            (INPUT_START + 5, OUTPUT_START + 2, +1),  # Am_I_Leading(+1) → FORCE_HIGH
+        ],
+    ),
     # Last-to-play optimizer: take cheaply when last to play
-    ("last_taker", [
-        (INPUT_START + 6, OUTPUT_START + 1, +1),    # Am_I_Last_To_Play(+1) → TAKE_CHEAPLY
-    ]),
-
+    (
+        "last_taker",
+        [
+            (
+                INPUT_START + 6,
+                OUTPUT_START + 1,
+                +1,
+            ),  # Am_I_Last_To_Play(+1) → TAKE_CHEAPLY
+        ],
+    ),
     # Combined: partner aware + position aware
-    ("combined_basic", [
-        (INPUT_START + 7, OUTPUT_START + 0, +1),    # Is_Partner_Winning(+1) → DUCK_OR_DUMP
-        (INPUT_START + 7, OUTPUT_START + 2, -1),    # Is_Partner_Winning(-1) → FORCE_HIGH
-        (INPUT_START + 5, OUTPUT_START + 2, +1),    # Am_I_Leading(+1) → FORCE_HIGH
-    ]),
+    (
+        "combined_basic",
+        [
+            (
+                INPUT_START + 7,
+                OUTPUT_START + 0,
+                +1,
+            ),  # Is_Partner_Winning(+1) → DUCK_OR_DUMP
+            (
+                INPUT_START + 7,
+                OUTPUT_START + 2,
+                -1,
+            ),  # Is_Partner_Winning(-1) → FORCE_HIGH
+            (INPUT_START + 5, OUTPUT_START + 2, +1),  # Am_I_Leading(+1) → FORCE_HIGH
+        ],
+    ),
 ]
 
 
@@ -148,10 +185,11 @@ def _pareto_rank(
     fitnesses: list[float],
     complexities: list[int],
 ) -> list[float]:
-    """Non-dominated Pareto ranking on (fitness ↑, simplicity ↑).
+    """Non-dominated Pareto ranking on (fitness ↑, simplicity ↑) with lexicographic tie-breaking.
 
     Returns a rank score for each genome (higher = better).
-    Genomes on the Pareto front get the highest rank.
+    Genomes on the Pareto front get the highest base rank.
+    Within the same Pareto level, tie-breaking is done using normalized raw fitness.
     """
     n = len(fitnesses)
     if n == 0:
@@ -168,10 +206,16 @@ def _pareto_rank(
     for i in range(n):
         for j in range(i + 1, n):
             # i dominates j if better on both objectives.
-            i_dom_j = (fitnesses[i] >= fitnesses[j] and simplicities[i] >= simplicities[j]
-                       and (fitnesses[i] > fitnesses[j] or simplicities[i] > simplicities[j]))
-            j_dom_i = (fitnesses[j] >= fitnesses[i] and simplicities[j] >= simplicities[i]
-                       and (fitnesses[j] > fitnesses[i] or simplicities[j] > simplicities[i]))
+            i_dom_j = (
+                fitnesses[i] >= fitnesses[j]
+                and simplicities[i] >= simplicities[j]
+                and (fitnesses[i] > fitnesses[j] or simplicities[i] > simplicities[j])
+            )
+            j_dom_i = (
+                fitnesses[j] >= fitnesses[i]
+                and simplicities[j] >= simplicities[i]
+                and (fitnesses[j] > fitnesses[i] or simplicities[j] > simplicities[i])
+            )
 
             if i_dom_j:
                 dominated_by[i].append(j)
@@ -197,9 +241,33 @@ def _pareto_rank(
         current_front = next_front
         level += 1
 
+    # Min-Max normalize fitnesses to [0, 1] for fair tie-breaking
+    min_fit = min(fitnesses)
+    max_fit = max(fitnesses)
+    fit_range = max_fit - min_fit
+
+    perf_scores = [
+        (f - min_fit) / fit_range if fit_range > 0 else 1.0
+        for f in fitnesses
+    ]
+
     # Convert levels to scores (lower level = higher score).
     max_level = max(levels) if levels else 0
-    scores = [(max_level - lvl) / max(max_level, 1) for lvl in levels]
+    scores = []
+
+    for lvl, perf in zip(levels, perf_scores):
+        base_score = max_level - lvl
+        # Add 0.5 * normalized fitness to break ties
+        scores.append(base_score + 0.5 * perf)
+
+    # Normalize final scores to [0, 1]
+    max_score = max(scores) if scores else 1.0
+    min_score = min(scores) if scores else 0.0
+
+    if max_score > min_score:
+        scores = [(s - min_score) / (max_score - min_score) for s in scores]
+    else:
+        scores = [1.0] * n
 
     return scores
 
@@ -259,7 +327,9 @@ class Population:
             self.genomes.append(g)
             self.fitnesses.append(0.0)
 
-    def _apply_single_mutation(self, genome: Genome, force_add_conn: bool = False) -> int:
+    def _apply_single_mutation(
+        self, genome: Genome, force_add_conn: bool = False
+    ) -> int:
         """Apply a single mutation. With force_add_conn, only adds a connection."""
         if force_add_conn:
             MUTATIONS[1](genome, self.rng)  # add_connection
@@ -358,7 +428,9 @@ class Population:
             if surviving:
                 # Remove stale ones.
                 stale_ids = {sp.id for sp in active if sp not in surviving}
-                self.species_list = [sp for sp in self.species_list if sp.id not in stale_ids]
+                self.species_list = [
+                    sp for sp in self.species_list if sp.id not in stale_ids
+                ]
 
     def _breed_next_generation(self) -> list[Genome]:
         """Create the next generation via multi-objective ranking and rank-based selection."""
@@ -371,7 +443,9 @@ class Population:
             # Fallback: keep current population.
             return [g.copy() for g in self.genomes]
 
-        active.sort(key=lambda sp: max(self.fitnesses[i] for i in sp.members), reverse=True)
+        active.sort(
+            key=lambda sp: max(self.fitnesses[i] for i in sp.members), reverse=True
+        )
 
         # --- Multi-objective ranking (Pareto or fitness-only) ---
         complexities = [g.num_enabled() for g in self.genomes]
@@ -388,7 +462,9 @@ class Population:
         species_best = []
         for sp in active:
             best_f = max(selection_fitness[i] for i in sp.members)
-            adj_f = max(best_f, 0.0) + 0.1  # small offset so all species get at least something
+            adj_f = (
+                max(best_f, 0.0) + 0.1
+            )  # small offset so all species get at least something
             total_fitness += adj_f * len(sp.members)
             species_best.append(adj_f)
 
@@ -402,7 +478,10 @@ class Population:
                 adj_f = species_best[i]
                 count = max(
                     cfg.min_species_size,
-                    min(remaining - cfg.min_species_size, int(cfg.pop_size * (adj_f * len(sp.members)) / total_fitness)),
+                    min(
+                        remaining - cfg.min_species_size,
+                        int(cfg.pop_size * (adj_f * len(sp.members)) / total_fitness),
+                    ),
                 )
                 count = min(count, remaining - cfg.min_species_size)
             offspring_counts[sp.id] = min(count, remaining)
@@ -445,7 +524,9 @@ class Population:
                     p2 = self._tournament_select(ranked_indices, ranked_rank_values)
                     child = self._crossover(self.genomes[p1], self.genomes[p2])
                 else:
-                    parent_idx = self._tournament_select(ranked_indices, ranked_rank_values)
+                    parent_idx = self._tournament_select(
+                        ranked_indices, ranked_rank_values
+                    )
                     child = self.genomes[parent_idx].copy()
 
                 self._apply_mutations(child)
@@ -521,7 +602,11 @@ class Population:
         max_innov_b = max(innov_b) if innov_b else 0
 
         for i in shared:
-            chosen = parent_a.conn_genes[i] if self.rng.random() < 0.5 else parent_b.conn_genes[i]
+            chosen = (
+                parent_a.conn_genes[i]
+                if self.rng.random() < 0.5
+                else parent_b.conn_genes[i]
+            )
             child_conn_genes.append(chosen)
 
         # Disjoint from fitter parent.

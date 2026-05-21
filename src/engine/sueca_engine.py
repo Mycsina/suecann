@@ -47,6 +47,7 @@ class GameResult:
     @staticmethod
     def compute_game_points(team_02: int, team_13: int) -> tuple[int, int]:
         """Convert trick-point totals to game points (1/2/4 system)."""
+
         def _tier(pts: int) -> int:
             if pts == 120:
                 return 4
@@ -136,9 +137,7 @@ class SuecaGame:
 
     def get_visible_state(self, seat: int) -> VisibleState:
         """Return the information visible to the given player."""
-        led_suit = (
-            self.current_trick[0].card.suit if self.current_trick else None
-        )
+        led_suit = self.current_trick[0].card.suit if self.current_trick else None
         # If this player is leading, led_suit is None.
         if seat == self.current_leader and not self.current_trick:
             led_suit = None
@@ -181,9 +180,7 @@ class SuecaGame:
         # Enforce follow-suit.
         legal = self.legal_moves(seat)
         if card not in legal:
-            raise ValueError(
-                f"Card {card!r} is not a legal play. Legal moves: {legal}"
-            )
+            raise ValueError(f"Card {card!r} is not a legal play. Legal moves: {legal}")
 
         # Track voids: if player doesn't follow the led suit, mark void.
         if self.current_trick:

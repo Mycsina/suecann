@@ -1,4 +1,5 @@
 """Thorough tests for src/engine/sueca_engine.py."""
+
 from __future__ import annotations
 import numpy as np
 import pytest
@@ -7,6 +8,7 @@ from src.engine.sueca_engine import SuecaGame, TrickCard, _next_seat_after
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
+
 
 def _make_hands_from_deck():
     """Deterministic deal for testing."""
@@ -28,6 +30,7 @@ def _play_full_game_random(seed: int = 42) -> SuecaGame:
 
 # ─── Turn order ─────────────────────────────────────────────────────────────
 
+
 class TestTurnOrder:
     def test_counter_clockwise(self):
         assert _next_seat_after(0) == 3
@@ -45,6 +48,7 @@ class TestTurnOrder:
 
 
 # ─── Initialization ────────────────────────────────────────────────────────
+
 
 class TestInit:
     def test_reject_wrong_hand_count(self):
@@ -68,13 +72,15 @@ class TestInit:
 
 # ─── Follow-suit enforcement ───────────────────────────────────────────────
 
+
 class TestFollowSuit:
     def test_must_follow_led_suit(self):
         """If player has cards of the led suit, they must play one."""
         # Construct hands where seat 0 leads hearts, seat 3 has hearts + spades.
         h0 = [Card(Suit.HEARTS, r) for r in list(Rank)[:10]]  # all hearts
-        h3 = [Card(Suit.SPADES, r) for r in list(Rank)[:5]] + \
-             [Card(Suit.HEARTS, r) for r in list(Rank)[:5]]  # mixed
+        h3 = [Card(Suit.SPADES, r) for r in list(Rank)[:5]] + [
+            Card(Suit.HEARTS, r) for r in list(Rank)[:5]
+        ]  # mixed
         # Dummy hands for seats 1, 2.
         remaining = [c for c in build_deck() if c not in h0 and c not in h3]
         h2 = remaining[:10]
@@ -112,6 +118,7 @@ class TestFollowSuit:
 
 
 # ─── Trick resolution ──────────────────────────────────────────────────────
+
 
 class TestTrickResolution:
     def _setup_simple_trick(self, cards_by_seat, trump=Suit.DIAMONDS):
@@ -153,8 +160,8 @@ class TestTrickResolution:
 
     def test_trump_beats_non_trump(self):
         cards = {
-            0: Card(Suit.HEARTS, Rank.ACE),    # Led suit, highest
-            3: Card(Suit.DIAMONDS, Rank.TWO),   # Trump, lowest
+            0: Card(Suit.HEARTS, Rank.ACE),  # Led suit, highest
+            3: Card(Suit.DIAMONDS, Rank.TWO),  # Trump, lowest
             2: Card(Suit.HEARTS, Rank.SEVEN),
             1: Card(Suit.HEARTS, Rank.KING),
         }
@@ -186,6 +193,7 @@ class TestTrickResolution:
 
 # ─── Void tracking ─────────────────────────────────────────────────────────
 
+
 class TestVoidTracking:
     def test_void_recorded(self):
         h0 = [Card(Suit.HEARTS, r) for r in Rank]
@@ -211,6 +219,7 @@ class TestVoidTracking:
 
 
 # ─── Full game invariants ──────────────────────────────────────────────────
+
 
 class TestFullGame:
     def test_total_points_is_120(self):
@@ -247,23 +256,29 @@ class TestFullGame:
 
 # ─── Game point tiers ──────────────────────────────────────────────────────
 
+
 class TestGamePointTiers:
-    @pytest.mark.parametrize("t02,t13,exp", [
-        (120, 0, (4, 0)),    # Bandeira
-        (0, 120, (0, 4)),
-        (100, 20, (2, 0)),   # 91+ = 2 game pts
-        (91, 29, (2, 0)),
-        (70, 50, (1, 0)),    # 61-90 = 1 game pt
-        (61, 59, (1, 0)),
-        (60, 60, (0, 0)),    # Draw
-        (50, 70, (0, 1)),
-    ])
+    @pytest.mark.parametrize(
+        "t02,t13,exp",
+        [
+            (120, 0, (4, 0)),  # Bandeira
+            (0, 120, (0, 4)),
+            (100, 20, (2, 0)),  # 91+ = 2 game pts
+            (91, 29, (2, 0)),
+            (70, 50, (1, 0)),  # 61-90 = 1 game pt
+            (61, 59, (1, 0)),
+            (60, 60, (0, 0)),  # Draw
+            (50, 70, (0, 1)),
+        ],
+    )
     def test_game_point_tiers(self, t02, t13, exp):
         from src.engine.sueca_engine import GameResult
+
         assert GameResult.compute_game_points(t02, t13) == exp
 
 
 # ─── Visible state ──────────────────────────────────────────────────────────
+
 
 class TestVisibleState:
     def test_no_opponent_hands_exposed(self):
@@ -273,7 +288,7 @@ class TestVisibleState:
         # Visible state should only contain seat 0's hand.
         assert vs.hand == list(game.hands[0])
         # No attribute gives access to other hands.
-        assert not hasattr(vs, 'all_hands')
+        assert not hasattr(vs, "all_hands")
 
     def test_led_suit_is_none_when_leading(self):
         hands = _make_hands_from_deck()

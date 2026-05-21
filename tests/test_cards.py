@@ -20,6 +20,7 @@ from src.engine.cards import (
 
 # ─── Deck composition ──────────────────────────────────────────────────────
 
+
 class TestDeckComposition:
     """Verify the 40-card deck is correctly constructed."""
 
@@ -56,6 +57,7 @@ class TestDeckComposition:
 
 # ─── Point values ───────────────────────────────────────────────────────────
 
+
 class TestPointValues:
     """Verify Sueca point values are correct."""
 
@@ -83,7 +85,9 @@ class TestPointValues:
     def test_queen_is_2(self):
         assert POINT_VALUES[Rank.QUEEN] == 2
 
-    @pytest.mark.parametrize("rank", [Rank.SIX, Rank.FIVE, Rank.FOUR, Rank.THREE, Rank.TWO])
+    @pytest.mark.parametrize(
+        "rank", [Rank.SIX, Rank.FIVE, Rank.FOUR, Rank.THREE, Rank.TWO]
+    )
     def test_zero_point_cards(self, rank):
         assert POINT_VALUES[rank] == 0
 
@@ -100,6 +104,7 @@ class TestPointValues:
 
 
 # ─── Rank ordering ──────────────────────────────────────────────────────────
+
 
 class TestRankOrdering:
     """Verify Sueca-specific rank ordering: A > 7 > K > J > Q > 6 > 5 > 4 > 3 > 2."""
@@ -121,8 +126,16 @@ class TestRankOrdering:
 
     def test_full_ordering(self):
         expected = [
-            Rank.TWO, Rank.THREE, Rank.FOUR, Rank.FIVE, Rank.SIX,
-            Rank.QUEEN, Rank.JACK, Rank.KING, Rank.SEVEN, Rank.ACE,
+            Rank.TWO,
+            Rank.THREE,
+            Rank.FOUR,
+            Rank.FIVE,
+            Rank.SIX,
+            Rank.QUEEN,
+            Rank.JACK,
+            Rank.KING,
+            Rank.SEVEN,
+            Rank.ACE,
         ]
         assert sorted(Rank) == expected
 
@@ -132,6 +145,7 @@ class TestRankOrdering:
 
 
 # ─── Dealing ────────────────────────────────────────────────────────────────
+
 
 class TestDealing:
     """Verify deal() produces correct hands."""
@@ -181,6 +195,7 @@ class TestDealing:
 
 # ─── Trump selection ────────────────────────────────────────────────────────
 
+
 class TestTrumpSelection:
     """Verify choose_trump returns valid suits."""
 
@@ -197,6 +212,7 @@ class TestTrumpSelection:
 
 
 # ─── Card repr ──────────────────────────────────────────────────────────────
+
 
 class TestCardRepr:
     """Verify human-readable card representation."""

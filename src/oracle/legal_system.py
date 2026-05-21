@@ -135,11 +135,7 @@ def resolve_intent(
         if not current_trick:
             # Leading — can't "take" since there's nothing to beat.
             return None
-        takers = [
-            c
-            for c in legal
-            if _would_beat(c, current_trick, trump, led_suit)
-        ]
+        takers = [c for c in legal if _would_beat(c, current_trick, trump, led_suit)]
         if not takers:
             return None
         # Cheapest = lowest rank among those that would win.

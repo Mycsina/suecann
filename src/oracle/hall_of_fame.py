@@ -58,7 +58,9 @@ class HallOfFame:
         """Sample n champions uniformly at random."""
         if not self.entries:
             return []
-        indices = rng.choice(len(self.entries), size=min(n, len(self.entries)), replace=False)
+        indices = rng.choice(
+            len(self.entries), size=min(n, len(self.entries)), replace=False
+        )
         return [self.entries[i].genome.copy() for i in indices]
 
     def best(self) -> HoFEntry | None:
@@ -138,7 +140,9 @@ class HallOfFame:
         conn_signs = data.get("conn_signs", np.array([], dtype=np.int32))
         conn_enabled = data.get("conn_enabled", np.array([], dtype=np.int32))
         node_entry_indices = data.get("entry_indices", np.array([], dtype=np.int32))
-        conn_entry_indices = data.get("conn_entry_indices", np.array([], dtype=np.int32))
+        conn_entry_indices = data.get(
+            "conn_entry_indices", np.array([], dtype=np.int32)
+        )
 
         hof = HallOfFame()
         n_entries = len(fitnesses)
@@ -148,10 +152,13 @@ class HallOfFame:
         conn_offset = 0
         for ei in range(n_entries):
             g = Genome(node_genes=[], conn_genes=[])
-            
+
             # Override with stored node genes.
             stored_nodes: dict[int, NodeGene] = {}
-            while node_offset < len(node_entry_indices) and node_entry_indices[node_offset] == ei:
+            while (
+                node_offset < len(node_entry_indices)
+                and node_entry_indices[node_offset] == ei
+            ):
                 nid = int(node_ids[node_offset])
                 stored_nodes[nid] = NodeGene.make(
                     nid,
@@ -164,7 +171,10 @@ class HallOfFame:
 
             # Rebuild connections for this entry.
             stored_conns: dict[int, ConnGene] = {}
-            while conn_offset < len(conn_entry_indices) and conn_entry_indices[conn_offset] == ei:
+            while (
+                conn_offset < len(conn_entry_indices)
+                and conn_entry_indices[conn_offset] == ei
+            ):
                 inno = int(conn_innovs[conn_offset])
                 stored_conns[inno] = ConnGene.make(
                     inno,
@@ -175,7 +185,7 @@ class HallOfFame:
                 )
                 conn_offset += 1
             g.conn_genes = stored_conns
-            
+
             if g.conn_genes:
                 g.next_innovation = max(g.conn_genes.keys()) + 1
             else:

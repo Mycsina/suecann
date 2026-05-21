@@ -21,9 +21,7 @@ def _is_partner(seat_a: int, seat_b: int) -> bool:
     return (seat_a % 2) == (seat_b % 2)
 
 
-def _trick_winner_seat(
-    trick: list[TrickCard], trump: Suit
-) -> int:
+def _trick_winner_seat(trick: list[TrickCard], trump: Suit) -> int:
     """Return seat currently winning the incomplete trick."""
     if not trick:
         return -1
@@ -50,9 +48,7 @@ def _trick_winner_seat(
 class HeuristicBot:
     """Rule-based Sueca player."""
 
-    def select_card(
-        self, game: SuecaGame, seat: int, rng: np.random.Generator
-    ) -> Card:
+    def select_card(self, game: SuecaGame, seat: int, rng: np.random.Generator) -> Card:
         legal = game.legal_moves(seat)
         trump = game.trump
         trick = game.current_trick
@@ -71,9 +67,7 @@ class HeuristicBot:
     def reset(self) -> None:
         pass
 
-    def _lead(
-        self, legal: list[Card], trump: Suit, rng: np.random.Generator
-    ) -> Card:
+    def _lead(self, legal: list[Card], trump: Suit, rng: np.random.Generator) -> Card:
         """Lead with strongest non-trump card, preferring longest suit."""
         # Count cards per suit.
         non_trump = [c for c in legal if c.suit != trump]
@@ -82,6 +76,7 @@ class HeuristicBot:
         if non_trump:
             # Prefer longest suit, then highest rank.
             from collections import Counter
+
             suit_counts = Counter(c.suit for c in non_trump)
             best_suit = max(suit_counts, key=lambda s: (suit_counts[s], s))
             suited = [c for c in non_trump if c.suit == best_suit]
@@ -121,23 +116,27 @@ class HeuristicBot:
 
             # Try to beat winner.
             beating = [
-                c for c in suited
-                if winner_card.suit == trump and c.suit == trump and c.rank > winner_card.rank
-                or winner_card.suit != trump and c.rank > winner_card.rank
-                or (winner_card.suit != trump and winner_card.suit != led_suit and c.suit == led_suit)
+                c
+                for c in suited
+                if winner_card.suit == trump
+                and c.suit == trump
+                and c.rank > winner_card.rank
+                or winner_card.suit != trump
+                and c.rank > winner_card.rank
+                or (
+                    winner_card.suit != trump
+                    and winner_card.suit != led_suit
+                    and c.suit == led_suit
+                )
             ]
 
             if winner_card.suit == trump:
                 # Can only beat with higher trump.
                 beating = [
-                    c for c in suited
-                    if c.suit == trump and c.rank > winner_card.rank
+                    c for c in suited if c.suit == trump and c.rank > winner_card.rank
                 ]
             elif winner_card.suit == led_suit:
-                beating = [
-                    c for c in suited
-                    if c.rank > winner_card.rank
-                ]
+                beating = [c for c in suited if c.rank > winner_card.rank]
             else:
                 # Winner is off-suit non-trump — any led suit card beats it.
                 beating = list(suited)

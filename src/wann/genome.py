@@ -109,9 +109,7 @@ def _initial_node_genes() -> list[NodeGene]:
     return nodes
 
 
-def _topological_order(
-    node_ids: set[int], connections: list[ConnGene]
-) -> list[int]:
+def _topological_order(node_ids: set[int], connections: list[ConnGene]) -> list[int]:
     """Return node IDs in topological order (inputs/ bias first, then by depth).
 
     Uses Kahn's algorithm. All nodes not in connections get depth 0.
@@ -131,9 +129,7 @@ def _topological_order(
         + [BIAS_ID]
         + list(range(OUTPUT_START, OUTPUT_START + OUTPUT_COUNT))
     )
-    hidden_ids = sorted(
-        nid for nid in node_ids if nid >= FIRST_HIDDEN_ID
-    )
+    hidden_ids = sorted(nid for nid in node_ids if nid >= FIRST_HIDDEN_ID)
 
     # Priority: inputs first, then bias, then hidden, then outputs.
     priority: dict[int, int] = {}
@@ -254,7 +250,9 @@ class Genome:
     def topological_order(self) -> list[int]:
         """Return node IDs in evaluation order."""
         if self._topo_order is None:
-            self._topo_order = _topological_order(self.node_ids, list(self.conn_genes.values()))
+            self._topo_order = _topological_order(
+                self.node_ids, list(self.conn_genes.values())
+            )
         return self._topo_order
 
     def copy(self) -> "Genome":

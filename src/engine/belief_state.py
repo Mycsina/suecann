@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.engine.cards import Card, Rank, Suit, card_points, POINT_VALUES, TOTAL_GAME_POINTS
+from src.engine.cards import (
+    Card,
+    Rank,
+    Suit,
+    card_points,
+    POINT_VALUES,
+    TOTAL_GAME_POINTS,
+)
 from src.engine.sueca_engine import VisibleState, TrickCard
 
 
@@ -53,9 +60,7 @@ def _total_points_remaining(state: VisibleState) -> int:
     return TOTAL_GAME_POINTS - played_points - current_points
 
 
-def _trick_winner_seat(
-    trick: list[TrickCard], trump: Suit
-) -> int | None:
+def _trick_winner_seat(trick: list[TrickCard], trump: Suit) -> int | None:
     """Return the seat currently winning the (possibly incomplete) trick."""
     if not trick:
         return None
@@ -168,9 +173,9 @@ def encode(state: VisibleState) -> np.ndarray:
 
     # [9] Has_Trick_Been_Cut: 1 if trump played in current trick (when led != trump).
     if led_suit is not None and led_suit != trump:
-        vec[9] = 1.0 if any(
-            tc.card.suit == trump for tc in state.current_trick
-        ) else 0.0
+        vec[9] = (
+            1.0 if any(tc.card.suit == trump for tc in state.current_trick) else 0.0
+        )
     else:
         vec[9] = 0.0
 
@@ -187,16 +192,16 @@ def encode(state: VisibleState) -> np.ndarray:
     # [12] Any_Opp_Void_Led: 1 if either opponent void in led suit.
     opp_seats = [(state.seat + 1) % 4, (state.seat + 3) % 4]
     if led_suit is not None:
-        vec[12] = 1.0 if any(
-            led_suit in state.voids.get(s, set()) for s in opp_seats
-        ) else 0.0
+        vec[12] = (
+            1.0
+            if any(led_suit in state.voids.get(s, set()) for s in opp_seats)
+            else 0.0
+        )
     else:
         vec[12] = 0.0
 
     # [13] Any_Opp_Void_Trump: 1 if either opponent void in trump.
-    vec[13] = 1.0 if any(
-        trump in state.voids.get(s, set()) for s in opp_seats
-    ) else 0.0
+    vec[13] = 1.0 if any(trump in state.voids.get(s, set()) for s in opp_seats) else 0.0
 
     # [14] Led_Suit_Ace_Played: 1 if Ace of led suit played previously.
     if led_suit is not None:

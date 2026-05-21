@@ -46,12 +46,14 @@ class TrainConfig:
     elitism: int = 2
 
     # Evaluation
-    n_deals: int = 16
+    n_deals: int = 32
     curriculum_gens: int = 60
-    sweep_weights: list[float] = field(default_factory=lambda: list(DEFAULT_WEIGHT_SWEEP))
+    sweep_weights: list[float] = field(
+        default_factory=lambda: list(DEFAULT_WEIGHT_SWEEP)
+    )
 
     # Species
-    compatibility_threshold: float = 3.0
+    compatibility_threshold: float = 1.0
     stagnation_limit: int = 15
     c_excess: float = 1.0
     c_disjoint: float = 1.0
@@ -73,11 +75,11 @@ class TrainConfig:
     pareto_complexity_prob: float = 0.80
 
     # Adaptive curriculum thresholds
-    phase0_threshold: float = 0.5   # median delta to advance from Phase 0 → 1
-    phase1_threshold: float = 0.0   # median delta to advance from Phase 1 → 2
-    phase2_hof_min: int = 5         # HoF entries with positive fitness to advance Phase 2 → 3
-    min_gens_per_phase: int = 10    # minimum generations in each phase
-    adaptive_window: int = 5        # number of recent gens to average for phase transitions
+    phase0_threshold: float = 0.05  # median game-point delta to advance from Phase 0 → 1
+    phase1_threshold: float = -0.02  # median game-point delta to advance from Phase 1 → 2
+    phase2_hof_min: int = 5  # HoF entries with positive fitness to advance Phase 2 → 3
+    min_gens_per_phase: int = 10  # minimum generations in each phase
+    adaptive_window: int = 5  # number of recent gens to average for phase transitions
 
     # Hall of Fame
     hof_size: int = 20
@@ -211,6 +213,7 @@ def _get_opponent_bots(
 def _genome_to_bot(genome: Genome, weights: list[float] | None = None) -> Bot:
     """Convert a genome to a playable bot."""
     from src.oracle.fitness import WannBotSweep
+
     return WannBotSweep(genome, weights=weights)
 
 
@@ -239,32 +242,38 @@ def train(config: TrainConfig | None = None) -> tuple[Population, HallOfFame]:
     # CSV stats.
     stats_fh = open(config.stats_file, "w", newline="")
     writer = csv.writer(stats_fh)
-    writer.writerow([
-        "generation",
-        "phase",
-        "best_fitness",
-        "avg_fitness",
-        "median_fitness",
-        "best_delta",
-        "median_delta",
-        "global_best_fitness",
-        "n_species",
-        "n_connections_best",
-        "n_hidden_best",
-        "oracle_tax",
-        "elapsed_sec",
-    ])
+    writer.writerow(
+        [
+            "generation",
+            "phase",
+            "best_fitness",
+            "avg_fitness",
+            "median_fitness",
+            "best_delta",
+            "median_delta",
+            "global_best_fitness",
+            "n_species",
+            "n_connections_best",
+            "n_hidden_best",
+            "oracle_tax",
+            "elapsed_sec",
+        ]
+    )
 
-    print(f"{'Gen':>4s} {'Ph':>2s} {'Best':>8s} {'Avg':>8s} {'Med':>8s} "
-          f"{'Δbest':>8s} {'Δmed':>8s} "
-          f"{'Species':>8s} {'Conns':>6s} {'Hidden':>6s} {'Tax':>6s} {'Time':>8s}")
+    print(
+        f"{'Gen':>4s} {'Ph':>2s} {'Best':>8s} {'Avg':>8s} {'Med':>8s} "
+        f"{'Δbest':>8s} {'Δmed':>8s} "
+        f"{'Species':>8s} {'Conns':>6s} {'Hidden':>6s} {'Tax':>6s} {'Time':>8s}"
+    )
     print("-" * 100)
 
     for gen in range(config.generations):
         t0 = time.time()
 
         # Generate deals (re-seeded per generation).
-        deals = generate_deals(gen, n_deals=config.n_deals, base_seed=config.seed * 1000)
+        deals = generate_deals(
+            gen, n_deals=config.n_deals, base_seed=config.seed * 1000
+        )
 
         # Get opponent bots for this phase.
         opp_bots = _get_opponent_bots(current_phase, hof, rng, config)
@@ -315,12 +324,23 @@ def train(config: TrainConfig | None = None) -> tuple[Population, HallOfFame]:
         n_hidden = len(best_genome.hidden_ids)
         tax = oracle_tax_penalty(gen, config.curriculum_gens)
 
-        writer.writerow([
-            gen, current_phase, best_fit, avg_fit, median_fit,
-            best_delta, median_delta,
-            pop.global_best_fitness, n_species, n_conns, n_hidden,
-            tax, elapsed,
-        ])
+        writer.writerow(
+            [
+                gen,
+                current_phase,
+                best_fit,
+                avg_fit,
+                median_fit,
+                best_delta,
+                median_delta,
+                pop.global_best_fitness,
+                n_species,
+                n_conns,
+                n_hidden,
+                tax,
+                elapsed,
+            ]
+        )
         stats_fh.flush()
 
         print(
@@ -437,7 +457,9 @@ def load_genome(filepath: str) -> Genome:
         )
 
     next_innovation = int(data.get("next_innovation", 0))
-    return Genome(node_genes=node_genes, conn_genes=conn_genes, next_innovation=next_innovation)
+    return Genome(
+        node_genes=node_genes, conn_genes=conn_genes, next_innovation=next_innovation
+    )
 
 
 if __name__ == "__main__":

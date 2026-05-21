@@ -1,0 +1,15 @@
+[package]
+name = "sueca_solver"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "sueca_solver"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+rayon = "1.8"
+
+[dev-dependencies]
+proptest = "1.4"
