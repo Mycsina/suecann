@@ -1,9 +1,8 @@
-/// PIMC (Perfect Information Monte Carlo) engine for Sueca.
-
-use std::cell::RefCell;
-use rayon::prelude::*;
 use crate::engine::GameState;
 use crate::search::{alpha_beta, TranspositionTable};
+use rayon::prelude::*;
+/// PIMC (Perfect Information Monte Carlo) engine for Sueca.
+use std::cell::RefCell;
 
 thread_local! {
     /// Thread-local Transposition Table to avoid any heap allocation during search.
@@ -11,20 +10,7 @@ thread_local! {
     static THREAD_TT: RefCell<TranspositionTable> = RefCell::new(TranspositionTable::new(16));
 }
 
-struct SimpleRng {
-    state: u64,
-}
-
-impl SimpleRng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        self.state
-    }
-}
+use crate::rng::LcgRng;
 
 /// Backtracking card sampler to distribute remaining unknown cards.
 /// Strictly stack-allocated to ensure zero heap allocations.
@@ -48,7 +34,13 @@ fn sample_constraints(
             target_sizes[s] -= 1;
             hands_out[s] |= 1u64 << card;
 
-            if sample_constraints(unknown_cards, unknown_idx + 1, voids, target_sizes, hands_out) {
+            if sample_constraints(
+                unknown_cards,
+                unknown_idx + 1,
+                voids,
+                target_sizes,
+                hands_out,
+            ) {
                 return true;
             }
 
@@ -89,7 +81,7 @@ pub fn sample_world(
     hands_out[my_seat as usize] = my_hand;
 
     // 3. Shuffle unknown cards on the stack (Fisher-Yates)
-    let mut r = SimpleRng::new(*rng_state);
+    let mut r = LcgRng::new(*rng_state);
     let mut i = num_unknowns;
     while i > 1 {
         let rand_idx = (r.next_u64() as usize) % i;
@@ -103,7 +95,13 @@ pub fn sample_world(
     // My seat needs 0 more cards because it is already filled
     temp_targets[my_seat as usize] = 0;
 
-    sample_constraints(&unknown_cards[0..num_unknowns], 0, voids, &mut temp_targets, hands_out)
+    sample_constraints(
+        &unknown_cards[0..num_unknowns],
+        0,
+        voids,
+        &mut temp_targets,
+        hands_out,
+    )
 }
 
 /// Evaluates the Expected Value (EV) of each legal move using PIMC.
@@ -130,7 +128,7 @@ pub fn solve_pimc(
     // 1. Determine legal moves for the player
     let mut legal_moves = [0u8; 10];
     let mut legal_count = 0;
-    
+
     let suit_mask = 0x3FFu64 << (led_suit * 10);
     let suited = if led_suit < 4 { my_hand & suit_mask } else { 0 };
     let moves_mask = if suited != 0 { suited } else { my_hand };
@@ -157,70 +155,93 @@ pub fn solve_pimc(
     // 2. Parallel world evaluation using Rayon
     // Each world runs independent simulations.
     // We pre-generate world seeds to make the Rayon execution deterministic.
-    let mut rng = SimpleRng::new(seed);
+    let mut rng = LcgRng::new(seed);
     let mut seeds = Vec::with_capacity(n_worlds);
     for _ in 0..n_worlds {
         seeds.push(rng.next_u64());
     }
 
-    let results: Vec<Vec<(u8, f64)>> = seeds.into_par_iter().map(|w_seed| {
-        let mut local_hands = [0u64; 4];
-        let mut local_seed = w_seed;
-        
-        // Sample a valid world. Try up to 10 times in case of tight constraints.
-        let mut success = false;
-        for _ in 0..10 {
-            if sample_world(my_seat, my_hand, played_cards, voids, target_sizes, &mut local_hands, &mut local_seed) {
-                success = true;
-                break;
-            }
-        }
-        
-        if !success {
-            return Vec::new(); // skip this world if sampling completely failed
-        }
+    let results: Vec<Vec<(u8, f64)>> = seeds
+        .into_par_iter()
+        .map(|w_seed| {
+            let mut local_hands = [0u64; 4];
+            let mut local_seed = w_seed;
 
-        // Evaluate all legal moves in this world
-        THREAD_TT.with(|tt_cell| {
-            let mut tt = tt_cell.borrow_mut();
-            tt.next_generation(); // Invalidate old TT entries instantly
-
-            let mut world_results = Vec::with_capacity(legal_count);
-            
-            for i in 0..legal_count {
-                let m = legal_moves[i];
-                
-                // Initialize game state matching current game
-                let mut sim_game = GameState::new(local_hands, trump, current_player);
-                sim_game.led_suit = led_suit;
-                sim_game.current_trick_winner = current_trick_winner;
-                sim_game.current_trick_best_card = current_trick_best_card;
-                sim_game.cards_played_in_trick = current_trick_cards.len() as u8;
-                sim_game.team_02_score = team_scores[0];
-                sim_game.team_13_score = team_scores[1];
-                sim_game.trick_number = trick_number;
-
-                // Play the legal move
-                let mut trick_points = 0;
-                // Add points of already played cards in trick
-                for &c in current_trick_cards {
-                    trick_points += crate::engine::CARD_POINTS[c as usize];
+            // Sample a valid world. Try up to 10 times in case of tight constraints.
+            let mut success = false;
+            for _ in 0..10 {
+                if sample_world(
+                    my_seat,
+                    my_hand,
+                    played_cards,
+                    voids,
+                    target_sizes,
+                    &mut local_hands,
+                    &mut local_seed,
+                ) {
+                    success = true;
+                    break;
                 }
-                
-                sim_game.play_card_and_resolve(m, &mut trick_points);
-
-                // Run Alpha-Beta to the end of search depth (plies = depth * 4)
-                let val = alpha_beta(&mut sim_game, -1000, 1000, search_depth * 4, &mut tt, &mut trick_points);
-                world_results.push((m, val as f64));
             }
-            world_results
+
+            if !success {
+                return Vec::new(); // skip this world if sampling completely failed
+            }
+
+            // Evaluate all legal moves in this world
+            THREAD_TT.with(|tt_cell| {
+                let mut tt = tt_cell.borrow_mut();
+                tt.next_generation(); // Invalidate old TT entries instantly
+
+                let mut world_results = Vec::with_capacity(legal_count);
+
+                for i in 0..legal_count {
+                    let m = legal_moves[i];
+
+                    // Initialize game state matching current game
+                    let mut sim_game = GameState::new(local_hands, trump, current_player);
+                    sim_game.led_suit = led_suit;
+                    sim_game.current_trick_winner = current_trick_winner;
+                    sim_game.current_trick_best_card = current_trick_best_card;
+                    sim_game.cards_played_in_trick = current_trick_cards.len() as u8;
+                    sim_game.team_02_score = team_scores[0];
+                    sim_game.team_13_score = team_scores[1];
+                    sim_game.trick_number = trick_number;
+
+                    // Play the legal move
+                    let mut trick_points = 0;
+                    // Add points of already played cards in trick
+                    for &c in current_trick_cards {
+                        trick_points += crate::engine::CARD_POINTS[c as usize];
+                    }
+
+                    sim_game.play_card_and_resolve(m, &mut trick_points);
+
+                    // Run Alpha-Beta. If 16 or fewer cards remain (trick_number >= 6), switch to full minimax search to the end of the game (40 plies).
+                    let plies_left = if trick_number >= 6 {
+                        40u8
+                    } else {
+                        search_depth * 4
+                    };
+                    let val = alpha_beta(
+                        &mut sim_game,
+                        -1000,
+                        1000,
+                        plies_left,
+                        &mut tt,
+                        &mut trick_points,
+                    );
+                    world_results.push((m, val as f64));
+                }
+                world_results
+            })
         })
-    }).collect();
+        .collect();
 
     // 3. Aggregate EV results across all worlds
     let mut sum_evs = vec![0.0; 40];
     let mut counts = vec![0; 40];
-    
+
     for world_res in results {
         for (m, val) in world_res {
             sum_evs[m as usize] += val;
@@ -232,7 +253,11 @@ pub fn solve_pimc(
     for i in 0..legal_count {
         let m = legal_moves[i];
         let count = counts[m as usize];
-        let ev = if count > 0 { sum_evs[m as usize] / (count as f64) } else { 0.0 };
+        let ev = if count > 0 {
+            sum_evs[m as usize] / (count as f64)
+        } else {
+            0.0
+        };
         final_evs.push((m, ev));
     }
 
@@ -250,16 +275,24 @@ mod tests {
         for r in 0..10 {
             my_hand |= 1u64 << (0 * 10 + r); // Hearts
         }
-        
+
         let played_cards = 0u64;
         let voids = [0u8; 4];
         let target_sizes = [10, 10, 10, 10];
-        
+
         let mut hands_out = [0u64; 4];
         let mut seed = 42u64;
-        
-        let ok = sample_world(0, my_hand, played_cards, voids, target_sizes, &mut hands_out, &mut seed);
-        
+
+        let ok = sample_world(
+            0,
+            my_hand,
+            played_cards,
+            voids,
+            target_sizes,
+            &mut hands_out,
+            &mut seed,
+        );
+
         assert!(ok);
         // Player 0 has my_hand
         assert_eq!(hands_out[0], my_hand);
@@ -280,19 +313,27 @@ mod tests {
         for r in 0..10 {
             my_hand |= 1u64 << (0 * 10 + r); // Hearts
         }
-        
+
         let played_cards = 0u64;
         // Player 1 is void in Diamonds (suit 1)
         let mut voids = [0u8; 4];
         voids[1] = 1 << 1; // Diamonds void
-        
+
         let target_sizes = [10, 10, 10, 10];
         let mut hands_out = [0u64; 4];
         let mut seed = 42u64;
-        
-        let ok = sample_world(0, my_hand, played_cards, voids, target_sizes, &mut hands_out, &mut seed);
+
+        let ok = sample_world(
+            0,
+            my_hand,
+            played_cards,
+            voids,
+            target_sizes,
+            &mut hands_out,
+            &mut seed,
+        );
         assert!(ok);
-        
+
         // Diamonds mask: 10..19 (bits 10 to 19)
         let diamonds_mask = 0x3FFu64 << 10;
         // Player 1 should not have any diamonds
@@ -306,34 +347,38 @@ mod tests {
         for c in 10..18 {
             my_hand |= 1u64 << c;
         }
-        
+
         let played_cards = 0u64;
         let voids = [0u8; 4];
         let target_sizes = [10, 10, 10, 10];
-        
+
         let evs = solve_pimc(
-            0,            // my_seat
+            0, // my_seat
             my_hand,
             played_cards,
             voids,
             target_sizes,
-            0,            // trump Hearts
-            0,            // led Hearts
-            &[],          // current trick cards
-            0,            // current player
-            0,            // current trick winner
-            40,           // trick best card (none)
-            [0, 0],       // team scores
-            0,            // trick number
-            5,            // n_worlds
-            1,            // search depth (tricks)
-            123,          // seed
+            0,      // trump Hearts
+            0,      // led Hearts
+            &[],    // current trick cards
+            0,      // current player
+            0,      // current trick winner
+            40,     // trick best card (none)
+            [0, 0], // team scores
+            0,      // trick number
+            5,      // n_worlds
+            1,      // search depth (tricks)
+            123,    // seed
         );
-        
+
         assert!(!evs.is_empty());
         // Since we had legal moves, we should have evs computed for all legal moves of led suit
         // Hearts Ace and 7 are legal moves because Hearts led
-        let heart_moves: Vec<u8> = evs.iter().map(|&(m, _)| m).filter(|&m| m / 10 == 0).collect();
+        let heart_moves: Vec<u8> = evs
+            .iter()
+            .map(|&(m, _)| m)
+            .filter(|&m| m / 10 == 0)
+            .collect();
         assert!(heart_moves.contains(&9));
         assert!(heart_moves.contains(&8));
     }

@@ -1,58 +1,109 @@
+# src/measure_snr.py
 """Measure the signal-to-noise ratio of delta-fitness scoring.
 
 Compares HeuristicBot vs RandomBot and seed strategies vs RandomBot on the
 same deals, reporting mean delta, std, SE, and SNR in both game points and
-raw card points.
+raw card points. All simulations run in Rust.
 """
+
+from __future__ import annotations
+
+import os
+import sys
+from enum import IntEnum
+from typing import NamedTuple, Any
+from dataclasses import dataclass
+
 import numpy as np
-from src.baselines.heuristic_bot import HeuristicBot
-from src.baselines.random_bot import RandomBot
-from src.engine.duplicate_loop import (
+
+
+from src.compat import (
+    Suit,
+    Rank,
+    Card,
     DealRecord,
     generate_deals,
-    play_game_with_bots,
-    rotate_seats,
+    RustDealCompat,
 )
-from src.engine.cards import Suit
-from src.wann.population import SEED_STRATEGIES, _create_seed_genome
-from src.oracle.fitness import WannBotSweep
+
+
+# ─── Seed Strategies Definition ─────────────────────────────────────────────
+
+SEED_STRATEGIES = [
+    ("aggressive", [(21, 24, 1)]),
+    ("take_cheaply", [(21, 23, 1)]),
+    ("partner_aware", [(7, 22, 1), (7, 24, -1)]),
+    ("trump_cutter", [(0, 26, -1), (1, 26, 1)]),
+    ("feeder", [(7, 25, 1)]),
+]
+
+
+def create_seed_network(conns: list[tuple[int, int, int]]) -> Any:
+    """Construct a PyWannNetwork directly using PyO3 from a list of connections."""
+    import sueca_solver
+
+    node_ids = list(range(27))
+    node_types = [0] * 27
+    node_activations = [0] * 27
+    node_aggregations = [0] * 27
+
+    conn_srcs = [src for src, dst, sign in conns]
+    conn_dsts = [dst for src, dst, sign in conns]
+    conn_signs = [sign for src, dst, sign in conns]
+    conn_enableds = [True] * len(conns)
+
+    return sueca_solver.PyWannNetwork.from_genome(
+        node_ids,
+        node_types,
+        node_activations,
+        node_aggregations,
+        conn_srcs,
+        conn_dsts,
+        conn_signs,
+        conn_enableds,
+    )
+
+
+# ─── Measure Delta delegating to Rust ───────────────────────────────────────
 
 
 def measure_delta(
-    bot_a,  # "genome" bot
-    bot_b,  # baseline bot
+    bot_a: tuple[int, Any],
+    bot_b: tuple[int, Any],
     n_deals: int = 64,
     seed: int = 42,
 ):
     """Play n_deals × 4 rotations, return per-game deltas in both metrics."""
+    import sueca_solver
+
     deals = generate_deals(gen=0, n_deals=n_deals, base_seed=seed)
-    game_point_deltas = []
-    card_point_deltas = []
+    rust_deals = [
+        RustDealCompat(
+            [[int(c.suit) * 10 + int(c.rank) for c in hand] for hand in deal_rec.hands],
+            int(deal_rec.trump),
+            deal_rec.seed,
+        )
+        for deal_rec in deals
+    ]
 
-    for deal in deals:
-        for rot in range(4):
-            rotated = rotate_seats(deal.hands, rot)
-            game_seed = seed + deal.seed + rot * 10000
+    bot_a_type, bot_a_network = bot_a
+    bot_b_type, bot_b_network = bot_b
+    sweep_weights = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
 
-            # Bot A plays seat 0
-            bots_a = [bot_a, RandomBot(), RandomBot(), RandomBot()]
-            # Use a copy of rotated hands for each game
-            result_a = play_game_with_bots(
-                [list(h) for h in rotated], deal.trump, bots_a,
-                first_player=rot % 4, seed=game_seed,
-            )
+    gp_deltas, cp_deltas = sueca_solver.run_snr_matchup_rust(
+        rust_deals,
+        bot_a_type,
+        bot_a_network,
+        bot_b_type,
+        bot_b_network,
+        sweep_weights,
+        seed,
+    )
 
-            # Bot B plays seat 0 (same cards, same opponents, same seed)
-            bots_b = [bot_b, RandomBot(), RandomBot(), RandomBot()]
-            result_b = play_game_with_bots(
-                [list(h) for h in rotated], deal.trump, bots_b,
-                first_player=rot % 4, seed=game_seed,
-            )
+    return np.array(gp_deltas), np.array(cp_deltas)
 
-            game_point_deltas.append(result_a.game_points[0] - result_b.game_points[0])
-            card_point_deltas.append(result_a.team_scores[0] - result_b.team_scores[0])
 
-    return np.array(game_point_deltas), np.array(card_point_deltas)
+# ─── Reporting Helper ───────────────────────────────────────────────────────
 
 
 def report(name: str, gp_deltas: np.ndarray, cp_deltas: np.ndarray):
@@ -65,7 +116,7 @@ def report(name: str, gp_deltas: np.ndarray, cp_deltas: np.ndarray):
         mean = np.mean(d)
         std = np.std(d, ddof=1)
         se = std / np.sqrt(n)
-        snr = abs(mean) / se if se > 0 else float('inf')
+        snr = abs(mean) / se if se > 0 else float("inf")
         print(f"\n  {label}:")
         print(f"    Mean Δ = {mean:+.4f}")
         print(f"    Std    = {std:.4f}")
@@ -76,10 +127,10 @@ def report(name: str, gp_deltas: np.ndarray, cp_deltas: np.ndarray):
         # Distribution of values
         unique, counts = np.unique(d, return_counts=True)
         if len(unique) <= 20:
-            print(f"    Distribution:")
+            print("    Distribution:")
             for v, c in sorted(zip(unique, counts)):
                 pct = 100 * c / n
-                bar = '#' * int(pct / 2)
+                bar = "#" * int(pct / 2)
                 print(f"      {v:+6.0f}: {c:4d} ({pct:5.1f}%) {bar}")
 
 
@@ -87,19 +138,25 @@ if __name__ == "__main__":
     N_DEALS = 64  # 64 deals × 4 rotations = 256 games
 
     print("Measuring delta-fitness signal-to-noise ratio...")
-    print(f"Configuration: {N_DEALS} deals × 4 rotations = {N_DEALS * 4} games per comparison")
+    print(
+        f"Configuration: {N_DEALS} deals × 4 rotations = {N_DEALS * 4} games per comparison"
+    )
+
+    # Bot representation: (bot_type_int, network_or_None)
+    heuristic_bot = (1, None)
+    random_bot = (0, None)
 
     # --- HeuristicBot vs RandomBot ---
-    gp, cp = measure_delta(HeuristicBot(), RandomBot(), n_deals=N_DEALS)
+    gp, cp = measure_delta(heuristic_bot, random_bot, n_deals=N_DEALS)
     report("HeuristicBot vs RandomBot", gp, cp)
 
     # --- Seed strategies vs RandomBot ---
     for name, conns in SEED_STRATEGIES[:5]:  # top 5 seeds
-        genome = _create_seed_genome(conns)
-        bot = WannBotSweep(genome)
-        gp, cp = measure_delta(bot, RandomBot(), n_deals=N_DEALS)
+        network = create_seed_network(conns)
+        bot = (2, network)
+        gp, cp = measure_delta(bot, random_bot, n_deals=N_DEALS)
         report(f"Seed '{name}' vs RandomBot", gp, cp)
 
     # --- RandomBot vs RandomBot (noise floor) ---
-    gp, cp = measure_delta(RandomBot(), RandomBot(), n_deals=N_DEALS)
+    gp, cp = measure_delta(random_bot, random_bot, n_deals=N_DEALS)
     report("RandomBot vs RandomBot (noise floor)", gp, cp)

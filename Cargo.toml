@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "src/sueca_solver",
+    "src/sueca_wann"
+]
+resolver = "2"

@@ -13,6 +13,8 @@ Neurosymbolic AI that evolves Weight-Agnostic Neural Networks (WANNs) to play **
 ## Tooling
 
 - **Python 3.13** (stable GIL-enabled), managed by `uv`
+- **Rust**: High-performance simulation and evaluation engine in `src/sueca_solver` using Rayon for parallelism.
+- **Build Rust Module**: `cargo build -p sueca_solver --release && cp target/release/libsueca_solver.so .venv/lib/python3.13/site-packages/sueca_solver/sueca_solver.cpython-313-x86_64-linux-gnu.so`
 - **Testing**: `uv run pytest tests/ -v`
 - **Dependencies**: numpy, graphviz, seaborn, matplotlib, pytest
 
@@ -34,7 +36,9 @@ Neurosymbolic AI that evolves Weight-Agnostic Neural Networks (WANNs) to play **
 Belief State (18 floats) → WANN (logical gates) → Oracle Intent (5 outputs) → Legal Subsystem → Card
 ```
 
-### Belief State (18 inputs, all in [0,1])
+- **Execution Engine**: Candidate evaluations are offloaded to Rust (`src/sueca_solver`) via PyO3. Python serializes genomes/deals to pre-allocated arrays, calls `evaluate_wann_population` to release the GIL, and processes the simulation concurrently in Rayon (~500x speedup).
+
+### Belief State (21 inputs, all in [0,1])
 
 | # | Field | Type | Normalization |
 |---|-------|------|---------------|
@@ -56,6 +60,9 @@ Belief State (18 floats) → WANN (logical gates) → Oracle Intent (5 outputs) 
 | 15 | Led_Suit_7_Played | Bool | in previous tricks |
 | 16 | Trump_Ace_Played | Bool | |
 | 17 | Game_Pts_Remaining | Float | unplayed points / 120 |
+| 18 | Trick_Number | Float | current trick index / 9.0 |
+| 19 | Trumps_Remaining | Float | unplayed trump cards / 10.0 |
+| 20 | Score_Delta | Float | (our_pts − opp_pts + 120) / 240 |
 
 ### Oracle Intents (5 outputs)
 
@@ -73,16 +80,16 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 ### WANN Constraints
 
 - **Gene representation**: Connection genes `[5,N]` (innovation, src, dst, sign ∈ {+1,−1}, enabled). Node genes `[4,M]` (id, type, activation_fn, aggregation_fn).
-- **Initialization**: 18 input + 1 bias + 5 output nodes. 10% of population seeded with known Sueca heuristic strategies, rest get random connections.
+- **Initialization**: 21 input + 1 bias + 5 output nodes. 15% of population seeded with known Sueca heuristic strategies, rest get random connections.
 - **Sign-only weights**: Connections carry only a sign (+1 or −1), not a learned weight. A shared weight W is used for evaluation. sign=-1 inverts the signal (1.0 - x) before aggregation.
 - **Aggregation functions** (3 only): SUM=0, MIN(AND)=1, MAX(OR)=2. **No MEAN** — it causes float-precision issues at the THRESHOLD boundary.
 - **Activation functions** (3 only): IDENTITY=0, NOT=1, THRESHOLD=2. **No SIGMOID** — it breaks IF/THEN rule extraction.
 - **All node outputs clamped to [0, 1]**.
-- **Shared weight sweep**: Evaluate each topology at W ∈ {0.5, 1.0, 2.0}, average fitness across all three weights for true weight-agnostic evaluation.
+- **Shared weight sweep**: Evaluate each topology at W ∈ {-2.0, -1.0, -0.5, 0.5, 1.0, 2.0}, including negative weights for inhibitory rule expression. Average fitness across all six weights for true weight-agnostic evaluation.
 
 ### Seed Strategies (Initial Population)
 
-10% of the initial population is seeded with genomes encoding known Sueca heuristics:
+15% of the initial population is seeded with genomes encoding known Sueca heuristics:
 - **Aggressive**: BIAS → FORCE_HIGH (always play strongest card)
 - **Take Cheaply**: BIAS → TAKE_CHEAPLY
 - **Partner Aware**: duck when partner wins, else attack
@@ -90,11 +97,16 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 - **Feeder**: feed points to winning partner
 - **Lead Attacker**: force high when leading
 - **Last Taker**: take cheaply when last to play
-- **Combined**: partner-aware + position-aware
+- **Combined Basic**: partner-aware + position-aware
+- **Late Trump Aggressor**: cut/force when few trumps remain
+- **Score Aware**: play safe when ahead, aggressive when behind
+- **Trick Point Taker**: take cheaply when trick has value and partner isn't winning
+- **Void Exploiter**: force high when opponent is void in led suit
+- **Full Strategic**: combines partner, position, score, and trump awareness (7 connections)
 
 ### Evolution
 
-- **Duplicate deals**: 16 deals per generation × 4 seat rotations = 64 games/genome. Deals are **re-seeded each generation** (`seed=gen`) to prevent overfitting.
+- **Duplicate deals**: 32 deals per generation × 4 seat rotations = 128 games/genome. Deals are **re-seeded each generation** (`seed=gen`) to prevent overfitting.
 - **Delta-fitness**: Each genome is compared against a RandomBot baseline on the exact same deal/seat/opponents (Common Random Numbers). Fitness = mean(genome_card_points − baseline_card_points) + Oracle Tax. This eliminates deal-luck variance.
 - **Oracle Tax warm-up**: Penalty for illegal intents starts at −0.25 (gen 0), ramps linearly to −3.0 by `curriculum_gens`.
 - **Rank-based selection**: Raw fitness converted to normalized ranks before tournament selection for noise robustness.

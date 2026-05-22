@@ -1,5 +1,5 @@
-use std::sync::OnceLock;
 use crate::engine::GameState;
+use std::sync::OnceLock;
 
 // Zobrist hash constants
 static ZOBRIST_INIT: OnceLock<()> = OnceLock::new();
@@ -7,26 +7,12 @@ static ZOBRIST_TABLE: OnceLock<[[u64; 40]; 4]> = OnceLock::new();
 static PLAYER_ZOBRIST: OnceLock<[u64; 4]> = OnceLock::new();
 static LED_SUIT_ZOBRIST: OnceLock<[u64; 5]> = OnceLock::new(); // 0..4
 
-struct SimpleRng {
-    state: u64,
-}
-
-impl SimpleRng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        // LCG multiplier from Numerical Recipes
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        self.state
-    }
-}
+use crate::rng::LcgRng;
 
 pub fn init_zobrist() {
     ZOBRIST_INIT.get_or_init(|| {
-        let mut rng = SimpleRng::new(0x123456789abcdef0);
-        
+        let mut rng = LcgRng::new(0x123456789abcdef0);
+
         let mut table = [[0u64; 40]; 4];
         for p in 0..4 {
             for c in 0..40 {
@@ -73,7 +59,7 @@ pub fn get_hash(state: &GameState) -> u64 {
 #[derive(Clone, Copy, Default)]
 pub struct TTEntry {
     pub key: u64,
-    pub value: i8,
+    pub value: i16,
     pub flag: u8, // 0 = Exact, 1 = LowerBound (Beta-cut), 2 = UpperBound (Alpha-cut)
     pub depth: u8,
     pub generation: u16,
@@ -101,7 +87,7 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    pub fn lookup(&self, key: u64, depth: u8) -> Option<(i8, u8, u8)> {
+    pub fn lookup(&self, key: u64, depth: u8) -> Option<(i16, u8, u8)> {
         let idx = (key as usize) & self.mask;
         let entry = &self.table[idx];
         if entry.key == key && entry.generation == self.generation && entry.depth >= depth {
@@ -112,7 +98,7 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    pub fn store(&mut self, key: u64, value: i8, flag: u8, depth: u8, best_move: u8) {
+    pub fn store(&mut self, key: u64, value: i16, flag: u8, depth: u8, best_move: u8) {
         let idx = (key as usize) & self.mask;
         // Simple replace scheme
         self.table[idx] = TTEntry {
@@ -191,7 +177,14 @@ pub fn alpha_beta(
         let mut next_points = *trick_points;
         next_state.play_card_and_resolve(m, &mut next_points);
 
-        let val = alpha_beta(&mut next_state, alpha, beta, plies_left - 1, tt, &mut next_points);
+        let val = alpha_beta(
+            &mut next_state,
+            alpha,
+            beta,
+            plies_left - 1,
+            tt,
+            &mut next_points,
+        );
 
         if is_maximizing {
             if val > best_val {
@@ -221,7 +214,7 @@ pub fn alpha_beta(
         0 // Exact
     };
 
-    tt.store(hash, best_val as i8, flag, plies_left, best_move);
+    tt.store(hash, best_val as i16, flag, plies_left, best_move);
 
     best_val
 }
@@ -237,7 +230,7 @@ mod tests {
         // Player 3 hand: King of Hearts (7), Jack of Hearts (6)
         // Player 2 hand: Queen of Hearts (5), Six of Hearts (4)
         // Player 1 hand: Five of Hearts (3), Four of Hearts (2)
-        
+
         let p0_hand = (1u64 << 9) | (1u64 << 8);
         let p3_hand = (1u64 << 7) | (1u64 << 6);
         let p2_hand = (1u64 << 5) | (1u64 << 4);
@@ -245,12 +238,12 @@ mod tests {
 
         let hands = [p0_hand, p1_hand, p2_hand, p3_hand];
         let mut state = GameState::new(hands, 0, 0); // Hearts led, trump Hearts
-        
+
         let mut tt = TranspositionTable::new(10);
         let mut trick_points = 0;
-        
+
         let val = alpha_beta(&mut state, -1000, 1000, 8, &mut tt, &mut trick_points);
-        
+
         // Since Team 0-2 holds Ace (11), Seven (10), Queen (2), Six (0),
         // they should win all tricks and score 11 + 10 + 2 + 0 + 4 (King) + 3 (Jack) = 30 points.
         assert_eq!(val, 30);
