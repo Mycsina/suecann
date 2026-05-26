@@ -27,7 +27,7 @@ impl RustWannNetwork {
         conn_signs: &[i8],
         conn_enableds: &[bool],
     ) -> Self {
-        use std::collections::{HashMap, HashSet};
+        use std::collections::{BinaryHeap, HashMap, HashSet};
 
         let num_nodes = node_ids.iter().max().copied().unwrap_or(0) + 1;
 
@@ -42,23 +42,31 @@ impl RustWannNetwork {
             .map(|(((src, dst), sign), _)| (src, dst, sign))
             .collect();
 
-        // Priority for topological sort: inputs(0..21), bias(21), hidden(27+), outputs(22..26)
-        let mut hidden_ids: Vec<usize> =
-            node_ids.iter().cloned().filter(|&nid| nid >= 27).collect();
+        // Priority for topological sort: inputs(0..INPUT_COUNT), bias(INPUT_COUNT), hidden(FIRST_HIDDEN_ID+), outputs(OUTPUT_START..OUTPUT_START+OUTPUT_COUNT)
+        let mut hidden_ids: Vec<usize> = node_ids
+            .iter()
+            .cloned()
+            .filter(|&nid| nid >= crate::constants::FIRST_HIDDEN_ID)
+            .collect();
         hidden_ids.sort_unstable();
 
         let get_priority = |nid: usize| -> usize {
-            if nid < 21 {
+            if nid < crate::constants::INPUT_COUNT {
                 nid
-            } else if nid == 21 {
-                21
-            } else if nid >= 27 {
+            } else if nid == crate::constants::INPUT_COUNT {
+                crate::constants::INPUT_COUNT
+            } else if nid >= crate::constants::FIRST_HIDDEN_ID {
                 match hidden_ids.binary_search(&nid) {
-                    Ok(idx) => 22 + idx,
+                    Ok(idx) => crate::constants::OUTPUT_START + idx,
                     Err(_) => 999999,
                 }
-            } else if nid >= 22 && nid <= 26 {
-                22 + hidden_ids.len() + (nid - 22)
+            } else if (crate::constants::OUTPUT_START
+                ..(crate::constants::OUTPUT_START + crate::constants::OUTPUT_COUNT))
+                .contains(&nid)
+            {
+                crate::constants::OUTPUT_START
+                    + hidden_ids.len()
+                    + (nid - crate::constants::OUTPUT_START)
             } else {
                 999999
             }
@@ -80,31 +88,29 @@ impl RustWannNetwork {
             }
         }
 
-        // Kahn's algorithm with priority tiebreaker
-        let mut queue: Vec<usize> = node_ids
+        // Kahn's algorithm with priority tiebreaker (BinaryHeap for O(log n) ops)
+        use std::cmp::Reverse;
+        let mut heap: BinaryHeap<Reverse<(usize, usize)>> = node_ids
             .iter()
             .cloned()
             .filter(|nid| in_degree[nid] == 0)
+            .map(|nid| Reverse((get_priority(nid), nid)))
             .collect();
-        queue.sort_by_key(|&n| get_priority(n));
 
         let mut topological_order: Vec<usize> = Vec::with_capacity(node_ids.len());
         let mut visited: HashSet<usize> = HashSet::new();
 
-        while !queue.is_empty() {
-            let nid = queue.remove(0);
-            if visited.contains(&nid) {
+        while let Some(Reverse((_, nid))) = heap.pop() {
+            if !visited.insert(nid) {
                 continue;
             }
-            visited.insert(nid);
             topological_order.push(nid);
             if let Some(neighbors) = adj.get(&nid) {
                 for &neighbor in neighbors {
                     let deg = in_degree.get_mut(&neighbor).unwrap();
                     *deg -= 1;
                     if *deg == 0 {
-                        queue.push(neighbor);
-                        queue.sort_by_key(|&n| get_priority(n));
+                        heap.push(Reverse((get_priority(neighbor), neighbor)));
                     }
                 }
             }
@@ -163,22 +169,27 @@ impl RustWannNetwork {
     /// Zero-allocation forward pass.
     /// Evaluates the network using the provided input belief state and shared weight.
     /// The scratchpad must be pre-allocated to self.num_nodes.
-    /// The output intents will rest in scratchpad[22..27].
-    pub fn forward(&self, inputs: &[f64; 21], weight: f64, scratchpad: &mut [f64]) {
-        // 1. Copy inputs into scratchpad[0..21] and set bias scratchpad[21] = 1.0
-        for i in 0..21 {
+    /// The output intents will rest in scratchpad[22..26].
+    pub fn forward(
+        &self,
+        inputs: &[f64; crate::constants::INPUT_COUNT],
+        weight: f64,
+        scratchpad: &mut [f64],
+    ) {
+        // 1. Copy inputs into scratchpad[0..INPUT_COUNT] and set bias scratchpad[INPUT_COUNT] = 1.0
+        for i in 0..crate::constants::INPUT_COUNT {
             scratchpad[i] = inputs[i].clamp(0.0, 1.0);
         }
-        scratchpad[21] = 1.0;
+        scratchpad[crate::constants::INPUT_COUNT] = 1.0;
 
         // Reset the rest of the nodes (outputs and hiddens)
-        for i in 22..self.num_nodes {
+        for i in crate::constants::OUTPUT_START..self.num_nodes {
             scratchpad[i] = 0.0;
         }
 
         // 2. Evaluate all nodes in topological order
         for &nid in &self.topological_order {
-            if nid < 22 {
+            if nid <= crate::constants::BIAS_ID {
                 continue; // input or bias, already set
             }
 
@@ -190,45 +201,61 @@ impl RustWannNetwork {
             }
 
             let agg_fn = self.node_aggregations[nid];
-            let mut sum_val = 0.0;
-            let mut min_val = f64::INFINITY;
-            let mut max_val = f64::NEG_INFINITY;
 
-            for idx in start..end {
-                let src = self.incoming_srcs[idx];
-                let sign = self.incoming_signs[idx];
-                let src_val = scratchpad[src];
-
-                // Apply sign inversion
-                let val = if sign == -1 {
-                    1.0 - src_val.clamp(0.0, 1.0)
-                } else {
-                    src_val
-                };
-
-                let signal = val * weight;
-                match agg_fn {
-                    0 => {
-                        sum_val += signal;
-                    } // SUM
-                    1 => {
+            // Branch on aggregation type OUTSIDE the inner edge loop
+            // to avoid per-connection branch misprediction penalties.
+            let agg_val = match agg_fn {
+                0 => {
+                    // SUM
+                    let mut sum_val = 0.0;
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let val = if sign == -1 {
+                            1.0 - scratchpad[src]
+                        } else {
+                            scratchpad[src]
+                        };
+                        sum_val += val * weight;
+                    }
+                    sum_val
+                }
+                1 => {
+                    // MIN (AND)
+                    let mut min_val = f64::INFINITY;
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let val = if sign == -1 {
+                            1.0 - scratchpad[src]
+                        } else {
+                            scratchpad[src]
+                        };
+                        let signal = val * weight;
                         if signal < min_val {
                             min_val = signal;
                         }
-                    } // MIN
-                    2 => {
+                    }
+                    min_val
+                }
+                2 => {
+                    // MAX (OR)
+                    let mut max_val = f64::NEG_INFINITY;
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let val = if sign == -1 {
+                            1.0 - scratchpad[src]
+                        } else {
+                            scratchpad[src]
+                        };
+                        let signal = val * weight;
                         if signal > max_val {
                             max_val = signal;
                         }
-                    } // MAX
-                    _ => {}
+                    }
+                    max_val
                 }
-            }
-
-            let agg_val = match agg_fn {
-                0 => sum_val,
-                1 => min_val,
-                2 => max_val,
                 _ => 0.0,
             };
 

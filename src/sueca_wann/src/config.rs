@@ -45,15 +45,41 @@ pub struct MutationConfig {
     pub p_crossover: f64,
 }
 
+fn default_phase0_threshold() -> f64 {
+    -0.10
+}
+fn default_phase1_threshold() -> f64 {
+    -0.05
+}
+fn default_phase2_hof_min() -> usize {
+    3
+}
+fn default_min_gens_per_phase() -> usize {
+    20
+}
+fn default_adaptive_window() -> usize {
+    10
+}
+fn default_phase0_dataset() -> String {
+    "expert_states_w50_d2.npz".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurriculumConfig {
     pub phase0_gens: usize,
     pub bulking_gens: usize,
+    #[serde(default = "default_phase0_threshold")]
     pub phase0_threshold: f64,
+    #[serde(default = "default_phase1_threshold")]
     pub phase1_threshold: f64,
+    #[serde(default = "default_phase2_hof_min")]
     pub phase2_hof_min: usize,
+    #[serde(default = "default_min_gens_per_phase")]
     pub min_gens_per_phase: usize,
+    #[serde(default = "default_adaptive_window")]
     pub adaptive_window: usize,
+    #[serde(default = "default_phase0_dataset")]
+    pub phase0_dataset: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -53,10 +53,12 @@ impl HallOfFame {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub fn best(&self) -> Option<&HoFEntry> {
         self.entries.first()
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -93,6 +95,7 @@ impl JsonHallOfFame {
         }
     }
 
+    #[allow(dead_code)]
     pub fn to_hof(&self) -> HallOfFame {
         let entries = self
             .entries

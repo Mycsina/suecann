@@ -73,25 +73,29 @@ impl PyWannNetwork {
     }
 
     fn forward(&self, inputs: Vec<f64>, shared_weight: f64) -> PyResult<Vec<f64>> {
-        if inputs.len() != 21 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Inputs length must be 21",
-            ));
+        if inputs.len() != crate::constants::INPUT_COUNT {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Inputs length must be {}",
+                crate::constants::INPUT_COUNT
+            )));
         }
         let mut scratchpad = vec![0.0f64; self.inner.num_nodes];
-        let mut inputs_arr = [0.0f64; 21];
+        let mut inputs_arr = [0.0f64; crate::constants::INPUT_COUNT];
         inputs_arr.copy_from_slice(&inputs);
         self.inner
             .forward(&inputs_arr, shared_weight, &mut scratchpad);
 
-        if self.inner.num_nodes < 27 {
+        if self.inner.num_nodes < crate::constants::FIRST_HIDDEN_ID {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Network num_nodes is {}, must be at least 27 to have outputs",
-                self.inner.num_nodes
+                "Network num_nodes is {}, must be at least {} to have outputs",
+                self.inner.num_nodes,
+                crate::constants::FIRST_HIDDEN_ID
             )));
         }
 
-        Ok(scratchpad[22..27].to_vec())
+        let out_start = crate::constants::OUTPUT_START;
+        let out_end = out_start + crate::constants::OUTPUT_COUNT;
+        Ok(scratchpad[out_start..out_end].to_vec())
     }
 
     fn forward_weight_sweep(
@@ -99,28 +103,33 @@ impl PyWannNetwork {
         inputs: Vec<f64>,
         weights: Vec<f64>,
     ) -> PyResult<(Vec<Vec<f64>>, Vec<f64>)> {
-        if inputs.len() != 21 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Inputs length must be 21",
-            ));
-        }
-        if self.inner.num_nodes < 27 {
+        if inputs.len() != crate::constants::INPUT_COUNT {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Network num_nodes is {}, must be at least 27 to have outputs",
-                self.inner.num_nodes
+                "Inputs length must be {}",
+                crate::constants::INPUT_COUNT
+            )));
+        }
+        if self.inner.num_nodes < crate::constants::FIRST_HIDDEN_ID {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Network num_nodes is {}, must be at least {} to have outputs",
+                self.inner.num_nodes,
+                crate::constants::FIRST_HIDDEN_ID
             )));
         }
         let mut scratchpad = vec![0.0f64; self.inner.num_nodes];
-        let mut inputs_arr = [0.0f64; 21];
+        let mut inputs_arr = [0.0f64; crate::constants::INPUT_COUNT];
         inputs_arr.copy_from_slice(&inputs);
 
         let mut all_outputs = Vec::with_capacity(weights.len());
-        let mut mean_output = vec![0.0f64; 5];
+        let mut mean_output = vec![0.0f64; crate::constants::OUTPUT_COUNT];
+
+        let out_start = crate::constants::OUTPUT_START;
+        let out_end = out_start + crate::constants::OUTPUT_COUNT;
 
         for &w in &weights {
             self.inner.forward(&inputs_arr, w, &mut scratchpad);
-            let out = scratchpad[22..27].to_vec();
-            for i in 0..5 {
+            let out = scratchpad[out_start..out_end].to_vec();
+            for i in 0..crate::constants::OUTPUT_COUNT {
                 mean_output[i] += out[i];
             }
             all_outputs.push(out);
@@ -128,7 +137,7 @@ impl PyWannNetwork {
 
         if !weights.is_empty() {
             let n = weights.len() as f64;
-            for i in 0..5 {
+            for i in 0..crate::constants::OUTPUT_COUNT {
                 mean_output[i] /= n;
             }
         }
@@ -350,7 +359,7 @@ pub fn evaluate_wann_population(
     opp2_bot_type: i32,
     hof_genomes: Vec<PyWannNetwork>,
     base_seed: u64,
-) -> PyResult<(Vec<f64>, Vec<usize>)> {
+) -> PyResult<Vec<f64>> {
     // 1. Extract Python structures to pure Rust types while holding the GIL.
     let rust_genomes: Vec<RustWannNetwork> = genomes.iter().map(|g| g.inner.clone()).collect();
     let rust_hof: Vec<RustWannNetwork> = hof_genomes.iter().map(|g| g.inner.clone()).collect();
@@ -362,7 +371,7 @@ pub fn evaluate_wann_population(
         .map(|g| g.num_nodes)
         .chain(rust_hof.iter().map(|g| g.num_nodes))
         .max()
-        .unwrap_or(27);
+        .unwrap_or(crate::constants::FIRST_HIDDEN_ID);
 
     let results = py.allow_threads(|| {
         rust_genomes
@@ -370,7 +379,7 @@ pub fn evaluate_wann_population(
             .enumerate()
             .map(|(i, candidate)| {
                 let mut scratchpad = vec![0.0f64; max_nodes];
-                evaluator::evaluate_genome_delta(
+                let (delta, _behavior) = evaluator::evaluate_genome_delta(
                     &candidate,
                     baseline_bot_type,
                     partner_bot_type,
@@ -381,21 +390,13 @@ pub fn evaluate_wann_population(
                     &rust_deals,
                     base_seed + (i as u64),
                     &mut scratchpad,
-                )
+                );
+                delta
             })
-            .collect::<Vec<(f64, usize)>>()
+            .collect::<Vec<f64>>()
     });
 
-    // 3. Unzip results to return to Python
-    let mut deltas = Vec::with_capacity(results.len());
-    let mut illegals = Vec::with_capacity(results.len());
-
-    for (d, i) in results {
-        deltas.push(d);
-        illegals.push(i);
-    }
-
-    Ok((deltas, illegals))
+    Ok(results)
 }
 
 #[pyfunction]
@@ -414,7 +415,11 @@ pub fn evaluate_wann_accuracy(
 
     let num_states = intents_array.len();
 
-    let max_nodes = rust_genomes.iter().map(|g| g.num_nodes).max().unwrap_or(27);
+    let max_nodes = rust_genomes
+        .iter()
+        .map(|g| g.num_nodes)
+        .max()
+        .unwrap_or(crate::constants::FIRST_HIDDEN_ID);
 
     let accuracies = py.allow_threads(|| {
         rust_genomes
@@ -424,28 +429,33 @@ pub fn evaluate_wann_accuracy(
                 let mut correct = 0;
 
                 for idx in 0..num_states {
-                    let mut inputs = [0.0f64; 21];
-                    for i in 0..21 {
+                    let mut inputs = [0.0f64; crate::constants::INPUT_COUNT];
+                    for i in 0..crate::constants::INPUT_COUNT {
                         inputs[i] = states_array[[idx, i]];
                     }
                     let target_intent = intents_array[idx] as usize;
                     let mask = legal_masks_array[idx];
 
-                    let mut total_outputs = [0.0f64; 5];
+                    let mut total_outputs = [0.0f64; crate::constants::OUTPUT_COUNT];
                     for &w in &sweep_weights {
                         candidate.forward(&inputs, w, &mut scratchpad);
-                        for i in 0..5 {
-                            total_outputs[i] += scratchpad[22 + i];
+                        for i in 0..crate::constants::OUTPUT_COUNT {
+                            total_outputs[i] += scratchpad[crate::constants::OUTPUT_START + i];
                         }
                     }
 
-                    // Apply legal mask and find argmax
+                    // Apply legal mask and find argmax with baseline offset for EQUITY_BUILDER (index 3)
                     let mut best_intent = 0;
                     let mut max_val = f64::NEG_INFINITY;
-                    for i in 0..5 {
+                    for i in 0..crate::constants::OUTPUT_COUNT {
                         let is_legal = (mask & (1 << i)) != 0;
-                        if is_legal && total_outputs[i] > max_val {
-                            max_val = total_outputs[i];
+                        let val = if i == 3 {
+                            total_outputs[i] - 0.25 * (sweep_weights.len() as f64)
+                        } else {
+                            total_outputs[i]
+                        };
+                        if is_legal && val > max_val {
+                            max_val = val;
                             best_intent = i;
                         }
                     }
@@ -464,18 +474,15 @@ pub fn evaluate_wann_accuracy(
 }
 
 #[pyfunction]
-pub fn pareto_rank_rust(fitnesses: Vec<f64>, complexities: Vec<usize>) -> PyResult<Vec<f64>> {
+pub fn pareto_rank_rust(fitnesses: Vec<f64>, complexities: Vec<f64>) -> PyResult<Vec<f64>> {
     let n = fitnesses.len();
     if n == 0 {
         return Ok(Vec::new());
     }
 
     // Convert complexity to simplicity (lower complexity = higher simplicity)
-    let max_complexity = complexities.iter().max().copied().unwrap_or(1);
-    let simplicities: Vec<f64> = complexities
-        .iter()
-        .map(|&c| (max_complexity - c) as f64)
-        .collect();
+    let max_complexity = complexities.iter().fold(0.0f64, |a, &b| a.max(b));
+    let simplicities: Vec<f64> = complexities.iter().map(|&c| max_complexity - c).collect();
 
     // Compute domination count and dominated-by sets
     let mut domination_count = vec![0; n];

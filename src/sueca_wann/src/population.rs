@@ -3,77 +3,81 @@ use crate::genome::{ConnGene, Genome, BIAS_ID, INPUT_START, OUTPUT_START};
 use crate::mutations::{apply_mutations, mutate_add_connection, InnovationRegistry};
 use crate::species::{speciate, Species};
 use rand::Rng;
+use rand::SeedableRng;
+use rand_pcg::Pcg64;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 // Seed strategies matching Python SEED_STRATEGIES
 // Each strategy is a tuple (name, list of (src, dst, sign))
 const SEED_STRATEGIES: &[(&str, &[(usize, usize, i8)])] = &[
-    ("aggressive", &[(BIAS_ID, OUTPUT_START + 2, 1)]),
-    ("take_cheaply", &[(BIAS_ID, OUTPUT_START + 1, 1)]),
+    ("aggressive", &[(BIAS_ID, OUTPUT_START + 0, 1)]),
+    ("take_cheaply", &[(BIAS_ID, OUTPUT_START + 2, 1)]),
     (
         "partner_aware",
         &[
-            (INPUT_START + 7, OUTPUT_START + 0, 1),
-            (INPUT_START + 7, OUTPUT_START + 2, -1),
+            (INPUT_START + 7, OUTPUT_START + 1, 1),
+            (INPUT_START + 7, OUTPUT_START + 0, -1),
         ],
     ),
     (
         "trump_cutter",
         &[
-            (INPUT_START + 0, OUTPUT_START + 4, -1),
-            (INPUT_START + 1, OUTPUT_START + 4, 1),
+            (INPUT_START, OUTPUT_START + 2, -1),
+            (INPUT_START + 1, OUTPUT_START + 2, 1),
         ],
     ),
     ("feeder", &[(INPUT_START + 7, OUTPUT_START + 3, 1)]),
-    ("lead_attacker", &[(INPUT_START + 5, OUTPUT_START + 2, 1)]),
-    ("last_taker", &[(INPUT_START + 6, OUTPUT_START + 1, 1)]),
+    ("lead_attacker", &[(INPUT_START + 5, OUTPUT_START + 0, 1)]),
+    ("last_taker", &[(INPUT_START + 6, OUTPUT_START + 2, 1)]),
     (
         "combined_basic",
         &[
-            (INPUT_START + 7, OUTPUT_START + 0, 1),
-            (INPUT_START + 7, OUTPUT_START + 2, -1),
-            (INPUT_START + 5, OUTPUT_START + 2, 1),
+            (INPUT_START + 7, OUTPUT_START + 1, 1),
+            (INPUT_START + 7, OUTPUT_START + 0, -1),
+            (INPUT_START + 5, OUTPUT_START + 0, 1),
         ],
     ),
     (
         "late_trump_aggressor",
         &[
-            (INPUT_START + 19, OUTPUT_START + 4, -1),
-            (INPUT_START + 1, OUTPUT_START + 4, 1),
             (INPUT_START + 19, OUTPUT_START + 2, -1),
+            (INPUT_START + 1, OUTPUT_START + 2, 1),
+            (INPUT_START + 19, OUTPUT_START + 0, -1),
         ],
     ),
     (
         "score_aware",
         &[
-            (INPUT_START + 20, OUTPUT_START + 0, 1),
-            (INPUT_START + 20, OUTPUT_START + 2, -1),
+            (INPUT_START + 20, OUTPUT_START + 1, 1),
+            (INPUT_START + 20, OUTPUT_START + 0, -1),
         ],
     ),
     (
         "trick_point_taker",
         &[
-            (INPUT_START + 8, OUTPUT_START + 1, 1),
-            (INPUT_START + 7, OUTPUT_START + 1, -1),
+            (INPUT_START + 8, OUTPUT_START + 2, 1),
+            (INPUT_START + 7, OUTPUT_START + 2, -1),
         ],
     ),
     (
         "void_exploiter",
         &[
-            (INPUT_START + 12, OUTPUT_START + 2, 1),
-            (INPUT_START + 5, OUTPUT_START + 2, 1),
+            (INPUT_START + 12, OUTPUT_START + 0, 1),
+            (INPUT_START + 5, OUTPUT_START + 0, 1),
         ],
     ),
     (
         "full_strategic",
         &[
-            (INPUT_START + 7, OUTPUT_START + 0, 1),
-            (INPUT_START + 7, OUTPUT_START + 2, -1),
-            (INPUT_START + 5, OUTPUT_START + 2, 1),
-            (INPUT_START + 6, OUTPUT_START + 1, 1),
-            (INPUT_START + 20, OUTPUT_START + 2, -1),
-            (INPUT_START + 1, OUTPUT_START + 4, 1),
-            (INPUT_START + 0, OUTPUT_START + 4, -1),
+            (INPUT_START + 7, OUTPUT_START + 1, 1),
+            (INPUT_START + 7, OUTPUT_START + 0, -1),
+            (INPUT_START + 5, OUTPUT_START + 0, 1),
+            (INPUT_START + 6, OUTPUT_START + 2, 1),
+            (INPUT_START + 20, OUTPUT_START + 0, -1),
+            (INPUT_START + 1, OUTPUT_START + 2, 1),
+            (INPUT_START, OUTPUT_START + 2, -1),
         ],
     ),
 ];
@@ -135,39 +139,45 @@ pub fn rank_values(values: &[f64]) -> Vec<f64> {
     ranks
 }
 
-pub fn pareto_rank(fitnesses: &[f64], complexities: &[usize]) -> Vec<f64> {
+pub fn pareto_rank(fitnesses: &[f64], complexities: &[f64]) -> Vec<f64> {
     let n = fitnesses.len();
     if n == 0 {
         return Vec::new();
     }
 
-    let max_complexity = complexities.iter().max().copied().unwrap_or(1);
-    let simplicities: Vec<f64> = complexities
-        .iter()
-        .map(|&c| (max_complexity - c) as f64)
+    let max_complexity = complexities.iter().fold(0.0f64, |a, &b| a.max(b));
+    let simplicities: Vec<f64> = complexities.iter().map(|&c| max_complexity - c).collect();
+
+    // Parallel domination detection — each i computes its own results independently
+    let results: Vec<(usize, Vec<usize>, usize)> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let f_i = fitnesses[i];
+            let s_i = simplicities[i];
+            let mut dominated = Vec::new();
+            let mut dom_count = 0;
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                let f_j = fitnesses[j];
+                let s_j = simplicities[j];
+                if f_i >= f_j && s_i >= s_j && (f_i > f_j || s_i > s_j) {
+                    dominated.push(j);
+                }
+                if f_j >= f_i && s_j >= s_i && (f_j > f_i || s_j > s_i) {
+                    dom_count += 1;
+                }
+            }
+            (i, dominated, dom_count)
+        })
         .collect();
 
     let mut domination_count = vec![0; n];
     let mut dominated_by = vec![Vec::new(); n];
-
-    for i in 0..n {
-        let f_i = fitnesses[i];
-        let s_i = simplicities[i];
-        for j in (i + 1)..n {
-            let f_j = fitnesses[j];
-            let s_j = simplicities[j];
-
-            let i_dom_j = f_i >= f_j && s_i >= s_j && (f_i > f_j || s_i > s_j);
-            let j_dom_i = f_j >= f_i && s_j >= s_i && (f_j > f_i || s_j > s_i);
-
-            if i_dom_j {
-                dominated_by[i].push(j);
-                domination_count[j] += 1;
-            } else if j_dom_i {
-                dominated_by[j].push(i);
-                domination_count[i] += 1;
-            }
-        }
+    for (i, dominated, count) in results {
+        domination_count[i] = count;
+        dominated_by[i] = dominated;
     }
 
     let mut levels = vec![0; n];
@@ -257,72 +267,10 @@ pub fn crossover<R: Rng>(
     fitness_b: f64,
     rng: &mut R,
 ) -> Genome {
-    let (fitter_parent, other_parent) = if fitness_b > fitness_a {
-        (parent_b, parent_a)
-    } else {
-        (parent_a, parent_b)
-    };
-
-    let mut child_node_genes = Vec::new();
-    let mut child_conn_genes = Vec::new();
-
-    let ids_a = parent_a.node_ids();
-    let ids_b = parent_b.node_ids();
-    let all_node_ids: HashSet<usize> = ids_a.union(&ids_b).copied().collect();
-
-    for nid in all_node_ids {
-        let ng_a = parent_a.node_genes.get(&nid);
-        let ng_b = parent_b.node_genes.get(&nid);
-        let chosen = match (ng_a, ng_b) {
-            (Some(a), Some(b)) => {
-                if rng.gen_bool(0.5) {
-                    a.clone()
-                } else {
-                    b.clone()
-                }
-            }
-            (Some(a), None) => a.clone(),
-            (None, Some(b)) => b.clone(),
-            (None, None) => unreachable!(),
-        };
-        child_node_genes.push(chosen);
-    }
-
-    let innovs_a: HashSet<usize> = parent_a.conn_genes.keys().copied().collect();
-    let innovs_b: HashSet<usize> = parent_b.conn_genes.keys().copied().collect();
-    let shared: HashSet<usize> = innovs_a.intersection(&innovs_b).copied().collect();
-
-    for i in shared {
-        let chosen = if rng.gen_bool(0.5) {
-            parent_a.conn_genes[&i].clone()
-        } else {
-            parent_b.conn_genes[&i].clone()
-        };
-        child_conn_genes.push(chosen);
-    }
-
-    let fitter_innovs = if fitness_b > fitness_a {
-        &innovs_b
-    } else {
-        &innovs_a
-    };
-    let other_innovs = if fitness_b > fitness_a {
-        &innovs_a
-    } else {
-        &innovs_b
-    };
-
-    for &i in fitter_innovs.difference(other_innovs) {
-        child_conn_genes.push(fitter_parent.conn_genes[&i].clone());
-    }
-
-    Genome::new(
-        Some(child_node_genes),
-        Some(child_conn_genes),
-        fitter_parent
-            .next_innovation
-            .max(other_parent.next_innovation),
-    )
+    let self_is_fitter = fitness_a > fitness_b;
+    let fitter = if self_is_fitter { parent_a } else { parent_b };
+    let lesser = if self_is_fitter { parent_b } else { parent_a };
+    fitter.crossover_with(lesser, true, rng)
 }
 
 pub struct Population {
@@ -334,10 +282,11 @@ pub struct Population {
     pub next_species_id: usize,
     pub global_best_fitness: f64,
     pub global_best_genome: Option<Genome>,
+    pub generations_since_improvement: usize,
 }
 
 impl Population {
-    pub fn new<R: Rng>(config: Config, rng: &mut R, registry: &mut InnovationRegistry) -> Self {
+    pub fn new<R: Rng>(config: Config, rng: &mut R, registry: &Mutex<InnovationRegistry>) -> Self {
         let mut genomes = Vec::new();
         let mut fitnesses = Vec::new();
 
@@ -413,6 +362,7 @@ impl Population {
             next_species_id: 0,
             global_best_fitness: f64::NEG_INFINITY,
             global_best_genome: None,
+            generations_since_improvement: 0,
         }
     }
 
@@ -433,6 +383,9 @@ impl Population {
         if max_fit > self.global_best_fitness {
             self.global_best_fitness = max_fit;
             self.global_best_genome = Some(self.genomes[best_idx].copy());
+            self.generations_since_improvement = 0;
+        } else {
+            self.generations_since_improvement += 1;
         }
     }
 
@@ -441,7 +394,7 @@ impl Population {
         current_phase: usize,
         bulking_gens: usize,
         rng: &mut R,
-        registry: &mut InnovationRegistry,
+        registry: &Mutex<InnovationRegistry>,
     ) {
         // 1. Run Speciation
         self.next_species_id = speciate(
@@ -455,22 +408,23 @@ impl Population {
             self.config.species.c_mismatch,
         );
 
-        // 2. Update stagnation
-        for sp in self.species_list.iter_mut() {
+        // 2. Update stagnation (parallel — each species independent)
+        let fitnesses = &self.fitnesses;
+        self.species_list.par_iter_mut().for_each(|sp| {
             if sp.members.is_empty() {
                 sp.increment_stagnation();
-                continue;
+                return;
             }
             let best_f = sp
                 .members
                 .iter()
-                .map(|&idx| self.fitnesses[idx])
+                .map(|&idx| fitnesses[idx])
                 .fold(f64::NEG_INFINITY, f64::max);
             let improved = sp.update_best(best_f);
             if !improved {
                 sp.increment_stagnation();
             }
-        }
+        });
 
         // Remove stagnated species unless it is the last active one
         let active_count = self
@@ -496,7 +450,7 @@ impl Population {
         current_phase: usize,
         bulking_gens: usize,
         rng: &mut R,
-        registry: &mut InnovationRegistry,
+        registry: &Mutex<InnovationRegistry>,
     ) -> Vec<Genome> {
         let mut active_species: Vec<&Species> = self
             .species_list
@@ -508,18 +462,20 @@ impl Population {
             return self.genomes.iter().map(|g| g.copy()).collect();
         }
 
-        // Sort species by best fitness member descending
+        // Precompute best fitness per species to avoid re-scanning during sort
+        let mut best_by_id: std::collections::HashMap<usize, f64> =
+            std::collections::HashMap::new();
+        for sp in active_species.iter() {
+            let best = sp
+                .members
+                .iter()
+                .map(|&idx| self.fitnesses[idx])
+                .fold(f64::NEG_INFINITY, f64::max);
+            best_by_id.insert(sp.id, best);
+        }
         active_species.sort_by(|a, b| {
-            let best_a = a
-                .members
-                .iter()
-                .map(|&idx| self.fitnesses[idx])
-                .fold(f64::NEG_INFINITY, f64::max);
-            let best_b = b
-                .members
-                .iter()
-                .map(|&idx| self.fitnesses[idx])
-                .fold(f64::NEG_INFINITY, f64::max);
+            let best_a = best_by_id.get(&a.id).copied().unwrap_or(f64::NEG_INFINITY);
+            let best_b = best_by_id.get(&b.id).copied().unwrap_or(f64::NEG_INFINITY);
             best_b.partial_cmp(&best_a).unwrap()
         });
 
@@ -528,7 +484,11 @@ impl Population {
         let selection_fitness = if is_bulking {
             rank_values(&self.fitnesses)
         } else {
-            let complexities: Vec<usize> = self.genomes.iter().map(|g| g.num_enabled()).collect();
+            let complexities: Vec<f64> = self
+                .genomes
+                .par_iter()
+                .map(|g| g.calculate_complexity())
+                .collect();
             if rng.gen_bool(self.config.population.pareto_complexity_prob) {
                 pareto_rank(&self.fitnesses, &complexities)
             } else {
@@ -603,7 +563,7 @@ impl Population {
             let ranked_indices: Vec<usize> = ranked.iter().map(|x| x.0).collect();
             let ranked_ranks: Vec<f64> = ranked.iter().map(|x| x.1).collect();
 
-            // Elitism
+            // Elitism (small count, keep serial)
             let elite_count = self
                 .config
                 .population
@@ -614,39 +574,65 @@ impl Population {
                 new_genomes.push(self.genomes[ranked_indices[idx]].copy());
             }
 
-            // Offspring
+            // Offspring — parallelized
             let breeding_count = count - elite_count;
-            for _ in 0..breeding_count {
-                let mut child = if rng.gen_bool(self.config.mutation.p_crossover)
-                    && ranked_indices.len() >= 2
-                {
-                    let p1 = tournament_select(&ranked_indices, &ranked_ranks, 3, rng);
-                    let p2 = tournament_select(&ranked_indices, &ranked_ranks, 3, rng);
-                    crossover(
-                        &self.genomes[p1],
-                        &self.genomes[p2],
-                        self.fitnesses[p1],
-                        self.fitnesses[p2],
-                        rng,
-                    )
-                } else {
-                    let parent = tournament_select(&ranked_indices, &ranked_ranks, 3, rng);
-                    self.genomes[parent].copy()
-                };
-
-                apply_mutations(
-                    &mut child,
-                    registry,
-                    rng,
-                    self.config.mutation.p_add_node,
-                    self.config.mutation.p_add_conn,
-                    self.config.mutation.p_toggle_conn,
-                    self.config.mutation.p_flip_sign,
-                    self.config.mutation.p_change_act,
-                    self.config.mutation.p_change_agg,
-                );
-                new_genomes.push(child);
+            if breeding_count == 0 {
+                continue;
             }
+
+            let genomes = &self.genomes;
+            let fitnesses = &self.fitnesses;
+            let p_crossover = self.config.mutation.p_crossover;
+            let p_add_node = self.config.mutation.p_add_node;
+            let p_add_conn = self.config.mutation.p_add_conn;
+            let p_toggle_conn = self.config.mutation.p_toggle_conn;
+            let p_flip_sign = self.config.mutation.p_flip_sign;
+            let p_change_act = self.config.mutation.p_change_act;
+            let p_change_agg = self.config.mutation.p_change_agg;
+            // Pre-generate seeds to avoid sharing rng across threads
+            let seeds: Vec<u64> = (0..breeding_count).map(|_| rng.gen::<u64>()).collect();
+
+            let offspring: Vec<Genome> = seeds
+                .into_par_iter()
+                .map_init(
+                    || Pcg64::seed_from_u64(42), // placeholder, each seed overrides
+                    |local_rng, seed| {
+                        *local_rng = Pcg64::seed_from_u64(seed);
+                        let mut child =
+                            if local_rng.gen_bool(p_crossover) && ranked_indices.len() >= 2 {
+                                let p1 =
+                                    tournament_select(&ranked_indices, &ranked_ranks, 3, local_rng);
+                                let p2 =
+                                    tournament_select(&ranked_indices, &ranked_ranks, 3, local_rng);
+                                crossover(
+                                    &genomes[p1],
+                                    &genomes[p2],
+                                    fitnesses[p1],
+                                    fitnesses[p2],
+                                    local_rng,
+                                )
+                            } else {
+                                let parent =
+                                    tournament_select(&ranked_indices, &ranked_ranks, 3, local_rng);
+                                genomes[parent].copy()
+                            };
+
+                        apply_mutations(
+                            &mut child,
+                            registry,
+                            local_rng,
+                            p_add_node,
+                            p_add_conn,
+                            p_toggle_conn,
+                            p_flip_sign,
+                            p_change_act,
+                            p_change_agg,
+                        );
+                        child
+                    },
+                )
+                .collect();
+            new_genomes.extend(offspring);
         }
 
         // Adjust to exact population size
@@ -658,12 +644,89 @@ impl Population {
                 let best_avail = new_genomes
                     .first()
                     .map(|g| g.copy())
-                    .unwrap_or_else(|| Genome::initial());
+                    .unwrap_or_else(Genome::initial);
                 new_genomes.push(best_avail);
             }
         }
 
         new_genomes
+    }
+
+    pub fn reseed_from_champion(
+        &mut self,
+        global_best_genome: &Genome,
+        fraction: f64,
+        registry: &Mutex<InnovationRegistry>,
+        rng: &mut rand_pcg::Pcg64,
+    ) {
+        let c1 = self.config.species.c_excess;
+        let c2 = self.config.species.c_disjoint;
+        let c3 = self.config.species.c_mismatch;
+
+        // Find the species representing the champion (closest representative)
+        let mut best_sp_idx = None;
+        let mut min_dist = f64::INFINITY;
+
+        for (i, sp) in self.species_list.iter().enumerate() {
+            if sp.members.is_empty() {
+                continue;
+            }
+            let dist = crate::species::compatibility_distance(
+                global_best_genome,
+                &sp.representative,
+                c1,
+                c2,
+                c3,
+            );
+            if dist < min_dist {
+                min_dist = dist;
+                best_sp_idx = Some(i);
+            }
+        }
+
+        let sp_idx = match best_sp_idx {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        let mut members = self.species_list[sp_idx].members.clone();
+        if members.is_empty() {
+            return;
+        }
+
+        // Sort by fitness ascending (weakest first)
+        let fitnesses = &self.fitnesses;
+        members.sort_by(|&a, &b| fitnesses[a].partial_cmp(&fitnesses[b]).unwrap());
+
+        let count = (((members.len() as f64) * fraction) as usize).max(1);
+
+        for i in 0..count.min(members.len()) {
+            let idx = members[i];
+            let mut clone = global_best_genome.copy();
+
+            // Slightly mutate the clone
+            let p_add_node = 0.05;
+            let p_add_conn = 0.10;
+            let p_toggle_conn = 0.05;
+            let p_flip_sign = 0.05;
+            let p_change_act = 0.05;
+            let p_change_agg = 0.05;
+
+            crate::mutations::apply_mutations(
+                &mut clone,
+                registry,
+                rng,
+                p_add_node,
+                p_add_conn,
+                p_toggle_conn,
+                p_flip_sign,
+                p_change_act,
+                p_change_agg,
+            );
+
+            self.genomes[idx] = clone;
+            self.fitnesses[idx] = 0.0;
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::genome::Genome;
 use crate::hall_of_fame::HallOfFame;
+use crate::map_elites::MapElitesArchive;
 use crate::species::Species;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -17,6 +18,10 @@ pub struct TrainingState {
     pub hof: HallOfFame,
     pub next_innovation: usize,
     pub current_phase: usize,
+    #[serde(default)]
+    pub generations_since_improvement: usize,
+    #[serde(default)]
+    pub map_elites: MapElitesArchive,
 }
 
 impl TrainingState {

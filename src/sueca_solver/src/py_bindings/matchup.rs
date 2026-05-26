@@ -35,7 +35,9 @@ impl PyDeal {
     bot_b_type,
     bot_b_network,
     sweep_weights,
-    base_seed
+    base_seed,
+    pimc_worlds = 80,
+    pimc_depth = 4
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_matchup_rust(
@@ -47,6 +49,8 @@ pub fn run_matchup_rust(
     bot_b_network: Option<PyWannNetwork>,
     sweep_weights: Vec<f64>,
     base_seed: u64,
+    pimc_worlds: usize,
+    pimc_depth: u8,
 ) -> PyResult<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
     let rust_deals: Vec<evaluator::EvaluatorDeal> = deals.iter().map(|d| d.to_rust()).collect();
     let opt_network_a = bot_a_network.map(|n| n.inner);
@@ -59,8 +63,8 @@ pub fn run_matchup_rust(
     .iter()
     .max()
     .copied()
-    .unwrap_or(27)
-    .max(27);
+    .unwrap_or(crate::constants::FIRST_HIDDEN_ID)
+    .max(crate::constants::FIRST_HIDDEN_ID);
 
     let results = py.allow_threads(|| {
         rust_deals
@@ -70,8 +74,8 @@ pub fn run_matchup_rust(
 
                 let bot_a = match bot_a_type {
                     -1 => evaluator::SimulatorBot::Pimc {
-                        n_worlds: 10,
-                        search_depth: 1,
+                        n_worlds: pimc_worlds,
+                        search_depth: pimc_depth,
                     },
                     0 => evaluator::SimulatorBot::Random,
                     1 => evaluator::SimulatorBot::Heuristic,
@@ -89,8 +93,8 @@ pub fn run_matchup_rust(
 
                 let bot_b = match bot_b_type {
                     -1 => evaluator::SimulatorBot::Pimc {
-                        n_worlds: 10,
-                        search_depth: 1,
+                        n_worlds: pimc_worlds,
+                        search_depth: pimc_depth,
                     },
                     0 => evaluator::SimulatorBot::Random,
                     1 => evaluator::SimulatorBot::Heuristic,
@@ -108,6 +112,7 @@ pub fn run_matchup_rust(
 
                 let bots1 = [bot_a.clone(), bot_b.clone(), bot_a.clone(), bot_b.clone()];
                 let seed1 = base_seed + deal.seed + 1000;
+                let mut behavior1 = evaluator::WannBehavior::default();
                 let res1 = evaluator::play_game_sim(
                     deal.hands,
                     deal.trump,
@@ -115,10 +120,12 @@ pub fn run_matchup_rust(
                     &bots1,
                     seed1,
                     &mut scratchpad,
+                    &mut behavior1,
                 );
 
                 let bots2 = [bot_b.clone(), bot_a.clone(), bot_b.clone(), bot_a.clone()];
                 let seed2 = base_seed + deal.seed + 2000;
+                let mut behavior2 = evaluator::WannBehavior::default();
                 let res2 = evaluator::play_game_sim(
                     deal.hands,
                     deal.trump,
@@ -126,6 +133,7 @@ pub fn run_matchup_rust(
                     &bots2,
                     seed2,
                     &mut scratchpad,
+                    &mut behavior2,
                 );
 
                 (
@@ -167,7 +175,9 @@ pub fn run_matchup_rust(
     bot_b_type,
     bot_b_network,
     sweep_weights,
-    base_seed
+    base_seed,
+    pimc_worlds = 80,
+    pimc_depth = 4
 ))]
 pub fn run_snr_matchup_rust(
     py: Python,
@@ -178,6 +188,8 @@ pub fn run_snr_matchup_rust(
     bot_b_network: Option<PyWannNetwork>,
     sweep_weights: Vec<f64>,
     base_seed: u64,
+    pimc_worlds: usize,
+    pimc_depth: u8,
 ) -> PyResult<(Vec<i16>, Vec<i16>)> {
     let rust_deals: Vec<evaluator::EvaluatorDeal> = deals.iter().map(|d| d.to_rust()).collect();
     let opt_network_a = bot_a_network.map(|n| n.inner);
@@ -190,8 +202,8 @@ pub fn run_snr_matchup_rust(
     .iter()
     .max()
     .copied()
-    .unwrap_or(27)
-    .max(27);
+    .unwrap_or(crate::constants::FIRST_HIDDEN_ID)
+    .max(crate::constants::FIRST_HIDDEN_ID);
 
     let results = py.allow_threads(|| {
         rust_deals
@@ -203,8 +215,8 @@ pub fn run_snr_matchup_rust(
 
                 let bot_a = match bot_a_type {
                     -1 => evaluator::SimulatorBot::Pimc {
-                        n_worlds: 10,
-                        search_depth: 1,
+                        n_worlds: pimc_worlds,
+                        search_depth: pimc_depth,
                     },
                     0 => evaluator::SimulatorBot::Random,
                     1 => evaluator::SimulatorBot::Heuristic,
@@ -222,8 +234,8 @@ pub fn run_snr_matchup_rust(
 
                 let bot_b = match bot_b_type {
                     -1 => evaluator::SimulatorBot::Pimc {
-                        n_worlds: 10,
-                        search_depth: 1,
+                        n_worlds: pimc_worlds,
+                        search_depth: pimc_depth,
                     },
                     0 => evaluator::SimulatorBot::Random,
                     1 => evaluator::SimulatorBot::Heuristic,
@@ -252,6 +264,7 @@ pub fn run_snr_matchup_rust(
                         random_bot.clone(),
                         random_bot.clone(),
                     ];
+                    let mut behavior_a = evaluator::WannBehavior::default();
                     let res_a = evaluator::play_game_sim(
                         rotated_hands,
                         deal.trump,
@@ -259,6 +272,7 @@ pub fn run_snr_matchup_rust(
                         &bots_a,
                         game_seed,
                         &mut scratchpad,
+                        &mut behavior_a,
                     );
 
                     let bots_b = [
@@ -267,6 +281,7 @@ pub fn run_snr_matchup_rust(
                         random_bot.clone(),
                         random_bot.clone(),
                     ];
+                    let mut behavior_b = evaluator::WannBehavior::default();
                     let res_b = evaluator::play_game_sim(
                         rotated_hands,
                         deal.trump,
@@ -274,6 +289,7 @@ pub fn run_snr_matchup_rust(
                         &bots_b,
                         game_seed,
                         &mut scratchpad,
+                        &mut behavior_b,
                     );
 
                     let gp_delta =
@@ -343,12 +359,12 @@ pub fn generate_expert_dataset_rust(
     target_count: usize,
     base_seed: u64,
 ) -> PyResult<(Vec<f64>, Vec<u8>, Vec<u8>)> {
-    let total_needed = target_count * 5;
-    let mut dataset_states = Vec::with_capacity(total_needed * 21);
+    let total_needed = target_count * crate::constants::OUTPUT_COUNT;
+    let mut dataset_states = Vec::with_capacity(total_needed * crate::constants::INPUT_COUNT);
     let mut dataset_intents = Vec::with_capacity(total_needed);
     let mut dataset_legal_masks = Vec::with_capacity(total_needed);
 
-    let mut intent_counts = [0usize; 5];
+    let mut intent_counts = [0usize; crate::constants::OUTPUT_COUNT];
     let mut total_saved = 0;
 
     let mut rng = evaluator::LcgRng::new(base_seed);
@@ -366,14 +382,13 @@ pub fn generate_expert_dataset_rust(
 
                 while game.state.trick_number < target_trick && game.state.trick_number < 10 {
                     let seat = game.state.current_player;
-                    let mut scratchpad = vec![0.0; 27];
-                    let mut illegal_count = 0;
+                    let mut scratchpad = vec![0.0; crate::constants::FIRST_HIDDEN_ID];
                     let card = evaluator::SimulatorBot::Heuristic.select_card(
                         &game,
                         seat,
                         &mut rng,
                         &mut scratchpad,
-                        &mut illegal_count,
+                        None,
                     );
                     game.play_card(card);
                 }
@@ -390,14 +405,13 @@ pub fn generate_expert_dataset_rust(
                         break;
                     }
                     let seat = game.state.current_player;
-                    let mut scratchpad = vec![0.0; 27];
-                    let mut illegal_count = 0;
+                    let mut scratchpad = vec![0.0; crate::constants::FIRST_HIDDEN_ID];
                     let card = evaluator::SimulatorBot::Heuristic.select_card(
                         &game,
                         seat,
                         &mut rng,
                         &mut scratchpad,
-                        &mut illegal_count,
+                        None,
                     );
                     game.play_card(card);
                 }
@@ -424,7 +438,7 @@ pub fn generate_expert_dataset_rust(
                 }
 
                 let led_suit = if game.current_trick_len > 0 {
-                    game.current_trick[0] / 10
+                    crate::engine::CARD_SUIT[game.current_trick[0] as usize]
                 } else {
                     4
                 };
@@ -463,46 +477,20 @@ pub fn generate_expert_dataset_rust(
                     continue;
                 }
 
-                let mut matching_intents = Vec::new();
-                for intent in 0..5 {
-                    let (card_intent, was_illegal) = evaluator::resolve_intent(intent, &game, seat);
-                    if !was_illegal && card_intent == best_card {
-                        matching_intents.push(intent);
+                let mut target_intent = 1;
+                for &archetype in &[2, 0, 3, 1] {
+                    let resolved_card = evaluator::resolve_intent(archetype, &game, seat);
+                    if resolved_card == best_card {
+                        target_intent = archetype;
+                        break;
                     }
                 }
 
-                if matching_intents.is_empty() {
+                if intent_counts[target_intent] >= target_count {
                     continue;
                 }
 
-                let mut underfilled = Vec::new();
-                for &intent in &matching_intents {
-                    if intent_counts[intent] < target_count {
-                        underfilled.push(intent);
-                    }
-                }
-
-                if underfilled.is_empty() {
-                    continue;
-                }
-
-                let mut target_intent = underfilled[0];
-                let mut min_count = intent_counts[target_intent];
-                for &intent in &underfilled[1..] {
-                    if intent_counts[intent] < min_count {
-                        min_count = intent_counts[intent];
-                        target_intent = intent;
-                    }
-                }
-
-                let mut legal_mask = 0u8;
-                for intent in 0..5 {
-                    let (_, was_illegal) = evaluator::resolve_intent(intent, &game, seat);
-                    if !was_illegal {
-                        legal_mask |= 1 << intent;
-                    }
-                }
-
+                let legal_mask = 0x0Fu8;
                 let belief = evaluator::encode_belief_state(&game, seat);
 
                 dataset_states.extend_from_slice(&belief);

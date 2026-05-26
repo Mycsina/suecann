@@ -1,183 +1,224 @@
 # 🃏 Neurosymbolic WANNs for Sueca
 
-A neurosymbolic framework that evolves **Weight-Agnostic Neural Networks (WANNs)** to master **Sueca** (a Portuguese four-player partnership trick-taking card game). Rather than fitting continuous weights to specific tasks, this system focuses on evolving discrete network topologies (using logical gates and custom aggregations) that produce abstract strategic intents. The resulting networks can be compiled directly into human-readable decision rules (IF/THEN trees) for complete transparency.
+A neurosymbolic framework that evolves **Weight-Agnostic Neural Networks (WANNs)** to master **Sueca** (a Portuguese four-player partnership trick-taking card game). Rather than fitting continuous weights to specific tasks, this system evolves discrete network topologies using logical gates and custom aggregations. The resulting networks compile directly into human-readable decision rules (IF/THEN trees) for complete transparency.
 
 ---
 
-## 📐 Architecture Overview
-
-The system operates via a decoupled pipeline to ensure strict adherence to game rules while allowing maximum symbolic flexibility:
+## Architecture Overview
 
 ```
-Belief State (21 features in [0,1])
-             │
-             ▼
-Weight-Agnostic Neural Network (Logical Gates)
-             │
-             ▼
-Oracle Intents (5 abstract play intents)
-             │
-             ▼
-Legal Subsystem (Filters invalid plays & chooses best card)
-             │
-             ▼
-Selected Card Play
+Belief State (30 features) → WANN (Logical Gates) → Oracle Intent (4 outputs) → Legal Subsystem → Card
 ```
 
-### 🧠 1. Belief State (21 Inputs)
-The input vector represents the agent's current belief state of the game, normalized to `[0,1]`:
-- **`Has_Led_Suit`** / **`Has_Trump`** (Binary): Hand status indicators.
-- **`Led_Suit_Power`** / **`Trump_Power`** (Float): Relative strength of top cards.
-- **`Hand_Point_Density`** (Float): High-value points remaining in the hand.
-- **`Am_I_Leading`** / **`Am_I_Last_To_Play`** (Binary): Trick position context.
-- **`Is_Partner_Winning`** (Binary): Partnership status.
-- **`Trick_Point_Value`** (Float): Point density in the current trick.
-- **`Has_Trick_Been_Cut`** (Binary): True if trump was played on an off-suit trick.
-- **`Partner_Void_Led`** / **`Partner_Void_Trump`** (Binary): Partnership void tracking.
-- **`Any_Opp_Void_Led`** / **`Any_Opp_Void_Trump`** (Binary): Opponent void tracking.
-- **`Led_Suit_Ace_Played`** / **`Led_Suit_7_Played`** (Binary): Card counting (led suit).
-- **`Trump_Ace_Played`** (Binary): Card counting (trumps).
-- **`Game_Pts_Remaining`** (Float): Unplayed card points in the deal.
-- **`Trick_Number`** (Float): Index of the current trick.
-- **`Trumps_Remaining`** (Float): Count of unplayed trumps.
-- **`Score_Delta`** (Float): Normalized score differential.
+- **Belief State**: 30 normalized floats encoding hand composition, trick state, void tracking, game progress, and side-suit depletion/honor tracking.
+- **WANN**: Weight-agnostic network with sign-only connections (±1), logical aggregations (SUM/MIN/MAX), and discrete activations (IDENTITY/NOT/THRESHOLD). Evaluated across a weight sweep W ∈ {-2.0, -1.0, -0.5, 0.5, 1.0, 2.0}.
+- **Oracle Intents**: 4 abstract play actions representing strategic card-play archetypes:
+  - **MAX_FORCE**: Aggressive/control. If leading, lead high trump or a cash master card; otherwise, play the highest-ranking card.
+  - **MIN_FORCE**: Passive/resource saving. If leading, lead from the longest non-trump suit; otherwise, play the lowest legal card of the led suit to preserve high-value cards.
+  - **EFFICIENT_WIN**: Tactical exploitation. If leading, lead low trump or longest suit; otherwise, play the cheapest card that beats the current winner, or cut with the cheapest trump card when void.
+  - **EQUITY_BUILDER**: Partnership-focused play. If leading, play a short suit to build voids; otherwise, load points when partner is winning, exploit opponent voids, or cut when partner is void.
+- **Heuristic Resolver / Legal Subsystem**: Mapped directly to legal cards by the heuristic resolver. Because these 4 polymorphic intents are defined to resolve contextually into a legal move under all game conditions, all intent outputs are always legal. Thus, while the training pipeline maintains an **Oracle Tax** penalty mechanism, the rate of illegal intents remains at `0.0` during rollouts, rendering the tax inactive.
 
-### 🎯 2. Oracle Intents (5 Outputs)
-The WANN outputs a real value for each of the 5 play intents. The highest-valued output (tied maximums are resolved randomly via `rng.choice` to prevent bias) determines the selected intent:
-1. **`DUCK_OR_DUMP`**: Play the lowest legal card.
-2. **`TAKE_CHEAPLY`**: Play the lowest card that beats the current trick winner.
-3. **`FORCE_HIGH`**: Play the highest-power card.
-4. **`FEED_PARTNER`**: Play the highest point-value card.
-5. **`CUT_LOW`**: Play the lowest trump (when void in led suit).
+### Belief State Layout (30 inputs, all in [0,1])
 
-*Note: If an intent is illegal (e.g. attempting to cut when holding led suit), the legal subsystem overrides it to `DUCK_OR_DUMP` and levies a fitness penalty (Oracle Tax).*
+| Index | Feature | Type | Normalization / Description |
+|:---:|---|---|---|
+| 0 | `Has_Led_Suit` | Bool | `1.0` if player holds at least one card of the led suit, `0.0` otherwise. |
+| 1 | `Has_Trump` | Bool | `1.0` if player holds at least one trump card, `0.0` otherwise. |
+| 2 | `Led_Suit_Power` | Float | Power rank of the highest card held in led suit: `max_rank_held / 9.0`. |
+| 3 | `Trump_Power` | Float | Power rank of the highest trump card held: `max_rank_held / 9.0`. |
+| 4 | `Hand_Point_Density` | Float | Ratio of points held in player's hand to total remaining points in play: `hand_points / remaining_points`. |
+| 5 | `Am_I_Leading` | Bool | `1.0` if player is leading the trick, `0.0` otherwise. |
+| 6 | `Am_I_Last_To_Play` | Bool | `1.0` if player is the 4th to play in the trick, `0.0` otherwise. |
+| 7 | `Is_Partner_Winning` | Bool | `1.0` if partner is currently winning the trick, `0.0` otherwise. |
+| 8 | `Trick_Point_Value` | Float | Ratio of total points currently on the table to maximum possible trick value (44): `trick_points / 44.0`. |
+| 9 | `Has_Trick_Been_Cut` | Bool | `1.0` if a trump card has been played when the led suit is not trump, `0.0` otherwise. |
+| 10 | `Partner_Void_Led` | Bool | `1.0` if partner is void in the led suit, `0.0` otherwise. |
+| 11 | `Partner_Void_Trump` | Bool | `1.0` if partner is void in the trump suit, `0.0` otherwise. |
+| 12 | `Any_Opp_Void_Led` | Bool | `1.0` if either opponent is void in the led suit, `0.0` otherwise. |
+| 13 | `Any_Opp_Void_Trump` | Bool | `1.0` if either opponent is void in the trump suit, `0.0` otherwise. |
+| 14 | `Led_Suit_Ace_Played` | Bool | `1.0` if the Ace of the led suit has already been played in previous tricks, `0.0` otherwise. |
+| 15 | `Led_Suit_7_Played` | Bool | `1.0` if the 7 of the led suit has already been played in previous tricks, `0.0` otherwise. |
+| 16 | `Trump_Ace_Played` | Bool | `1.0` if the trump Ace has already been played in previous tricks, `0.0` otherwise. |
+| 17 | `Game_Pts_Remaining` | Float | Ratio of unplayed card points remaining in the deal to the total deck points (120): `remaining_points / 120.0`. |
+| 18 | `Trick_Number` | Float | Index of the current trick: `trick_index / 9.0`. |
+| 19 | `Trumps_Remaining` | Float | Ratio of unplayed trump cards remaining in play: `remaining_trumps / 10.0`. |
+| 20 | `Score_Delta` | Float | Point delta between our team and opponent team: `(our_points - opp_points + 120) / 240.0`. |
+| 21 | `Side0_Depletion` | Float | Played card ratio of side-suit 0 (first non-trump suit ascending): `played_cards / 10.0`. |
+| 22 | `Side0_Ace_Played` | Bool | `1.0` if the Ace of side-suit 0 has already been played in previous tricks, `0.0` otherwise. |
+| 23 | `Side0_7_Played` | Bool | `1.0` if the 7 of side-suit 0 has already been played in previous tricks, `0.0` otherwise. |
+| 24 | `Side1_Depletion` | Float | Played card ratio of side-suit 1 (second non-trump suit ascending): `played_cards / 10.0`. |
+| 25 | `Side1_Ace_Played` | Bool | `1.0` if the Ace of side-suit 1 has already been played in previous tricks, `0.0` otherwise. |
+| 26 | `Side1_7_Played` | Bool | `1.0` if the 7 of side-suit 1 has already been played in previous tricks, `0.0` otherwise. |
+| 27 | `Side2_Depletion` | Float | Played card ratio of side-suit 2 (third non-trump suit ascending): `played_cards / 10.0`. |
+| 28 | `Side2_Ace_Played` | Bool | `1.0` if the Ace of side-suit 2 has already been played in previous tricks, `0.0` otherwise. |
+| 29 | `Side2_7_Played` | Bool | `1.0` if the 7 of side-suit 2 has already been played in previous tricks, `0.0` otherwise. |
 
-### 🛠️ 3. Weight-Agnostic Topologies
-The networks utilize discrete configuration features:
-- **Sign-Only Connections**: Connections carry a sign ($+1$ or $-1$) instead of continuous weights. A shared weight $W$ is swept over $W \in \{-2.0, -1.0, -0.5, 0.5, 1.0, 2.0\}$ to score true weight-agnostic fitness.
-- **Logical Nodes**:
-  - **Aggregations**: `SUM` ($0$), `MIN/AND` ($1$), and `MAX/OR` ($2$).
-  - **Activations**: `IDENTITY` ($0$), `NOT` ($1$), and `THRESHOLD` ($2$).
 
 ---
 
-## ⚡ Rust Acceleration FFI
+## Rust Acceleration
 
-Simulation and population evaluations are offloaded to Rust (`src/sueca_solver`) via PyO3, which releases the GIL and distributes game rollouts in parallel using Rayon. This provides a **~500x speedup** over pure Python.
+Simulation and evolution run entirely in Rust. The `sueca_solver` crate provides a bitboard game engine, WANN inference in CSR format, PIMC search with late-game minimax, and PyO3 bindings. The `sueca_wann` crate runs the NEAT evolutionary loop with Rayon parallelism across genomes, speciation, and breeding.
 
-### Compilation Command:
-Compile the Rust solver and place the resulting shared object `.so` file in the python virtual environment site-packages:
+### Build Commands
+
 ```bash
-cargo build --manifest-path src/sueca_solver/Cargo.toml --release && \
-cp src/sueca_solver/target/release/libsueca_solver.so \
-.venv/lib/python3.13/site-packages/sueca_solver/sueca_solver.cpython-313-x86_64-linux-gnu.so
+# Build the PyO3 solver module (for Python scripts)
+cargo build -p sueca_solver --release && \
+cp target/release/libsueca_solver.so \
+  .venv/lib/python3.13/site-packages/sueca_solver/sueca_solver.cpython-313-x86_64-linux-gnu.so
+
+# Build the training binary
+cargo build -p sueca_wann --release
 ```
 
 ---
 
-## 📈 Evolutionary Curriculum
+## Quick Start
 
-The framework employs a curriculum-driven approach divided into two primary phases:
-
-```
-Phase 0: Classification Accuracy (Gens 0-100)
- ├── 🏋️ Bulking Phase (Gens 0-50): Disable Pareto. Aggressive bloat.
- └── ✂️ Cutting Phase (Gens 50-100): Enable Pareto. Prune topologies.
-               │
-               ▼
-Phase 1+: Rollout-based RL (Self-Play against HOF & Heuristic Anchor)
-```
-
-### Phase 0: Supervised Warmup (Generations 0 to 100)
-Aligns network intents with a pre-recorded dataset of expert decisions.
-1. **The Bulking Phase (Gen 0 to 50)**:
-   The **Pareto simplicity penalty is completely disabled**, and selection is done strictly by classification accuracy. This encourages networks to bloat aggressively, throwing out complex, redundant connections that discover advanced logic gates and high-accuracy intersections.
-2. **The Cutting Phase (Gen 50 to 100)**:
-   The **Pareto simplicity penalty is reactivated** (using non-dominated Pareto ranking). The algorithm acts like a sculptor, pruning away useless connections and redundant hidden layers, keeping only the elegant, multi-input logic pathways that successfully boost accuracy.
-
-### Phase 1+: Self-Play Reinforcement Learning (Generation 100+)
-Replaces supervised training with game rollouts. Networks play duplicate matches against a mixture of Hall of Fame champions and calibrated heuristic anchors (`HeuristicBot`).
-
----
-
-## 🚀 Getting Started
-
-### 📦 Prerequisites & Installation
-Ensure you have Python 3.13, a Rust toolchain (`cargo`), and `uv` installed:
+### Prerequisites
+Python 3.13, Rust toolchain (`cargo`), `uv`.
 
 ```bash
-# Clone the repository
-cd project
-
-# Install Python packages using uv
-uv sync
+uv sync                          # Install Python dependencies
+cargo build -p sueca_wann --release  # Build training binary
 ```
 
-### 🧪 Running Tests
-Execute the test suite to ensure both Python logic and the Rust FFI module behave correctly:
+### Running Training
+
 ```bash
-uv run pytest
+./target/release/sueca_wann --config configs/default.toml
 ```
 
-### 🏋️ Running Training
-Start the evolutionary curriculum run with:
+Training creates a dated run folder `checkpoints/YYYY-MM-DD-N/` containing `training_stats.csv`, checkpointed genomes, and the Hall of Fame. Resume with `--resume`.
+
+### Running Tests
+
 ```bash
-uv run python -m src.train --config configs/default.toml
+cargo test --all                 # Rust tests (engine, WANN, evolution)
+uv run pytest tests/ -v          # Python tests (FFI, compiler, benchmark)
 ```
 
-You can customize hyperparameters in [configs/default.toml](file:///home/mycsina/Projects/Uni/CAA/project/configs/default.toml), such as population size, phase lengths, and mutation rates.
+### Benchmarking a Champion
 
----
-
-## 📊 Benchmarking & Analysis
-
-### 🏁 Round-Robin Tournament
-Run a round-robin tournament between `RandomBot`, `HeuristicBot`, `PIMCBot`, and your WANN Champion:
 ```bash
-uv run python -m src.benchmark \
+# Auto-detect latest genome
+PYTHONPATH=. uv run python src/benchmark.py --deals 200
+
+# Specify genome explicitly
+PYTHONPATH=. uv run python src/benchmark.py \
   --deals 200 \
-  --genome checkpoints/best_genome_final.npz \
-  --output-dir checkpoints/results
+  --genome checkpoints/2026-05-26-1/genomes/best_genome_final.json
 ```
 
-This generates:
-1. **ASCII results table** printed directly to the terminal.
-2. **`tournament_report.csv`** containing exact win rates, average card points, and confidence intervals.
-3. **`tournament_matrix.png`**: A beautiful, green-to-red performance heatmap showing 95% binomial confidence intervals.
+Outputs a tournament heatmap, CSV report, and terminal summary comparing RandomBot, HeuristicBot, PIMCBot, and the WANN champion.
 
----
+### Comparing Training Runs
 
-## 🔍 Checkpoint & Dump Analysis
+```bash
+uv run python scripts/compare_runs.py
+uv run python scripts/compare_runs.py --runs 2026-05-26-1 2026-05-26-2
+```
 
-Checkpoints are saved automatically under the `checkpoints/` directory as compressed NumPy files (`.npz`).
+Generates `checkpoints/run_comparison.png` with four panels: best fitness, delta vs HeuristicBot, species diversity, and network complexity across runs.
 
-### 📦 Checkpoint File Structure
-Inside a `.npz` genome checkpoint, the following variables are stored:
-- `next_innovation`: The next innovation ID.
-- `node_ids` / `node_types` / `node_acts` / `node_aggs`: Node descriptions.
-- `conn_innovs` / `conn_srcs` / `conn_dsts` / `conn_signs` / `conn_enabled`: Connection mapping.
-
-### 🐍 Programmatic Inspection
-You can easily load and inspect a saved genome using Python:
+### Extracting Rules
 
 ```python
-from src.train import load_genome
-
-# Load the genome
-genome = load_genome("checkpoints/best_genome_final.npz")
-
-# Print enabled connections
-print("--- Enabled Connections ---")
-for conn in genome.conn_genes.values():
-    if conn.enabled:
-        print(f"Inno {conn.innovation}: Node {conn.src} ──[{'+' if conn.sign > 0 else '-'}]──> Node {conn.dst}")
+from src.export.export_flowchart import load_genome, compile_rules
+genome = load_genome("checkpoints/2026-05-26-1/genomes/best_genome_final.json")
+print(compile_rules(genome, W=1.0))
 ```
 
-### 📊 Training Statistics
-The training statistics are written iteratively to `training_stats.csv`. This file logs:
-- `generation`: The generation index.
-- `phase`: The curriculum phase (0 = Supervised, 1 = RL).
-- `best_fitness` / `avg_fitness` / `median_fitness`: Population fitness trends.
-- `n_species`: Species counts in the population.
-- `n_connections_best` / `n_hidden_best`: Node and link complexities of the top genome.
-- `oracle_tax`: The active illegal intent penalty factor.
+Outputs human-readable IF/THEN logic with referenced inputs, hidden node computations, and output formulas.
+
+---
+
+## Training Pipeline
+
+### Phase 0: Supervised Pretraining (gens 0–100)
+WANNs are trained to match PIMC expert intents on a pre-generated dataset. Fitness = classification accuracy. No game simulation — fast, deterministic evaluation.
+
+### Phase 1: Self-Play Evolution (gens 100–1000)
+WANNs play 48 deals × 4 rotations against HeuristicBot with Hall of Fame partners/opponents. Fitness = raw game-point delta vs baseline + Oracle Tax penalty for illegal intents. Tax ramps from −0.25 to −3.0 over 200 curriculum generations.
+
+### Checkpoint Structure
+
+```
+checkpoints/
+  2026-05-26-1/
+    training_stats.csv      # Per-generation metrics
+    training_state.bin      # Full state for --resume
+    genomes/                # Subfolder containing genome json checkpoints
+      best_genome_final.json # Best genome from entire run
+      hof_final.json        # Final Hall of Fame (30 entries)
+      hof_gen0100.json      # HOF snapshot at gen 100
+      best_genome_gen0100.json
+      ...
+  2026-05-26-2/             # Auto-incremented for same-day runs
+    ...
+  run_comparison.png        # Generated by compare_runs.py
+```
+
+---
+
+## Configuration
+
+Key hyperparameters in `configs/default.toml`:
+
+| Section | Key | Default | Description |
+|---------|-----|---------|-------------|
+| population | pop_size | 400 | Population size |
+| population | generations | 1000 | Total generations |
+| population | elitism | 8 | Genomes copied verbatim per species |
+| evaluation | n_deals | 48 | Deals per generation for Phase 1 |
+| evaluation | curriculum_gens | 200 | Oracle tax ramp duration |
+| species | compatibility_threshold | 1.2 | Speciation distance threshold |
+| species | stagnation_limit | 25 | Gens without improvement before removal |
+| mutation | p_add_node | 0.20 | Probability of add-node mutation |
+| mutation | p_add_conn | 0.30 | Probability of add-connection mutation |
+| mutation | p_crossover | 0.30 | Probability of sexual reproduction |
+| curriculum | phase0_gens | 100 | Gens in supervised Phase 0 |
+| hall_of_fame | hof_size | 30 | Max HOF entries |
+
+---
+
+## Source Layout
+
+```
+src/
+  sueca_solver/src/         # Rust game engine + PyO3 bindings
+    engine.rs               # Bitboard game state, card logic
+    wann.rs                 # CSR-format WANN inference
+    evaluator.rs            # Simulation runner, delta-fitness
+    simulator.rs            # Game state wrapper with void tracking
+    belief.rs               # Belief state encoder (30 floats)
+    heuristic.rs            # Card selection, intent resolver
+    pimc.rs                 # PIMC solver with late-game minimax
+    search.rs               # Alpha-beta with Zobrist transposition table
+    rng.rs                  # Shared LCG random number generator
+    py_bindings/            # PyO3 FFI (wann, pimc, matchup)
+  sueca_wann/src/           # Rust NEAT training binary
+    main.rs                 # CLI entry point
+    train.rs                # Training loop, Phase 0/1 dispatch
+    genome.rs               # Genome representation, topological sort
+    population.rs           # Population, crossover, Pareto, parallel breeding
+    species.rs              # Compatibility distance, speciation
+    mutations.rs            # NEAT mutation operators, innovation registry
+    hall_of_fame.rs         # HOF with sampling
+    config.rs               # TOML config deserialization
+    checkpoint.rs           # Training state save/load
+    dataset.rs              # Expert dataset loading
+  export/
+    export_flowchart.py     # Rule compiler, Graphviz topology export
+  benchmark.py              # Tournament benchmarking
+  measure_snr.py            # Signal-to-noise ratio measurement
+  compat.py                 # Python-Rust data structure bridge
+configs/
+  default.toml              # Training hyperparameters
+scripts/
+  compare_runs.py           # Cross-run visualization
+  generate_expert_dataset.py
+tests/                      # Python integration tests
+```

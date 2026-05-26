@@ -3,6 +3,7 @@ mod config;
 mod dataset;
 mod genome;
 mod hall_of_fame;
+mod map_elites;
 mod mutations;
 mod population;
 mod species;

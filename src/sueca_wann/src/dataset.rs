@@ -1,3 +1,4 @@
+use crate::genome::{INPUT_COUNT, OUTPUT_COUNT};
 use npyz::NpyFile;
 use std::fs::File;
 use std::io::BufReader;
@@ -5,7 +6,7 @@ use std::path::Path;
 use zip::ZipArchive;
 
 pub struct ExpertDataset {
-    pub states: Vec<f64>, // flat array of states, shape (N, 21)
+    pub states: Vec<f64>, // flat array of states, shape (N, INPUT_COUNT)
     pub num_states: usize,
     pub intents: Vec<u8>,
     pub legal_masks: Vec<u8>,
@@ -20,9 +21,9 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
             path.as_ref()
         );
         let num_states = 100;
-        let states = vec![0.0; num_states * 21];
+        let states = vec![0.0; num_states * INPUT_COUNT];
         let intents = vec![0; num_states];
-        let legal_masks = vec![0x1F; num_states]; // all 5 intents legal
+        let legal_masks = vec![(1 << OUTPUT_COUNT) - 1; num_states]; // all intents legal
         return Ok(ExpertDataset {
             states,
             num_states,
@@ -58,7 +59,11 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
     };
 
     let num_states = intents.len();
-    assert_eq!(states.len(), num_states * 21, "States length mismatch");
+    assert_eq!(
+        states.len(),
+        num_states * INPUT_COUNT,
+        "States length mismatch"
+    );
     assert_eq!(legal_masks.len(), num_states, "Legal masks length mismatch");
 
     Ok(ExpertDataset {

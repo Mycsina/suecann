@@ -32,6 +32,17 @@ pub const CARD_POINTS: [u8; 40] = [
     0, 0, 0, 0, 0, 2, 3, 4, 10, 11,
 ];
 
+// Pre-computed suit and rank lookups to avoid integer division at runtime.
+pub const CARD_SUIT: [u8; 40] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3,
+];
+
+pub const CARD_RANK: [u8; 40] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1,
+    2, 3, 4, 5, 6, 7, 8, 9,
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct GameState {
     pub(crate) hands: [u64; 4],             // 4 hands represented as bitboards
@@ -103,10 +114,10 @@ impl GameState {
     /// Returns true if `challenger` outranks `current` given trump and led suit.
     #[inline(always)]
     pub fn beats_card(challenger: u8, current: u8, trump: u8, led_suit: u8) -> bool {
-        let ch_suit = challenger / 10;
-        let ch_rank = challenger % 10;
-        let cur_suit = current / 10;
-        let cur_rank = current % 10;
+        let ch_suit = CARD_SUIT[challenger as usize];
+        let ch_rank = CARD_RANK[challenger as usize];
+        let cur_suit = CARD_SUIT[current as usize];
+        let cur_rank = CARD_RANK[current as usize];
 
         let ch_is_trump = ch_suit == trump;
         let cur_is_trump = cur_suit == trump;
@@ -162,7 +173,7 @@ impl GameState {
         self.hands[seat as usize] &= !card_mask;
         *trick_points += CARD_POINTS[card as usize];
 
-        let card_suit = card / 10;
+        let card_suit = CARD_SUIT[card as usize];
 
         if self.cards_played_in_trick == 0 {
             self.led_suit = card_suit;
@@ -180,7 +191,7 @@ impl GameState {
         if self.cards_played_in_trick == 4 {
             // Trick complete. Award accumulated points to the winning team.
             let winner = self.current_trick_winner;
-            if winner == 0 || winner == 2 {
+            if (winner & 1) == 0 {
                 self.team_02_score += *trick_points;
             } else {
                 self.team_13_score += *trick_points;
@@ -241,7 +252,7 @@ mod tests {
         let suited: Vec<u8> = hand
             .iter()
             .cloned()
-            .filter(|&c| c / 10 == led_suit)
+            .filter(|&c| CARD_SUIT[c as usize] == led_suit)
             .collect();
         if suited.is_empty() {
             hand.to_vec()

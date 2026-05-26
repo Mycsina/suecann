@@ -8,6 +8,14 @@ pub use crate::heuristic::{
 pub use crate::rng::LcgRng;
 pub use crate::simulator::{trick_winner_seat, SuecaSimulatorGame};
 
+#[derive(Debug, Clone, Default)]
+pub struct WannBehavior {
+    pub intent_counts: [usize; 4],
+    pub total_lead_points: usize,
+    pub count_leads: usize,
+    pub total_actions: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Bot Strategy Types for Game Simulation
 // ---------------------------------------------------------------------------
@@ -32,7 +40,7 @@ impl<'a> SimulatorBot<'a> {
         seat: u8,
         rng: &mut LcgRng,
         scratchpad: &mut [f64],
-        illegal_count: &mut usize,
+        mut behavior: Option<&mut WannBehavior>,
     ) -> u8 {
         match self {
             SimulatorBot::Random => {
@@ -44,23 +52,58 @@ impl<'a> SimulatorBot<'a> {
                 let belief = encode_belief_state(game, seat);
 
                 // Weight sweep output averaging
-                let mut sum_outputs = [0.0f64; 5];
+                let mut sum_outputs = [0.0f64; crate::constants::OUTPUT_COUNT];
                 for &w in *weights {
                     network.forward(&belief, w, scratchpad);
-                    for i in 0..5 {
-                        sum_outputs[i] += scratchpad[22 + i];
+                    for i in 0..crate::constants::OUTPUT_COUNT {
+                        sum_outputs[i] += scratchpad[crate::constants::OUTPUT_START + i];
                     }
                 }
 
-                let mut mean_outputs = [0.0f64; 5];
-                for i in 0..5 {
+                let mut mean_outputs = [0.0f64; crate::constants::OUTPUT_COUNT];
+                for i in 0..crate::constants::OUTPUT_COUNT {
                     mean_outputs[i] = sum_outputs[i] / (weights.len() as f64);
                 }
 
-                let (card, was_illegal) = select_card_from_outputs(&mean_outputs, game, seat, rng);
-                if was_illegal {
-                    *illegal_count += 1;
+                // Apply structural activation baseline penalty
+                let mut adjusted_outputs = mean_outputs;
+                adjusted_outputs[3] -= 0.25;
+
+                let mut max_val = adjusted_outputs[0];
+                for i in 1..crate::constants::OUTPUT_COUNT {
+                    if adjusted_outputs[i] > max_val {
+                        max_val = adjusted_outputs[i];
+                    }
                 }
+
+                let mut best_intents = [0usize; crate::constants::OUTPUT_COUNT];
+                let mut best_count = 0;
+                for i in 0..crate::constants::OUTPUT_COUNT {
+                    if (adjusted_outputs[i] - max_val).abs() < 1e-9 {
+                        best_intents[best_count] = i;
+                        best_count += 1;
+                    }
+                }
+
+                let chosen_intent = if best_count == 1 {
+                    best_intents[0]
+                } else {
+                    best_intents[rng.gen_range(0..best_count)]
+                };
+
+                let card = resolve_intent(chosen_intent, game, seat);
+
+                if let Some(ref mut beh) = behavior {
+                    if chosen_intent < 4 {
+                        beh.intent_counts[chosen_intent] += 1;
+                    }
+                    if game.current_trick_len == 0 {
+                        beh.total_lead_points += crate::engine::CARD_POINTS[card as usize] as usize;
+                        beh.count_leads += 1;
+                    }
+                    beh.total_actions += 1;
+                }
+
                 card
             }
             SimulatorBot::Pimc {
@@ -84,7 +127,7 @@ impl<'a> SimulatorBot<'a> {
                 }
 
                 let led_suit = if game.current_trick_len > 0 {
-                    game.current_trick[0] / 10
+                    crate::engine::CARD_SUIT[game.current_trick[0] as usize]
                 } else {
                     4
                 };
@@ -149,7 +192,6 @@ pub struct GameResultSim {
     pub team_13_score: u8,
     pub team_02_game_points: u8,
     pub team_13_game_points: u8,
-    pub illegal_count: usize,
 }
 
 fn compute_game_points(team_02: u8, team_13: u8) -> (u8, u8) {
@@ -174,15 +216,18 @@ pub fn play_game_sim(
     bots: &[SimulatorBot; 4],
     seed: u64,
     scratchpad: &mut [f64],
+    behavior: &mut WannBehavior,
 ) -> GameResultSim {
     let mut rng = LcgRng::new(seed);
     let mut game = SuecaSimulatorGame::new(hands, trump, first_player);
-    let mut illegal_count = 0;
 
     while game.state.trick_number < 10 {
         let seat = game.state.current_player;
-        let card =
-            bots[seat as usize].select_card(&game, seat, &mut rng, scratchpad, &mut illegal_count);
+        let card = if seat == 0 {
+            bots[seat as usize].select_card(&game, seat, &mut rng, scratchpad, Some(behavior))
+        } else {
+            bots[seat as usize].select_card(&game, seat, &mut rng, scratchpad, None)
+        };
         game.play_card(card);
     }
 
@@ -195,7 +240,6 @@ pub fn play_game_sim(
         team_13_score: team_13,
         team_02_game_points: gp_02,
         team_13_game_points: gp_13,
-        illegal_count,
     }
 }
 
@@ -232,7 +276,7 @@ pub fn get_bot_from_type<'a>(
 }
 
 /// Evaluate a candidate genome vs a baseline bot on the same deals with CRN.
-/// Returns (average_delta, total_illegal_count) — fitness is computed in Python.
+/// Returns (average_delta, behavior_metrics) — fitness is computed in Python.
 pub fn evaluate_genome_delta(
     candidate: &RustWannNetwork,
     baseline_bot_type: i32,
@@ -244,10 +288,10 @@ pub fn evaluate_genome_delta(
     deals: &[EvaluatorDeal],
     base_seed: u64,
     scratchpad: &mut [f64],
-) -> (f64, usize) {
+) -> (f64, WannBehavior) {
     let mut total_score_candidate = 0.0;
     let mut total_score_baseline = 0.0;
-    let mut total_illegal = 0;
+    let mut accum_behavior = WannBehavior::default();
 
     let first_player = 0;
 
@@ -275,6 +319,7 @@ pub fn evaluate_genome_delta(
                 opp2.clone(),
             ];
 
+            let mut game_behavior = WannBehavior::default();
             let result_candidate = play_game_sim(
                 rotated_hands,
                 deal.trump,
@@ -282,9 +327,15 @@ pub fn evaluate_genome_delta(
                 &bots_candidate,
                 game_seed,
                 scratchpad,
+                &mut game_behavior,
             );
 
-            total_illegal += result_candidate.illegal_count;
+            for i in 0..4 {
+                accum_behavior.intent_counts[i] += game_behavior.intent_counts[i];
+            }
+            accum_behavior.total_lead_points += game_behavior.total_lead_points;
+            accum_behavior.count_leads += game_behavior.count_leads;
+            accum_behavior.total_actions += game_behavior.total_actions;
 
             // --- Play with baseline ---
             let bots_baseline = [
@@ -294,6 +345,7 @@ pub fn evaluate_genome_delta(
                 opp2.clone(),
             ];
 
+            let mut dummy_behavior = WannBehavior::default();
             let result_baseline = play_game_sim(
                 rotated_hands,
                 deal.trump,
@@ -301,6 +353,7 @@ pub fn evaluate_genome_delta(
                 &bots_baseline,
                 game_seed,
                 scratchpad,
+                &mut dummy_behavior,
             );
 
             total_score_candidate += result_candidate.team_02_game_points as f64;
@@ -313,5 +366,5 @@ pub fn evaluate_genome_delta(
     let avg_baseline = total_score_baseline / num_games;
     let avg_delta = avg_candidate - avg_baseline;
 
-    (avg_delta, total_illegal)
+    (avg_delta, accum_behavior)
 }

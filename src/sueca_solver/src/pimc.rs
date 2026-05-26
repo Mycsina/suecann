@@ -25,7 +25,7 @@ fn sample_constraints(
         return true;
     }
     let card = unknown_cards[unknown_idx];
-    let suit = card / 10;
+    let suit = crate::engine::CARD_SUIT[card as usize];
     let suit_mask = 1 << suit;
 
     for s in 0..4 {
@@ -53,50 +53,44 @@ fn sample_constraints(
 }
 
 /// Sample a single world consistent with public information.
+/// `unknown_cards` is the pre-built pool of cards not in my hand and not yet played.
 /// Returns true if successful, false if constraints cannot be satisfied.
 pub fn sample_world(
     my_seat: u8,
     my_hand: u64,
-    played_cards: u64,
+    unknown_cards: &[u8],
     voids: [u8; 4],
     target_sizes: [u8; 4],
     hands_out: &mut [u64; 4],
     rng_state: &mut u64,
 ) -> bool {
-    // 1. Gather all remaining unknown cards
-    let known_mask = my_hand | played_cards;
-    let mut unknown_cards = [0u8; 40];
-    let mut num_unknowns = 0usize;
-    for c in 0..40 {
-        if (known_mask & (1u64 << c)) == 0 {
-            unknown_cards[num_unknowns] = c;
-            num_unknowns += 1;
-        }
-    }
-
-    // 2. Initialize hands_out with my_hand
+    // 1. Initialize hands_out with my_hand
     for i in 0..4 {
         hands_out[i] = 0;
     }
     hands_out[my_seat as usize] = my_hand;
 
-    // 3. Shuffle unknown cards on the stack (Fisher-Yates)
+    // 2. Copy and shuffle unknown cards on the stack (Fisher-Yates)
+    let num_unknowns = unknown_cards.len();
+    let mut shuffled = [0u8; 40];
+    shuffled[..num_unknowns].copy_from_slice(unknown_cards);
+
     let mut r = LcgRng::new(*rng_state);
     let mut i = num_unknowns;
     while i > 1 {
         let rand_idx = (r.next_u64() as usize) % i;
         i -= 1;
-        unknown_cards.swap(i, rand_idx);
+        shuffled.swap(i, rand_idx);
     }
     *rng_state = r.next_u64(); // Update RNG state
 
-    // 4. Backtrack/Constraint-solve assignment
+    // 3. Backtrack/Constraint-solve assignment
     let mut temp_targets = target_sizes;
     // My seat needs 0 more cards because it is already filled
     temp_targets[my_seat as usize] = 0;
 
     sample_constraints(
-        &unknown_cards[0..num_unknowns],
+        &shuffled[0..num_unknowns],
         0,
         voids,
         &mut temp_targets,
@@ -152,7 +146,19 @@ pub fn solve_pimc(
     // is already 1 less than their hand size before the trick.
     // We expect the caller (Python) to pass the correct target_sizes.
 
-    // 2. Parallel world evaluation using Rayon
+    // 2. Build the unknown card pool once (invariant across worlds)
+    let known_mask = my_hand | played_cards;
+    let mut unknown_cards = [0u8; 40];
+    let mut num_unknowns = 0usize;
+    for c in 0..40 {
+        if (known_mask & (1u64 << c)) == 0 {
+            unknown_cards[num_unknowns] = c;
+            num_unknowns += 1;
+        }
+    }
+    let unknown_slice = &unknown_cards[..num_unknowns];
+
+    // 3. Parallel world evaluation using Rayon
     // Each world runs independent simulations.
     // We pre-generate world seeds to make the Rayon execution deterministic.
     let mut rng = LcgRng::new(seed);
@@ -161,93 +167,93 @@ pub fn solve_pimc(
         seeds.push(rng.next_u64());
     }
 
-    let results: Vec<Vec<(u8, f64)>> = seeds
+    // Thread-local accumulator: (sum_evs, counts) for the 40 possible cards
+    type Accum = ([f64; 40], [u32; 40]);
+
+    let (sum_evs, counts) = seeds
         .into_par_iter()
-        .map(|w_seed| {
-            let mut local_hands = [0u64; 4];
-            let mut local_seed = w_seed;
+        .fold(
+            || ([0.0f64; 40], [0u32; 40]),
+            |mut acc: Accum, w_seed| {
+                let mut local_hands = [0u64; 4];
+                let mut local_seed = w_seed;
 
-            // Sample a valid world. Try up to 10 times in case of tight constraints.
-            let mut success = false;
-            for _ in 0..10 {
-                if sample_world(
-                    my_seat,
-                    my_hand,
-                    played_cards,
-                    voids,
-                    target_sizes,
-                    &mut local_hands,
-                    &mut local_seed,
-                ) {
-                    success = true;
-                    break;
-                }
-            }
-
-            if !success {
-                return Vec::new(); // skip this world if sampling completely failed
-            }
-
-            // Evaluate all legal moves in this world
-            THREAD_TT.with(|tt_cell| {
-                let mut tt = tt_cell.borrow_mut();
-                tt.next_generation(); // Invalidate old TT entries instantly
-
-                let mut world_results = Vec::with_capacity(legal_count);
-
-                for i in 0..legal_count {
-                    let m = legal_moves[i];
-
-                    // Initialize game state matching current game
-                    let mut sim_game = GameState::new(local_hands, trump, current_player);
-                    sim_game.led_suit = led_suit;
-                    sim_game.current_trick_winner = current_trick_winner;
-                    sim_game.current_trick_best_card = current_trick_best_card;
-                    sim_game.cards_played_in_trick = current_trick_cards.len() as u8;
-                    sim_game.team_02_score = team_scores[0];
-                    sim_game.team_13_score = team_scores[1];
-                    sim_game.trick_number = trick_number;
-
-                    // Play the legal move
-                    let mut trick_points = 0;
-                    // Add points of already played cards in trick
-                    for &c in current_trick_cards {
-                        trick_points += crate::engine::CARD_POINTS[c as usize];
+                // Sample a valid world. Try up to 10 times.
+                let mut success = false;
+                for _ in 0..10 {
+                    if sample_world(
+                        my_seat,
+                        my_hand,
+                        unknown_slice,
+                        voids,
+                        target_sizes,
+                        &mut local_hands,
+                        &mut local_seed,
+                    ) {
+                        success = true;
+                        break;
                     }
-
-                    sim_game.play_card_and_resolve(m, &mut trick_points);
-
-                    // Run Alpha-Beta. If 16 or fewer cards remain (trick_number >= 6), switch to full minimax search to the end of the game (40 plies).
-                    let plies_left = if trick_number >= 6 {
-                        40u8
-                    } else {
-                        search_depth * 4
-                    };
-                    let val = alpha_beta(
-                        &mut sim_game,
-                        -1000,
-                        1000,
-                        plies_left,
-                        &mut tt,
-                        &mut trick_points,
-                    );
-                    world_results.push((m, val as f64));
                 }
-                world_results
-            })
-        })
-        .collect();
 
-    // 3. Aggregate EV results across all worlds
-    let mut sum_evs = vec![0.0; 40];
-    let mut counts = vec![0; 40];
+                if !success {
+                    return acc;
+                }
 
-    for world_res in results {
-        for (m, val) in world_res {
-            sum_evs[m as usize] += val;
-            counts[m as usize] += 1;
-        }
-    }
+                // Evaluate all legal moves in this world
+                THREAD_TT.with(|tt_cell| {
+                    let mut tt = tt_cell.borrow_mut();
+                    tt.next_generation();
+
+                    for i in 0..legal_count {
+                        let m = legal_moves[i];
+
+                        let mut sim_game = GameState::new(local_hands, trump, current_player);
+                        sim_game.led_suit = led_suit;
+                        sim_game.current_trick_winner = current_trick_winner;
+                        sim_game.current_trick_best_card = current_trick_best_card;
+                        sim_game.cards_played_in_trick = current_trick_cards.len() as u8;
+                        sim_game.team_02_score = team_scores[0];
+                        sim_game.team_13_score = team_scores[1];
+                        sim_game.trick_number = trick_number;
+
+                        let mut trick_points = 0;
+                        for &c in current_trick_cards {
+                            trick_points += crate::engine::CARD_POINTS[c as usize];
+                        }
+
+                        sim_game.play_card_and_resolve(m, &mut trick_points);
+
+                        let plies_left = if trick_number >= 6 {
+                            40u8
+                        } else {
+                            search_depth * 4
+                        };
+                        let val = alpha_beta(
+                            &mut sim_game,
+                            -1000,
+                            1000,
+                            plies_left,
+                            &mut tt,
+                            &mut trick_points,
+                        );
+                        acc.0[m as usize] += val as f64;
+                        acc.1[m as usize] += 1;
+                    }
+                });
+                acc
+            },
+        )
+        .reduce(
+            || ([0.0f64; 40], [0u32; 40]),
+            |a, b| {
+                let mut merged = a;
+                for i in 0..40 {
+                    merged.0[i] += b.0[i];
+                    merged.1[i] += b.1[i];
+                }
+                merged
+            },
+        );
 
     let mut final_evs = Vec::with_capacity(legal_count);
     for i in 0..legal_count {
@@ -280,13 +286,24 @@ mod tests {
         let voids = [0u8; 4];
         let target_sizes = [10, 10, 10, 10];
 
+        // Build unknown card pool
+        let known_mask = my_hand | played_cards;
+        let mut unknown_cards = [0u8; 40];
+        let mut n = 0;
+        for c in 0..40 {
+            if (known_mask & (1u64 << c)) == 0 {
+                unknown_cards[n] = c;
+                n += 1;
+            }
+        }
+
         let mut hands_out = [0u64; 4];
         let mut seed = 42u64;
 
         let ok = sample_world(
             0,
             my_hand,
-            played_cards,
+            &unknown_cards[..n],
             voids,
             target_sizes,
             &mut hands_out,
@@ -320,13 +337,25 @@ mod tests {
         voids[1] = 1 << 1; // Diamonds void
 
         let target_sizes = [10, 10, 10, 10];
+
+        // Build unknown card pool
+        let known_mask = my_hand | played_cards;
+        let mut unknown_cards = [0u8; 40];
+        let mut n = 0;
+        for c in 0..40 {
+            if (known_mask & (1u64 << c)) == 0 {
+                unknown_cards[n] = c;
+                n += 1;
+            }
+        }
+
         let mut hands_out = [0u64; 4];
         let mut seed = 42u64;
 
         let ok = sample_world(
             0,
             my_hand,
-            played_cards,
+            &unknown_cards[..n],
             voids,
             target_sizes,
             &mut hands_out,
@@ -377,7 +406,7 @@ mod tests {
         let heart_moves: Vec<u8> = evs
             .iter()
             .map(|&(m, _)| m)
-            .filter(|&m| m / 10 == 0)
+            .filter(|&m| crate::engine::CARD_SUIT[m as usize] == 0)
             .collect();
         assert!(heart_moves.contains(&9));
         assert!(heart_moves.contains(&8));

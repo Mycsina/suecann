@@ -30,13 +30,13 @@ fn sum_points(mut mask: u64) -> usize {
     pts
 }
 
-pub fn encode_belief_state(game: &SuecaSimulatorGame, seat: u8) -> [f64; 21] {
-    let mut vec = [0.0f64; 21];
+pub fn encode_belief_state(game: &SuecaSimulatorGame, seat: u8) -> [f64; 30] {
+    let mut vec = [0.0f64; 30];
     let hand = game.state.hands[seat as usize];
     let trump = game.state.trump;
     let position = game.current_trick_len;
     let led_suit = if position > 0 {
-        Some(game.current_trick[0] / 10)
+        Some(crate::engine::CARD_SUIT[game.current_trick[0] as usize])
     } else {
         None
     };
@@ -103,7 +103,7 @@ pub fn encode_belief_state(game: &SuecaSimulatorGame, seat: u8) -> [f64; 21] {
         if led != trump {
             let mut cut = false;
             for i in 0..position {
-                if (game.current_trick[i] / 10) == trump {
+                if crate::engine::CARD_SUIT[game.current_trick[i] as usize] == trump {
                     cut = true;
                     break;
                 }
@@ -189,13 +189,49 @@ pub fn encode_belief_state(game: &SuecaSimulatorGame, seat: u8) -> [f64; 21] {
 
     let our_pts = game.state.team_02_score as i32;
     let opp_pts = game.state.team_13_score as i32;
-    let (our_team, opp_team) = if (seat % 2) == 0 {
+    let (our_team, opp_team) = if seat.is_multiple_of(2) {
         (our_pts, opp_pts)
     } else {
         (opp_pts, our_pts)
     };
     let delta = our_team - opp_team;
     vec[20] = ((delta + 120) as f64) / 240.0;
+
+    // --- Side-Suit tracking features (9) ---
+    // Extract the 3 side suits in ascending order (excluding trump)
+    let mut side_suits = [0u8; 3];
+    let mut count_side = 0;
+    for s in 0..4 {
+        if s != trump {
+            side_suits[count_side] = s;
+            count_side += 1;
+        }
+    }
+
+    const DEPLETION_LOOKUP: [f64; 11] = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
+    for j in 0..3 {
+        let suit = side_suits[j];
+        let suit_mask = 0x3FFu64 << (suit * 10);
+
+        // Depletion count using POPCNT on history mask
+        let count = (prev_played & suit_mask).count_ones() as usize;
+        vec[21 + j * 3 + 0] = DEPLETION_LOOKUP[count];
+
+        // Ace Played (rank 9)
+        vec[21 + j * 3 + 1] = if (prev_played & (1u64 << (suit * 10 + 9))) != 0 {
+            1.0
+        } else {
+            0.0
+        };
+
+        // Seven Played (rank 8)
+        vec[21 + j * 3 + 2] = if (prev_played & (1u64 << (suit * 10 + 8))) != 0 {
+            1.0
+        } else {
+            0.0
+        };
+    }
 
     vec
 }

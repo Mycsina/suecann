@@ -4,9 +4,6 @@
 Maintains compatibility with Python scripts and PyO3 bindings.
 """
 
-from __future__ import annotations
-
-import math
 from enum import IntEnum
 from typing import NamedTuple
 from dataclasses import dataclass

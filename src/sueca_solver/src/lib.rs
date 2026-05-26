@@ -1,4 +1,5 @@
 pub mod belief;
+pub mod constants;
 pub mod engine;
 pub mod evaluator;
 pub mod heuristic;
@@ -20,7 +21,6 @@ fn sueca_solver(
     m: &pyo3::prelude::Bound<'_, pyo3::prelude::PyModule>,
 ) -> pyo3::prelude::PyResult<()> {
     use pyo3::prelude::*;
-    crate::search::init_zobrist();
 
     // Register PIMC classes/functions
     m.add_class::<py_bindings::pimc::SuecaState>()?;
@@ -54,6 +54,14 @@ fn sueca_solver(
         py_bindings::matchup::generate_expert_dataset_rust,
         m
     )?)?;
+
+    // Register WANN layout constants
+    m.add("INPUT_START", crate::constants::INPUT_START)?;
+    m.add("INPUT_COUNT", crate::constants::INPUT_COUNT)?;
+    m.add("BIAS_ID", crate::constants::BIAS_ID)?;
+    m.add("OUTPUT_COUNT", crate::constants::OUTPUT_COUNT)?;
+    m.add("OUTPUT_START", crate::constants::OUTPUT_START)?;
+    m.add("FIRST_HIDDEN_ID", crate::constants::FIRST_HIDDEN_ID)?;
 
     Ok(())
 }

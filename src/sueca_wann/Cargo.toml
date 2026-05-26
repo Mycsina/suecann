@@ -16,3 +16,4 @@ clap = { version = "4.4", features = ["derive"] }
 zip = "0.6"
 npyz = "0.8"
 rayon = "1.8"
+chrono = "0.4"

@@ -5,8 +5,6 @@ Compiles weight-agnostic neural networks into human-readable logical rules
 and generates executable Python code. Generates Graphviz visualizations of network topologies.
 """
 
-from __future__ import annotations
-
 import os
 import sys
 
@@ -14,6 +12,8 @@ import json
 import numpy as np
 from enum import IntEnum
 from typing import NamedTuple, List, Dict, Set
+
+import sueca_solver
 
 
 class NodeType(IntEnum):
@@ -60,12 +60,19 @@ class NodeGene(NamedTuple):
         return NodeGene(node_id, node_type, activation_fn, aggregation_fn)
 
 
-INPUT_START = 0
-INPUT_COUNT = 21
-BIAS_ID = 21
-OUTPUT_START = 22
-OUTPUT_COUNT = 5
-FIRST_HIDDEN_ID = 27
+INPUT_START = sueca_solver.INPUT_START
+INPUT_COUNT = sueca_solver.INPUT_COUNT
+BIAS_ID = sueca_solver.BIAS_ID
+OUTPUT_START = sueca_solver.OUTPUT_START
+OUTPUT_COUNT = sueca_solver.OUTPUT_COUNT
+FIRST_HIDDEN_ID = sueca_solver.FIRST_HIDDEN_ID
+
+OUTPUT_NAMES = {
+    OUTPUT_START + 0: "MAX_FORCE",
+    OUTPUT_START + 1: "MIN_FORCE",
+    OUTPUT_START + 2: "EFFICIENT_WIN",
+    OUTPUT_START + 3: "EQUITY_BUILDER",
+}
 
 
 def _initial_node_genes() -> List[NodeGene]:
@@ -257,21 +264,26 @@ FEATURE_NAMES = {
     18: "Trick_Number",
     19: "Trumps_Remaining",
     20: "Score_Delta",
+    21: "Side0_Depletion",
+    22: "Side0_Ace_Played",
+    23: "Side0_7_Played",
+    24: "Side1_Depletion",
+    25: "Side1_Ace_Played",
+    26: "Side1_7_Played",
+    27: "Side2_Depletion",
+    28: "Side2_Ace_Played",
+    29: "Side2_7_Played",
 }
 
-# Map oracle outputs to names
-OUTPUT_NAMES = {
-    22: "DUCK_OR_DUMP",
-    23: "TAKE_CHEAPLY",
-    24: "FORCE_HIGH",
-    25: "FEED_PARTNER",
-    26: "CUT_LOW",
-}
+# OUTPUT_NAMES is defined at the top using relative keys
 
 
 def get_reachable_nodes(genome: Genome) -> set[int]:
     """Find all node IDs that are reachable backwards from the output nodes."""
-    reachable = set(range(OUTPUT_START, OUTPUT_START + OUTPUT_COUNT))
+    output_ids = [
+        nid for nid, ng in genome.node_genes.items() if ng.node_type == NodeType.OUTPUT
+    ]
+    reachable = set(output_ids)
     queue = list(reachable)
 
     incoming = {}
@@ -300,8 +312,28 @@ def compile_rules(genome: Genome, W: float | None = 1.0) -> str:
     reachable = get_reachable_nodes(genome)
     order = genome.topological_order()
 
+    output_ids = sorted(
+        nid for nid, ng in genome.node_genes.items() if ng.node_type == NodeType.OUTPUT
+    )
+    output_names = {
+        nid: name
+        for nid, name in zip(
+            output_ids, ["MAX_FORCE", "MIN_FORCE", "EFFICIENT_WIN", "EQUITY_BUILDER"]
+        )
+    }
+
+    bias_ids = [
+        nid for nid, ng in genome.node_genes.items() if ng.node_type == NodeType.BIAS
+    ]
+    bias_id = bias_ids[0] if bias_ids else BIAS_ID
+
     # We only need to show active hidden and output nodes
-    active_nodes = [nid for nid in order if nid in reachable and nid >= OUTPUT_START]
+    active_nodes = [
+        nid
+        for nid in order
+        if nid in reachable
+        and genome.node_genes[nid].node_type in (NodeType.HIDDEN, NodeType.OUTPUT)
+    ]
 
     lines = []
     w_str = f"W = {W}" if W is not None else "parameterized W"
@@ -309,16 +341,24 @@ def compile_rules(genome: Genome, W: float | None = 1.0) -> str:
     lines.append("")
 
     lines.append("Active Inputs Referenced:")
-    referenced_inputs = sorted(nid for nid in reachable if nid <= BIAS_ID)
+    referenced_inputs = sorted(
+        nid
+        for nid in reachable
+        if genome.node_genes[nid].node_type in (NodeType.INPUT, NodeType.BIAS)
+    )
     for r in referenced_inputs:
-        if r == BIAS_ID:
-            lines.append(f"  BIAS (Node {BIAS_ID}) = 1.0")
+        if r == bias_id:
+            lines.append(f"  BIAS (Node {bias_id}) = 1.0")
         else:
             lines.append(f"  {FEATURE_NAMES[r]} (Node {r})")
     lines.append("")
 
     # Separate hidden and output nodes
-    hidden_nodes = [nid for nid in active_nodes if nid >= FIRST_HIDDEN_ID]
+    hidden_nodes = [
+        nid
+        for nid in active_nodes
+        if genome.node_genes[nid].node_type == NodeType.HIDDEN
+    ]
 
     # Topological order guarantees inputs/hidden evaluated first
     if hidden_nodes:
@@ -328,14 +368,13 @@ def compile_rules(genome: Genome, W: float | None = 1.0) -> str:
         lines.append("")
 
     lines.append("Decision Rules for Play Intents:")
-    # Print all 5 output intents, even if some are inactive
-    for nid in range(OUTPUT_START, OUTPUT_START + OUTPUT_COUNT):
+    for nid in output_ids:
         if nid in reachable:
             lines.append(
-                f"  {OUTPUT_NAMES[nid]} = {_format_node_expression_rhs(genome, nid, W)}"
+                f"  {output_names[nid]} = {_format_node_expression_rhs(genome, nid, W)}"
             )
         else:
-            lines.append(f"  {OUTPUT_NAMES[nid]} = 0.0 (Inactive)")
+            lines.append(f"  {output_names[nid]} = 0.0 (Inactive)")
 
     return "\n".join(lines)
 
@@ -357,12 +396,17 @@ def _format_node_expression_rhs(genome: Genome, nid: int, W: float | None) -> st
     if not conns:
         return "0.0"
 
+    bias_ids = [
+        n.id for n in genome.node_genes.values() if n.node_type == NodeType.BIAS
+    ]
+    bias_id = bias_ids[0] if bias_ids else BIAS_ID
+
     signals = []
     for c in conns:
         # Format source
-        if c.src == BIAS_ID:
+        if c.src == bias_id:
             src_str = "1.0"
-        elif c.src < BIAS_ID:
+        elif genome.node_genes[c.src].node_type == NodeType.INPUT:
             src_str = FEATURE_NAMES[c.src]
         else:
             src_str = f"hidden_{c.src}"
@@ -419,7 +463,28 @@ def compile_to_python(genome: Genome) -> str:
     """
     reachable = get_reachable_nodes(genome)
     order = genome.topological_order()
-    active_nodes = [nid for nid in order if nid in reachable and nid >= OUTPUT_START]
+
+    output_ids = sorted(
+        nid for nid, ng in genome.node_genes.items() if ng.node_type == NodeType.OUTPUT
+    )
+    output_names = {
+        nid: name
+        for nid, name in zip(
+            output_ids, ["MAX_FORCE", "MIN_FORCE", "EFFICIENT_WIN", "EQUITY_BUILDER"]
+        )
+    }
+
+    bias_ids = [
+        nid for nid, ng in genome.node_genes.items() if ng.node_type == NodeType.BIAS
+    ]
+    bias_id = bias_ids[0] if bias_ids else BIAS_ID
+
+    active_nodes = [
+        nid
+        for nid in order
+        if nid in reachable
+        and genome.node_genes[nid].node_type in (NodeType.HIDDEN, NodeType.OUTPUT)
+    ]
 
     lines = []
     lines.append("import numpy as np")
@@ -439,13 +504,20 @@ def compile_to_python(genome: Genome) -> str:
     lines.append("")
 
     lines.append("    # Inputs mapping")
-    for r in range(INPUT_COUNT):
+    input_ids = sorted(
+        nid for nid, ng in genome.node_genes.items() if ng.node_type == NodeType.INPUT
+    )
+    for r in input_ids:
         lines.append(f"    {FEATURE_NAMES[r]} = float(belief[{r}])")
     lines.append("    BIAS = 1.0")
     lines.append("")
 
     # Compile logic
-    hidden_nodes = [nid for nid in active_nodes if nid >= FIRST_HIDDEN_ID]
+    hidden_nodes = [
+        nid
+        for nid in active_nodes
+        if genome.node_genes[nid].node_type == NodeType.HIDDEN
+    ]
     if hidden_nodes:
         lines.append("    # Hidden node logic")
         for nid in hidden_nodes:
@@ -453,8 +525,8 @@ def compile_to_python(genome: Genome) -> str:
         lines.append("")
 
     lines.append("    # Output node logic")
-    for nid in range(OUTPUT_START, OUTPUT_START + OUTPUT_COUNT):
-        name = OUTPUT_NAMES[nid]
+    for nid in output_ids:
+        name = output_names[nid]
         if nid in reachable:
             expr = _python_node_assignment(genome, nid)
             lines.append(f"    {name} = {expr}")
@@ -463,11 +535,8 @@ def compile_to_python(genome: Genome) -> str:
 
     lines.append("")
     lines.append("    return np.array([")
-    lines.append("        DUCK_OR_DUMP,")
-    lines.append("        TAKE_CHEAPLY,")
-    lines.append("        FORCE_HIGH,")
-    lines.append("        FEED_PARTNER,")
-    lines.append("        CUT_LOW")
+    for nid in output_ids:
+        lines.append(f"        {output_names[nid]},")
     lines.append("    ], dtype=np.float64)")
 
     return "\n".join(lines)
@@ -483,12 +552,17 @@ def _python_node_assignment(genome: Genome, nid: int) -> str:
     if not conns:
         return "0.0"
 
+    bias_ids = [
+        n.id for n in genome.node_genes.values() if n.node_type == NodeType.BIAS
+    ]
+    bias_id = bias_ids[0] if bias_ids else BIAS_ID
+
     signals = []
     for c in conns:
         # Format source
-        if c.src == BIAS_ID:
+        if c.src == bias_id:
             src_str = "BIAS"
-        elif c.src < BIAS_ID:
+        elif genome.node_genes[c.src].node_type == NodeType.INPUT:
             src_str = FEATURE_NAMES[c.src]
         else:
             src_str = f"hidden_{c.src}"
@@ -525,16 +599,14 @@ def _python_node_assignment(genome: Genome, nid: int) -> str:
 def compute_depths(genome: Genome) -> dict[int, int]:
     """Compute the depth of each node in the DAG for visual leveling."""
     depths = {}
-    for nid in range(INPUT_START, INPUT_START + INPUT_COUNT):
-        depths[nid] = 0
-    depths[BIAS_ID] = 0
+    for nid, ng in genome.node_genes.items():
+        if ng.node_type in (NodeType.INPUT, NodeType.BIAS):
+            depths[nid] = 0
 
     order = genome.topological_order()
     for nid in order:
-        if nid < FIRST_HIDDEN_ID and nid not in range(
-            OUTPUT_START, OUTPUT_START + OUTPUT_COUNT
-        ):
-            depths[nid] = 0
+        ng = genome.node_genes.get(nid)
+        if ng is None or ng.node_type in (NodeType.INPUT, NodeType.BIAS):
             continue
 
         incoming = [c for c in genome.enabled_connections() if c.dst == nid]
@@ -545,10 +617,16 @@ def compute_depths(genome: Genome) -> dict[int, int]:
 
     # Place output nodes at max depth + 1 for clean layout
     max_hidden_depth = max(
-        [d for n, d in depths.items() if n >= FIRST_HIDDEN_ID], default=0
+        [
+            d
+            for nid, d in depths.items()
+            if genome.node_genes[nid].node_type == NodeType.HIDDEN
+        ],
+        default=0,
     )
-    for nid in range(OUTPUT_START, OUTPUT_START + OUTPUT_COUNT):
-        depths[nid] = max_hidden_depth + 1
+    for nid, ng in genome.node_genes.items():
+        if ng.node_type == NodeType.OUTPUT:
+            depths[nid] = max_hidden_depth + 1
 
     return depths
 
@@ -575,11 +653,26 @@ def export_topology_graphviz(genome: Genome, output_path: str) -> None:
     # Group by depth
     depths = compute_depths(genome)
     max_depth = max(depths.values(), default=1)
+    reachable = get_reachable_nodes(genome)
+
+    output_ids = sorted(
+        nid for nid, ng in genome.node_genes.items() if ng.node_type == NodeType.OUTPUT
+    )
+    output_names = {
+        nid: name
+        for nid, name in zip(
+            output_ids, ["MAX_FORCE", "MIN_FORCE", "EFFICIENT_WIN", "EQUITY_BUILDER"]
+        )
+    }
+
+    bias_ids = [
+        nid for nid, ng in genome.node_genes.items() if ng.node_type == NodeType.BIAS
+    ]
+    bias_id = bias_ids[0] if bias_ids else BIAS_ID
 
     # Compile node labels and styles
     for nid, ng in genome.node_genes.items():
         # Only render reachable nodes or output nodes
-        reachable = get_reachable_nodes(genome)
         if nid not in reachable:
             continue
 
@@ -589,29 +682,29 @@ def export_topology_graphviz(genome: Genome, output_path: str) -> None:
                 str(nid),
                 label,
                 shape="ellipse",
-                color="#3182bd",
-                fillcolor="#deebf7",
+                color="#4682b4",
+                fillcolor="#f0f8ff",
                 style="filled",
                 fontname="Helvetica",
             )
         elif ng.node_type == NodeType.BIAS:
             dot.node(
                 str(nid),
-                "BIAS\n(21)",
+                f"BIAS\n({bias_id})",
                 shape="ellipse",
-                color="#636363",
-                fillcolor="#f0f0f0",
+                color="#7f7f7f",
+                fillcolor="#f5f5f5",
                 style="filled",
                 fontname="Helvetica",
             )
         elif ng.node_type == NodeType.OUTPUT:
-            label = f"{OUTPUT_NAMES[nid]}\n(O{nid})"
+            label = f"{output_names[nid]}\n(O{nid})"
             dot.node(
                 str(nid),
                 label,
                 shape="box",
-                color="#de2d26",
-                fillcolor="#fee0d2",
+                color="#b22222",
+                fillcolor="#fff0f5",
                 style="filled,bold",
                 fontname="Helvetica-Bold",
             )
@@ -623,9 +716,9 @@ def export_topology_graphviz(genome: Genome, output_path: str) -> None:
             dot.node(
                 str(nid),
                 label,
-                shape="Mrecord",
-                color="#e6550d",
-                fillcolor="#fee6ce",
+                shape="box",
+                color="#d2691e",
+                fillcolor="#fff5ee",
                 style="filled",
                 fontname="Helvetica",
             )
@@ -633,22 +726,19 @@ def export_topology_graphviz(genome: Genome, output_path: str) -> None:
     # Connections
     for c in genome.conn_genes.values():
         if not c.enabled:
-            # Omit or draw dotted light grey
-            dot.edge(
-                str(c.src),
-                str(c.dst),
-                style="dotted",
-                color="#d9d9d9",
-                arrowsize="0.5",
-            )
+            # Omit disabled connections to reduce clutter (Semiology of Graphics: Graphic Density)
+            continue
+
+        if c.src not in reachable or c.dst not in reachable:
+            # Skip connections involving unreachable nodes
             continue
 
         # Color and style according to sign
         if c.sign == 1:
-            color = "#31a354"  # Green
+            color = "#2e8b57"  # Soft emerald green (positive impact)
             style = "solid"
         else:
-            color = "#de2d26"  # Red
+            color = "#cd5c5c"  # Soft crimson red (inhibitory impact)
             style = "dashed"
 
         dot.edge(
@@ -660,12 +750,33 @@ def export_topology_graphviz(genome: Genome, output_path: str) -> None:
             arrowsize="0.8",
         )
 
+    # Enforce sequence ordering for inputs and outputs via invisible edges to prevent layout shuffling
+    active_inputs = sorted(
+        [
+            nid
+            for nid in reachable
+            if genome.node_genes[nid].node_type in (NodeType.INPUT, NodeType.BIAS)
+        ]
+    )
+    for i in range(len(active_inputs) - 1):
+        dot.edge(str(active_inputs[i]), str(active_inputs[i + 1]), style="invis")
+
+    active_outputs = sorted(
+        [
+            nid
+            for nid in reachable
+            if genome.node_genes[nid].node_type == NodeType.OUTPUT
+        ]
+    )
+    for i in range(len(active_outputs) - 1):
+        dot.edge(str(active_outputs[i]), str(active_outputs[i + 1]), style="invis")
+
     # Force grouping by depth levels
     for d in range(max_depth + 1):
         with dot.subgraph() as s:
             s.attr(rank="same")
             for nid, depth in depths.items():
-                if depth == d and nid in get_reachable_nodes(genome):
+                if depth == d and nid in reachable:
                     s.node(str(nid))
 
     # Save .dot representation
@@ -692,9 +803,199 @@ def export_topology_graphviz(genome: Genome, output_path: str) -> None:
         )
 
 
+def plot_training_stats(csv_path: str, output_path: str) -> None:
+    """Plot the training run data using premium Semiology of Graphics principles."""
+    if not os.path.exists(csv_path):
+        print(f"Warning: Stats CSV not found at {csv_path}. Skipping stats plotting.")
+        return
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import pandas as pd
+    except ImportError:
+        print(
+            "Warning: matplotlib or pandas library not installed. Cannot plot training stats."
+        )
+        return
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Error loading training stats CSV: {e}")
+        return
+
+    # Clean styling
+    plt.rcParams["font.sans-serif"] = "Helvetica, Arial, DejaVu Sans"
+    plt.rcParams["font.family"] = "sans-serif"
+
+    # 5-panel layout (Row 1 has 2 panels, Row 2 has 3 panels)
+    fig = plt.figure(figsize=(15, 10))
+    gs = fig.add_gridspec(2, 6, hspace=0.35, wspace=0.45)
+
+    ax1 = fig.add_subplot(gs[0, 0:3])  # Row 0, cols 0-2 (Phase 0)
+    ax2 = fig.add_subplot(gs[0, 3:6])  # Row 0, cols 3-5 (Phase 1)
+    ax3 = fig.add_subplot(gs[1, 0:2])  # Row 1, cols 0-1 (Species Count)
+    ax4 = fig.add_subplot(gs[1, 2:4])  # Row 1, cols 2-3 (Connections)
+    ax5 = fig.add_subplot(gs[1, 4:6])  # Row 1, cols 4-5 (Hidden Nodes)
+
+    # Colors
+    c_best = "#1f77b4"  # Premium blue
+    c_avg = "#aec7e8"  # Light blue
+    c_median = "#ff7f0e"  # Orange
+    c_species = "#2ca02c"  # Green
+    c_conn = "#9467bd"  # Purple
+    c_hidden = "#d62728"  # Red
+
+    # Filter phase data
+    phase0_df = df[df["phase"] == 0]
+    phase1_df = df[df["phase"] == 1]
+
+    # 1. Phase 0 Supervised Accuracy
+    if not phase0_df.empty:
+        ax1.plot(
+            phase0_df["generation"],
+            phase0_df["best_fitness"],
+            label="Best Accuracy",
+            color=c_best,
+            linewidth=2.0,
+        )
+        if "avg_fitness" in phase0_df.columns:
+            ax1.plot(
+                phase0_df["generation"],
+                phase0_df["avg_fitness"],
+                label="Avg Accuracy",
+                color=c_avg,
+                linewidth=1.5,
+                linestyle="--",
+            )
+        ax1.fill_between(
+            phase0_df["generation"], phase0_df["best_fitness"], color=c_best, alpha=0.08
+        )
+        ax1.set_title(
+            "Phase 0: Supervised Pretraining Accuracy",
+            fontsize=12,
+            fontweight="bold",
+            pad=10,
+        )
+        ax1.set_xlabel("Generation", fontsize=10)
+        ax1.set_ylabel("Accuracy (PIMC Match)", fontsize=10)
+        ax1.legend(loc="lower right", frameon=False, fontsize=9)
+    else:
+        ax1.text(0.5, 0.5, "No Phase 0 Data Available", ha="center", va="center")
+        ax1.set_title(
+            "Phase 0: Supervised Pretraining Accuracy",
+            fontsize=12,
+            fontweight="bold",
+            pad=10,
+        )
+
+    # 2. Phase 1 Self-Play Delta vs HeuristicBot
+    if not phase1_df.empty:
+        ax2.plot(
+            phase1_df["generation"],
+            phase1_df["best_delta"],
+            label="Best Delta",
+            color=c_best,
+            linewidth=2.0,
+        )
+        if "median_delta" in phase1_df.columns:
+            ax2.plot(
+                phase1_df["generation"],
+                phase1_df["median_delta"],
+                label="Median Delta",
+                color=c_median,
+                linewidth=1.5,
+            )
+        ax2.fill_between(
+            phase1_df["generation"], phase1_df["best_delta"], color=c_best, alpha=0.08
+        )
+        ax2.axhline(
+            y=0.0,
+            color="gray",
+            linestyle=":",
+            linewidth=1.2,
+            label="HeuristicBot Baseline",
+        )
+        ax2.set_title(
+            "Phase 1: Self-Play Delta vs HeuristicBot",
+            fontsize=12,
+            fontweight="bold",
+            pad=10,
+        )
+        ax2.set_xlabel("Generation", fontsize=10)
+        ax2.set_ylabel("Game Points Delta", fontsize=10)
+        ax2.legend(loc="lower right", frameon=False, fontsize=9)
+    else:
+        ax2.text(0.5, 0.5, "No Phase 1 Data Available", ha="center", va="center")
+        ax2.set_title(
+            "Phase 1: Self-Play Delta vs HeuristicBot",
+            fontsize=12,
+            fontweight="bold",
+            pad=10,
+        )
+
+    # 3. Species count (all generations)
+    ax3.plot(df["generation"], df["n_species"], color=c_species, linewidth=1.8)
+    ax3.fill_between(df["generation"], df["n_species"], color=c_species, alpha=0.08)
+    ax3.set_title("Species Diversity", fontsize=11, fontweight="bold", pad=10)
+    ax3.set_xlabel("Generation", fontsize=9)
+    ax3.set_ylabel("Number of Species", fontsize=9)
+
+    # Draw phase transition vertical line
+    if not phase1_df.empty:
+        phase1_start = phase1_df["generation"].min()
+        for ax in [ax3, ax4, ax5]:
+            ax.axvline(
+                x=phase1_start, color="gray", linestyle="--", alpha=0.5, linewidth=1.0
+            )
+
+    # 4. Network Connections (best genome)
+    ax4.plot(df["generation"], df["n_connections_best"], color=c_conn, linewidth=1.8)
+    ax4.fill_between(
+        df["generation"], df["n_connections_best"], color=c_conn, alpha=0.08
+    )
+    ax4.set_title("Best Genome Connections", fontsize=11, fontweight="bold", pad=10)
+    ax4.set_xlabel("Generation", fontsize=9)
+    ax4.set_ylabel("Connection Count", fontsize=9)
+
+    # 5. Network Hidden Nodes (best genome)
+    ax5.plot(df["generation"], df["n_hidden_best"], color=c_hidden, linewidth=1.8)
+    ax5.fill_between(df["generation"], df["n_hidden_best"], color=c_hidden, alpha=0.08)
+    ax5.set_title("Best Genome Hidden Nodes", fontsize=11, fontweight="bold", pad=10)
+    ax5.set_xlabel("Generation", fontsize=9)
+    ax5.set_ylabel("Hidden Node Count", fontsize=9)
+
+    # Apply global aesthetics to all subplots
+    for ax in [ax1, ax2, ax3, ax4, ax5]:
+        ax.grid(True, which="both", color="#f4f4f4", linestyle="-", linewidth=0.8)
+        # Hide top and right spines
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#cccccc")
+        ax.spines["bottom"].set_color("#cccccc")
+        ax.tick_params(colors="#555555", labelsize=9)
+
+    plt.suptitle(
+        "Sueca WANN Training Evolution Performance & Structure Summary",
+        fontsize=14,
+        fontweight="bold",
+        y=0.96,
+    )
+
+    # Save the figure
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved training stats visualization to {output_path}")
+
+
 if __name__ == "__main__":
     import argparse
-    from src.oracle.hall_of_fame import load_genome
+
+    pass  # load_genome defined in this module
 
     parser = argparse.ArgumentParser(
         description="Compile WANN rules and visualize topology"
@@ -738,3 +1039,13 @@ if __name__ == "__main__":
     # Export topology graphviz
     viz_path = os.path.join(args.output_dir, "topology_graph")
     export_topology_graphviz(genome, viz_path)
+
+    # Plot training stats if available
+    genome_dir = os.path.dirname(args.genome) or "."
+    if os.path.basename(genome_dir) == "genomes":
+        parent_dir = os.path.dirname(genome_dir) or "."
+    else:
+        parent_dir = genome_dir
+    stats_csv_path = os.path.join(parent_dir, "training_stats.csv")
+    plot_path = os.path.join(args.output_dir, "run_plot.png")
+    plot_training_stats(stats_csv_path, plot_path)

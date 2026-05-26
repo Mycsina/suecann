@@ -11,17 +11,13 @@ Uses duplicate deals (symmetric seat rotation) to eliminate deal luck and
 computes 95% binomial confidence intervals. All game simulations run in Rust.
 """
 
-from __future__ import annotations
-
 import argparse
 import csv
 import math
 import os
 import sys
 import time
-from enum import IntEnum
-from typing import NamedTuple
-from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -34,9 +30,6 @@ import seaborn as sns
 
 
 from src.compat import (
-    Suit,
-    Rank,
-    Card,
     DealRecord,
     generate_deals,
     RustDealCompat,
@@ -54,11 +47,13 @@ def compute_binomial_ci_margin(p: float, n: int) -> float:
 
 
 def run_matchup(
-    bot_a: tuple[int, typing.Any],
-    bot_b: tuple[int, typing.Any],
+    bot_a: tuple[int, Any],
+    bot_b: tuple[int, Any],
     deals: list[DealRecord],
     base_seed: int,
     use_multiprocessing: bool = True,
+    pimc_worlds: int = 80,
+    pimc_depth: int = 4,
 ) -> tuple[dict, dict]:
     """Run a matchup in Rust and return statistics for BOTH bots."""
     import sueca_solver
@@ -89,6 +84,8 @@ def run_matchup(
             bot_b_network,
             sweep_weights,
             base_seed,
+            pimc_worlds,
+            pimc_depth,
         )
     )
 
@@ -172,6 +169,8 @@ def run_tournament(
     n_deals: int,
     base_seed: int,
     use_multiprocessing: bool = True,
+    pimc_worlds: int = 80,
+    pimc_depth: int = 4,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Run a complete round-robin tournament between registered bots."""
     bot_names = list(bots_dict.keys())
@@ -200,12 +199,18 @@ def run_tournament(
             )
             t0 = time.time()
             stats_a, stats_b = run_matchup(
-                bot_a, bot_b, deals, base_seed, use_multiprocessing
+                bot_a,
+                bot_b,
+                deals,
+                base_seed,
+                use_multiprocessing,
+                pimc_worlds,
+                pimc_depth,
             )
             elapsed = time.time() - t0
             print(
-                f"  -> Result: {name_a} win rate = {stats_a['win_rate']*100:.1f}% ± {stats_a['ci_margin']*100:.1f}% | "
-                f"{name_b} win rate = {stats_b['win_rate']*100:.1f}% ± {stats_b['ci_margin']*100:.1f}%"
+                f"  -> Result: {name_a} win rate = {stats_a['win_rate'] * 100:.1f}% ± {stats_a['ci_margin'] * 100:.1f}% | "
+                f"{name_b} win rate = {stats_b['win_rate'] * 100:.1f}% ± {stats_b['ci_margin'] * 100:.1f}%"
             )
             print(
                 f"  -> Card Pts: {name_a} = {stats_a['avg_pts']:.1f} vs {name_b} = {stats_b['avg_pts']:.1f} | Time = {elapsed:.1f}s"
@@ -252,7 +257,7 @@ def plot_tournament_heatmap(
                     annots[i, j] = "50.0%\n(Ref)"
                 else:
                     annots[i, j] = (
-                        f"{win_rates[i, j]*100:.1f}%\n± {ci_margins[i, j]*100:.1f}%"
+                        f"{win_rates[i, j] * 100:.1f}%\n± {ci_margins[i, j] * 100:.1f}%"
                     )
 
         sns.set_theme(style="white")
@@ -321,8 +326,8 @@ def write_csv_report(
                     [
                         bot_names[i],
                         bot_names[j],
-                        f"{win_rates[i, j]*100:.2f}",
-                        f"{ci_margins[i, j]*100:.2f}",
+                        f"{win_rates[i, j] * 100:.2f}",
+                        f"{ci_margins[i, j] * 100:.2f}",
                         f"{pts[i, j]:.2f}",
                         f"{gpts[i, j]:.2f}",
                     ]
@@ -341,23 +346,69 @@ def main():
     parser.add_argument(
         "--genome",
         type=str,
-        default="checkpoints/v10/best_genome_final.npz",
-        help="Path to champion WANN genome",
+        default=None,
+        help="Path to champion WANN genome (searches checkpoints/ for latest if omitted)",
     )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed offset")
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="checkpoints/v10",
-        help="Directory to save artifacts",
+        default=None,
+        help="Directory to save artifacts (default: derived from genome path)",
     )
     parser.add_argument(
         "--no-mp",
         action="store_true",
         help="Disable multiprocessing (ignored, as Rust parallelizes natively)",
     )
+    parser.add_argument(
+        "--pimc-worlds",
+        type=int,
+        default=80,
+        help="Number of worlds for PIMC bot (default: 80)",
+    )
+    parser.add_argument(
+        "--pimc-depth",
+        type=int,
+        default=4,
+        help="Search depth for PIMC bot (default: 4)",
+    )
 
     args = parser.parse_args()
+
+    # Find latest genome if not specified
+    if args.genome is None:
+        checkpoints_dir = "checkpoints"
+        if os.path.isdir(checkpoints_dir):
+            run_dirs = sorted(
+                [
+                    d
+                    for d in os.listdir(checkpoints_dir)
+                    if os.path.isdir(os.path.join(checkpoints_dir, d))
+                ],
+                reverse=True,
+            )
+            for d in run_dirs:
+                candidate = os.path.join(
+                    checkpoints_dir, d, "genomes", "best_genome_final.json"
+                )
+                if os.path.exists(candidate):
+                    args.genome = candidate
+                    print(f"Auto-detected genome: {args.genome}")
+                    break
+            if args.genome is None:
+                print(
+                    "Error: No best_genome_final.json found in any checkpoint run folder."
+                )
+                sys.exit(1)
+        else:
+            print("Error: No checkpoints directory found.")
+            sys.exit(1)
+
+    # Derive output dir from genome path if not specified
+    if args.output_dir is None:
+        args.output_dir = os.path.dirname(args.genome)
+        print(f"Output directory (derived): {args.output_dir}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -383,6 +434,8 @@ def main():
         bots,
         n_deals=args.deals,
         base_seed=args.seed,
+        pimc_worlds=args.pimc_worlds,
+        pimc_depth=args.pimc_depth,
     )
 
     bot_names = list(bots.keys())
@@ -401,7 +454,7 @@ def main():
                 cells.append(f"{'50.0% (Ref)':^12}")
             else:
                 cells.append(
-                    f"{win_rates[i, j]*100:5.1f}% ±{ci_margins[i, j]*100:4.1f}%"
+                    f"{win_rates[i, j] * 100:5.1f}% ±{ci_margins[i, j] * 100:4.1f}%"
                 )
         print(f"{name_a:<25} | " + " | ".join(cells))
     print("=" * 80)
@@ -416,6 +469,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import typing
-
     main()

@@ -3,6 +3,7 @@ use crate::genome::{
 };
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 pub struct InnovationRegistry {
     pub next_innovation: usize,
@@ -30,7 +31,7 @@ impl InnovationRegistry {
 }
 
 fn pick_random_connection<R: Rng>(genome: &Genome, rng: &mut R) -> Option<ConnGene> {
-    let conns: Vec<ConnGene> = genome.conn_genes.values().cloned().collect();
+    let conns: Vec<ConnGene> = genome.conn_genes.iter().cloned().collect();
     if conns.is_empty() {
         return None;
     }
@@ -41,7 +42,7 @@ fn pick_random_connection<R: Rng>(genome: &Genome, rng: &mut R) -> Option<ConnGe
 fn pick_random_enabled_connection<R: Rng>(genome: &Genome, rng: &mut R) -> Option<ConnGene> {
     let enabled: Vec<ConnGene> = genome
         .conn_genes
-        .values()
+        .iter()
         .filter(|c| c.enabled)
         .cloned()
         .collect();
@@ -59,7 +60,7 @@ fn pick_random_node<R: Rng>(
     exclude_bias: bool,
     exclude_outputs: bool,
 ) -> Option<NodeGene> {
-    let mut candidates: Vec<NodeGene> = genome.node_genes.values().cloned().collect();
+    let mut candidates: Vec<NodeGene> = genome.node_genes.iter().cloned().collect();
     if exclude_inputs {
         candidates.retain(|n| n.node_type != NodeType::INPUT);
     }
@@ -78,7 +79,7 @@ fn pick_random_node<R: Rng>(
 
 pub fn mutate_add_node<R: Rng>(
     genome: &mut Genome,
-    registry: &mut InnovationRegistry,
+    registry: &Mutex<InnovationRegistry>,
     rng: &mut R,
 ) -> bool {
     let conn = match pick_random_enabled_connection(genome, rng) {
@@ -87,7 +88,7 @@ pub fn mutate_add_node<R: Rng>(
     };
 
     // Disable the old connection
-    if let Some(c) = genome.conn_genes.get_mut(&conn.innovation) {
+    if let Some(c) = genome.get_conn_mut(conn.innovation) {
         c.enabled = false;
     }
 
@@ -113,24 +114,25 @@ pub fn mutate_add_node<R: Rng>(
     let new_node = NodeGene::make(node_id, NodeType::HIDDEN, act, agg);
     genome.add_node(new_node);
 
-    // Add src -> new_node (sign = +1)
-    let inno1 = registry.get_or_create(conn.src, node_id);
-    genome.add_connection(ConnGene::make(inno1, conn.src, node_id, 1, true));
-
-    // Add new_node -> dst (sign = original_sign)
-    let inno2 = registry.get_or_create(node_id, conn.dst);
-    genome.add_connection(ConnGene::make(inno2, node_id, conn.dst, conn.sign, true));
-
-    genome.next_innovation = registry.next_innovation;
+    // Lock registry only for the two innovation lookups
+    {
+        let mut reg = registry.lock().unwrap();
+        let inno1 = reg.get_or_create(conn.src, node_id);
+        let inno2 = reg.get_or_create(node_id, conn.dst);
+        genome.add_connection(ConnGene::make(inno1, conn.src, node_id, 1, true));
+        genome.add_connection(ConnGene::make(inno2, node_id, conn.dst, conn.sign, true));
+        genome.next_innovation = reg.next_innovation;
+    }
 
     true
 }
 
 pub fn mutate_add_connection<R: Rng>(
     genome: &mut Genome,
-    registry: &mut InnovationRegistry,
+    registry: &Mutex<InnovationRegistry>,
     rng: &mut R,
 ) -> bool {
+    // All the expensive work happens OUTSIDE the lock
     let order = genome.topological_order();
     let mut depth = HashMap::new();
     for (i, &nid) in order.iter().enumerate() {
@@ -138,13 +140,13 @@ pub fn mutate_add_connection<R: Rng>(
     }
 
     let existing: HashSet<(usize, usize)> =
-        genome.conn_genes.values().map(|c| (c.src, c.dst)).collect();
+        genome.conn_genes.iter().map(|c| (c.src, c.dst)).collect();
 
     let mut sources = Vec::new();
     let mut destinations = Vec::new();
 
     for &nid in &order {
-        if let Some(node) = genome.node_genes.get(&nid) {
+        if let Some(node) = genome.get_node(nid) {
             if node.node_type != NodeType::OUTPUT {
                 sources.push(nid);
             }
@@ -175,10 +177,13 @@ pub fn mutate_add_connection<R: Rng>(
     let (src, dst) = candidates[idx];
     let sign = if rng.gen_bool(0.5) { 1 } else { -1 };
 
-    let inno = registry.get_or_create(src, dst);
-    genome.add_connection(ConnGene::make(inno, src, dst, sign, true));
-
-    genome.next_innovation = registry.next_innovation;
+    // Lock registry only for the get_or_create call
+    {
+        let mut reg = registry.lock().unwrap();
+        let inno = reg.get_or_create(src, dst);
+        genome.add_connection(ConnGene::make(inno, src, dst, sign, true));
+        genome.next_innovation = reg.next_innovation;
+    }
 
     true
 }
@@ -189,7 +194,7 @@ pub fn mutate_toggle_connection<R: Rng>(genome: &mut Genome, rng: &mut R) -> boo
         None => return false,
     };
 
-    if let Some(c) = genome.conn_genes.get_mut(&conn.innovation) {
+    if let Some(c) = genome.get_conn_mut(conn.innovation) {
         c.enabled = !c.enabled;
         true
     } else {
@@ -203,7 +208,7 @@ pub fn mutate_flip_sign<R: Rng>(genome: &mut Genome, rng: &mut R) -> bool {
         None => return false,
     };
 
-    if let Some(c) = genome.conn_genes.get_mut(&conn.innovation) {
+    if let Some(c) = genome.get_conn_mut(conn.innovation) {
         c.sign = -c.sign;
         true
     } else {
@@ -233,7 +238,7 @@ pub fn mutate_change_activation<R: Rng>(genome: &mut Genome, rng: &mut R) -> boo
     }
 
     let new_fn = choices[rng.gen_range(0..choices.len())];
-    if let Some(n) = genome.node_genes.get_mut(&node.id) {
+    if let Some(n) = genome.get_node_mut(node.id) {
         n.activation_fn = new_fn;
         true
     } else {
@@ -259,7 +264,7 @@ pub fn mutate_change_aggregation<R: Rng>(genome: &mut Genome, rng: &mut R) -> bo
     }
 
     let new_fn = choices[rng.gen_range(0..choices.len())];
-    if let Some(n) = genome.node_genes.get_mut(&node.id) {
+    if let Some(n) = genome.get_node_mut(node.id) {
         n.aggregation_fn = new_fn;
         true
     } else {
@@ -269,7 +274,7 @@ pub fn mutate_change_aggregation<R: Rng>(genome: &mut Genome, rng: &mut R) -> bo
 
 pub fn apply_mutations<R: Rng>(
     genome: &mut Genome,
-    registry: &mut InnovationRegistry,
+    registry: &Mutex<InnovationRegistry>,
     rng: &mut R,
     p_add_node: f64,
     p_add_conn: f64,
@@ -279,35 +284,23 @@ pub fn apply_mutations<R: Rng>(
     p_change_agg: f64,
 ) -> usize {
     let mut n = 0;
-    if rng.gen_bool(p_add_node) {
-        if mutate_add_node(genome, registry, rng) {
-            n += 1;
-        }
+    if rng.gen_bool(p_add_node) && mutate_add_node(genome, registry, rng) {
+        n += 1;
     }
-    if rng.gen_bool(p_add_conn) {
-        if mutate_add_connection(genome, registry, rng) {
-            n += 1;
-        }
+    if rng.gen_bool(p_add_conn) && mutate_add_connection(genome, registry, rng) {
+        n += 1;
     }
-    if rng.gen_bool(p_toggle_conn) {
-        if mutate_toggle_connection(genome, rng) {
-            n += 1;
-        }
+    if rng.gen_bool(p_toggle_conn) && mutate_toggle_connection(genome, rng) {
+        n += 1;
     }
-    if rng.gen_bool(p_flip_sign) {
-        if mutate_flip_sign(genome, rng) {
-            n += 1;
-        }
+    if rng.gen_bool(p_flip_sign) && mutate_flip_sign(genome, rng) {
+        n += 1;
     }
-    if rng.gen_bool(p_change_act) {
-        if mutate_change_activation(genome, rng) {
-            n += 1;
-        }
+    if rng.gen_bool(p_change_act) && mutate_change_activation(genome, rng) {
+        n += 1;
     }
-    if rng.gen_bool(p_change_agg) {
-        if mutate_change_aggregation(genome, rng) {
-            n += 1;
-        }
+    if rng.gen_bool(p_change_agg) && mutate_change_aggregation(genome, rng) {
+        n += 1;
     }
     n
 }

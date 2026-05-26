@@ -1,7 +1,7 @@
 use crate::checkpoint::TrainingState;
 use crate::config::Config;
 use crate::dataset::{load_expert_dataset, ExpertDataset};
-use crate::genome::JsonGenome;
+use crate::genome::{JsonGenome, FIRST_HIDDEN_ID, INPUT_COUNT, OUTPUT_COUNT, OUTPUT_START};
 use crate::hall_of_fame::{HallOfFame, JsonHallOfFame};
 use crate::mutations::InnovationRegistry;
 use crate::population::Population;
@@ -14,16 +14,8 @@ use rayon::prelude::*;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
-
-pub fn oracle_tax_penalty(generation: usize, phase0_gens: usize, curriculum_gens: usize) -> f64 {
-    if curriculum_gens == 0 {
-        return -3.0;
-    }
-    let active_gens = generation.saturating_sub(phase0_gens);
-    let frac = (active_gens as f64 / curriculum_gens as f64).min(1.0);
-    -0.25 + frac * (-3.0 - (-0.25))
-}
 
 pub fn generate_deals_rust(
     gen: usize,
@@ -67,7 +59,11 @@ pub fn evaluate_phase0(
     dataset: &ExpertDataset,
     sweep_weights: &[f64],
 ) -> Vec<f64> {
-    let max_nodes = genomes.iter().map(|g| g.num_nodes).max().unwrap_or(27);
+    let max_nodes = genomes
+        .iter()
+        .map(|g| g.num_nodes)
+        .max()
+        .unwrap_or(FIRST_HIDDEN_ID);
 
     genomes
         .into_par_iter()
@@ -76,27 +72,32 @@ pub fn evaluate_phase0(
             let mut correct = 0;
 
             for idx in 0..dataset.num_states {
-                let mut inputs = [0.0f64; 21];
-                for i in 0..21 {
-                    inputs[i] = dataset.states[idx * 21 + i];
+                let mut inputs = [0.0f64; INPUT_COUNT];
+                for i in 0..INPUT_COUNT {
+                    inputs[i] = dataset.states[idx * INPUT_COUNT + i];
                 }
                 let target_intent = dataset.intents[idx] as usize;
                 let mask = dataset.legal_masks[idx];
 
-                let mut total_outputs = [0.0f64; 5];
+                let mut total_outputs = [0.0f64; OUTPUT_COUNT];
                 for &w in sweep_weights {
                     candidate.forward(&inputs, w, &mut scratchpad);
-                    for i in 0..5 {
-                        total_outputs[i] += scratchpad[22 + i];
+                    for i in 0..OUTPUT_COUNT {
+                        total_outputs[i] += scratchpad[OUTPUT_START + i];
                     }
                 }
 
                 let mut best_intent = 0;
                 let mut max_val = f64::NEG_INFINITY;
-                for i in 0..5 {
+                for i in 0..OUTPUT_COUNT {
                     let is_legal = (mask & (1 << i)) != 0;
-                    if is_legal && total_outputs[i] > max_val {
-                        max_val = total_outputs[i];
+                    let val = if i == 3 {
+                        total_outputs[i] - 0.25 * (sweep_weights.len() as f64)
+                    } else {
+                        total_outputs[i]
+                    };
+                    if is_legal && val > max_val {
+                        max_val = val;
                         best_intent = i;
                     }
                 }
@@ -124,18 +125,19 @@ pub fn evaluate_phase1(
     baseline_bot_type: i32,
     sweep_weights: &[f64],
     base_seed: u64,
-    generation: usize,
-    curriculum_gens: usize,
-    phase0_gens: usize,
-) -> (Vec<f64>, Vec<f64>, usize) {
+) -> (
+    Vec<f64>,
+    Vec<f64>,
+    Vec<sueca_solver::evaluator::WannBehavior>,
+) {
     let max_nodes = genomes
         .iter()
         .map(|g| g.num_nodes)
         .chain(hof_networks.iter().map(|g| g.num_nodes))
         .max()
-        .unwrap_or(27);
+        .unwrap_or(FIRST_HIDDEN_ID);
 
-    let results: Vec<(f64, usize)> = genomes
+    let results: Vec<(f64, sueca_solver::evaluator::WannBehavior)> = genomes
         .into_par_iter()
         .enumerate()
         .map(|(i, candidate)| {
@@ -155,71 +157,17 @@ pub fn evaluate_phase1(
         })
         .collect();
 
-    let tax_per = oracle_tax_penalty(generation, phase0_gens, curriculum_gens);
-    let n_games = deals.len() * 4;
-
     let mut fitnesses = Vec::with_capacity(genomes.len());
     let mut deltas = Vec::with_capacity(genomes.len());
-    let mut total_illegal = 0;
+    let mut behaviors = Vec::with_capacity(genomes.len());
 
-    for (delta, illegal_count) in results {
-        total_illegal += illegal_count;
-        let illegal_rate = if n_games > 0 {
-            illegal_count as f64 / n_games as f64
-        } else {
-            0.0
-        };
-        let fit = delta + tax_per * illegal_rate;
-        fitnesses.push(fit);
+    for (delta, behavior) in results {
+        fitnesses.push(delta);
         deltas.push(delta);
+        behaviors.push(behavior);
     }
 
-    (fitnesses, deltas, total_illegal)
-}
-
-// ---------------------------------------------------------------------------
-// Phase 0 → 1 HOF transfer: re-evaluate HOF genomes under Phase 1 fitness
-// ---------------------------------------------------------------------------
-fn transfer_hof_to_phase1(hof: &mut HallOfFame, config: &Config, gen: usize, _rng: &mut Pcg64) {
-    if hof.entries.is_empty() {
-        return;
-    }
-
-    let deals = generate_deals_rust(
-        gen,
-        config.evaluation.n_deals,
-        config.evaluation.seed * 1000,
-    );
-
-    let hof_networks: Vec<sueca_solver::wann::RustWannNetwork> = hof
-        .entries
-        .iter()
-        .map(|e| e.genome.to_rust_wann())
-        .collect();
-
-    let (fitnesses, _, _) = evaluate_phase1(
-        &hof_networks,
-        &deals,
-        &[], // no HOF opponents during transfer
-        1,   // partner = HeuristicBot
-        1,   // opp1 = HeuristicBot
-        1,   // opp2 = HeuristicBot
-        1,   // baseline = HeuristicBot
-        &config.evaluation.sweep_weights,
-        config.evaluation.seed + gen as u64 * 1000,
-        gen,
-        config.evaluation.curriculum_gens,
-        config.curriculum.phase0_gens,
-    );
-
-    // Update HOF entries with Phase 1 fitness
-    for (entry, &fitness) in hof.entries.iter_mut().zip(fitnesses.iter()) {
-        entry.fitness = fitness;
-    }
-
-    // Re-sort by new fitness
-    hof.entries
-        .sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+    (fitnesses, deltas, behaviors)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,18 +177,23 @@ fn run_phase0_generation(
     genomes: &[sueca_solver::wann::RustWannNetwork],
     dataset: &ExpertDataset,
     sweep_weights: &[f64],
-) -> (Vec<f64>, Vec<f64>, usize) {
+) -> (Vec<f64>, Vec<f64>) {
     let accs = evaluate_phase0(genomes, dataset, sweep_weights);
-    (accs.clone(), accs, 0)
+    (accs.clone(), accs)
 }
 
 fn run_phase1_generation(
     genomes: &[sueca_solver::wann::RustWannNetwork],
     hof: &HallOfFame,
+    map_elites: &crate::map_elites::MapElitesArchive,
     config: &Config,
     gen: usize,
     rng: &mut Pcg64,
-) -> (Vec<f64>, Vec<f64>, usize) {
+) -> (
+    Vec<f64>,
+    Vec<f64>,
+    Vec<sueca_solver::evaluator::WannBehavior>,
+) {
     let deals = generate_deals_rust(
         gen,
         config.evaluation.n_deals,
@@ -252,23 +205,37 @@ fn run_phase1_generation(
     let opp1_bot_type: i32;
     let opp2_bot_type: i32;
 
-    if hof.entries.is_empty() {
-        partner_bot_type = 1;
-        opp1_bot_type = 1;
-        opp2_bot_type = 1;
-    } else {
-        let sampled = hof.sample(rng, 2);
-        hof_genomes.push(sampled[0].to_rust_wann());
-        partner_bot_type = 2;
+    let sample_seat_bot = |rng: &mut Pcg64,
+                           h: &HallOfFame,
+                           me: &crate::map_elites::MapElitesArchive,
+                           hg: &mut Vec<sueca_solver::wann::RustWannNetwork>|
+     -> i32 {
+        if rng.gen_bool(0.5) {
+            let use_map_elites = rng.gen_bool(0.5);
+            let sampled = if use_map_elites {
+                me.sample_random(rng)
+            } else {
+                None
+            };
+            let genome = sampled.or_else(|| h.sample(rng, 1).first().cloned());
 
-        if sampled.len() >= 2 {
-            hof_genomes.push(sampled[1].to_rust_wann());
-            opp1_bot_type = 3;
+            if let Some(g) = genome {
+                let bot_type = 2 + hg.len() as i32;
+                hg.push(g.to_rust_wann());
+                bot_type
+            } else {
+                1
+            }
         } else {
-            opp1_bot_type = 1;
+            1
         }
-        opp2_bot_type = 1;
-    }
+    };
+
+    let mut sample_rng = rng.clone();
+    partner_bot_type = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
+    opp1_bot_type = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
+    opp2_bot_type = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
+    *rng = sample_rng;
 
     evaluate_phase1(
         genomes,
@@ -280,9 +247,6 @@ fn run_phase1_generation(
         1, // baseline = HeuristicBot
         &config.evaluation.sweep_weights,
         config.evaluation.seed + gen as u64 * 1000,
-        gen,
-        config.evaluation.curriculum_gens,
-        config.curriculum.phase0_gens,
     )
 }
 
@@ -292,13 +256,36 @@ fn run_phase1_generation(
 pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = Pcg64::seed_from_u64(config.evaluation.seed);
 
-    fs::create_dir_all(&config.output.checkpoint_dir)?;
+    // Determine run directory: if resuming, use existing dir; otherwise create dated folder
+    let run_dir = if resume {
+        config.output.checkpoint_dir.clone()
+    } else {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let base = Path::new(&config.output.checkpoint_dir);
+        let mut n = 1;
+        let dir = loop {
+            let candidate = base.join(format!("{}-{}", today, n));
+            if !candidate.exists() {
+                break candidate;
+            }
+            n += 1;
+        };
+        dir.to_string_lossy().to_string()
+    };
+    let mut config = config;
+    config.output.checkpoint_dir = run_dir.clone();
+    config.output.stats_file = format!("{}/training_stats.csv", run_dir);
 
-    let state_checkpoint_path = Path::new(&config.output.checkpoint_dir).join("training_state.bin");
+    fs::create_dir_all(&run_dir)?;
+    fs::create_dir_all(Path::new(&run_dir).join("genomes"))?;
+    println!("Run directory: {}", run_dir);
+
+    let state_checkpoint_path = Path::new(&run_dir).join("training_state.bin");
 
     let mut pop: Population;
     let mut hof: HallOfFame;
-    let mut registry: InnovationRegistry;
+    let mut map_elites: crate::map_elites::MapElitesArchive;
+    let registry: Mutex<InnovationRegistry>;
     let mut start_gen = 0;
     let mut current_phase = 0;
 
@@ -320,17 +307,20 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             next_species_id: state.next_species_id,
             global_best_fitness: state.global_best_fitness,
             global_best_genome: state.global_best_genome,
+            generations_since_improvement: state.generations_since_improvement,
         };
         hof = state.hof;
-        registry = InnovationRegistry::new(state.next_innovation);
+        map_elites = state.map_elites;
+        registry = Mutex::new(InnovationRegistry::new(state.next_innovation));
     } else {
-        registry = InnovationRegistry::new(0);
-        pop = Population::new(config.clone(), &mut rng, &mut registry);
+        registry = Mutex::new(InnovationRegistry::new(0));
+        pop = Population::new(config.clone(), &mut rng, &registry);
         hof = HallOfFame::new(config.hall_of_fame.hof_size);
+        map_elites = crate::map_elites::MapElitesArchive::new();
     }
 
     // Load dataset for Phase 0
-    let dataset = load_expert_dataset("expert_states_w50_d2.npz")?;
+    let dataset = load_expert_dataset(&config.curriculum.phase0_dataset)?;
 
     // CSV Stats
     let stats_path = Path::new(&config.output.stats_file);
@@ -344,7 +334,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
     if !resume || csv_file.metadata()?.len() == 0 {
         writeln!(
             csv_file,
-            "generation,phase,best_fitness,avg_fitness,median_fitness,best_delta,median_delta,global_best_fitness,n_species,n_connections_best,n_hidden_best,oracle_tax,elapsed_sec"
+            "generation,phase,best_fitness,avg_fitness,median_fitness,best_delta,median_delta,global_best_fitness,n_species,n_connections_best,n_hidden_best,elapsed_sec"
         )?;
     }
 
@@ -381,27 +371,107 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             );
             current_phase = new_phase;
             if current_phase == 1 {
-                // Transfer HOF to Phase 1 fitness metric instead of clearing
+                println!("  >>> Pre-populating Phase 1 HOF with top unique Phase 0 genomes...");
+                hof.clear();
+
+                // Get sorted indices of genomes by Phase 0 accuracy
+                let mut pop_indices: Vec<usize> = (0..pop.genomes.len()).collect();
+                pop_indices
+                    .sort_by(|&a, &b| pop.fitnesses[b].partial_cmp(&pop.fitnesses[a]).unwrap());
+
+                let mut unique_genomes = Vec::new();
+                let c1 = config.species.c_excess;
+                let c2 = config.species.c_disjoint;
+                let c3 = config.species.c_mismatch;
+
+                for &idx in &pop_indices {
+                    let candidate = &pop.genomes[idx];
+                    let is_unique = unique_genomes.iter().all(|g| {
+                        crate::species::compatibility_distance(candidate, g, c1, c2, c3) > 0.05
+                    });
+                    if is_unique {
+                        unique_genomes.push(candidate.copy());
+                        if unique_genomes.len() >= 5 {
+                            break;
+                        }
+                    }
+                }
+
+                // If not enough unique, fill with non-identical
+                for &idx in &pop_indices {
+                    if unique_genomes.len() >= 5 {
+                        break;
+                    }
+                    let already_added = unique_genomes.iter().any(|g| {
+                        crate::species::compatibility_distance(&pop.genomes[idx], g, c1, c2, c3)
+                            < 1e-9
+                    });
+                    if !already_added {
+                        unique_genomes.push(pop.genomes[idx].copy());
+                    }
+                }
+
+                // Evaluate them with HeuristicBot matches to register baseline fitness
+                let deals = generate_deals_rust(
+                    gen,
+                    config.evaluation.n_deals,
+                    config.evaluation.seed * 1000,
+                );
+
+                let unique_networks: Vec<sueca_solver::wann::RustWannNetwork> =
+                    unique_genomes.iter().map(|g| g.to_rust_wann()).collect();
+
+                let (fitnesses, _, _) = evaluate_phase1(
+                    &unique_networks,
+                    &deals,
+                    &[], // no HOF opponents during pre-population
+                    1,   // partner = HeuristicBot
+                    1,   // opp1 = HeuristicBot
+                    1,   // opp2 = HeuristicBot
+                    1,   // baseline = HeuristicBot
+                    &config.evaluation.sweep_weights,
+                    config.evaluation.seed + gen as u64 * 1000,
+                );
+
+                for (genome, fitness) in unique_genomes.into_iter().zip(fitnesses.into_iter()) {
+                    hof.add(&genome, fitness, gen);
+                }
+
                 println!(
-                    "  >>> Re-evaluating {} HOF entries under Phase 1 fitness...",
+                    "  >>> Pre-populated HOF with {} unique genomes from Phase 0",
                     hof.entries.len()
                 );
-                transfer_hof_to_phase1(&mut hof, &config, gen, &mut rng);
+
                 pop.global_best_fitness = f64::NEG_INFINITY;
                 pop.global_best_genome = None;
+                pop.generations_since_improvement = 0;
             }
         }
 
         let rust_genomes: Vec<sueca_solver::wann::RustWannNetwork> =
-            pop.genomes.iter().map(|g| g.to_rust_wann()).collect();
+            pop.genomes.par_iter().map(|g| g.to_rust_wann()).collect();
 
-        let (fitnesses, deltas, _total_illegal) = if current_phase == 0 {
-            run_phase0_generation(&rust_genomes, &dataset, &config.evaluation.sweep_weights)
+        let (fitnesses, deltas, behaviors) = if current_phase == 0 {
+            let (fit, dt) =
+                run_phase0_generation(&rust_genomes, &dataset, &config.evaluation.sweep_weights);
+            (fit, dt, Vec::new())
         } else {
-            run_phase1_generation(&rust_genomes, &hof, &config, gen, &mut rng)
+            run_phase1_generation(&rust_genomes, &hof, &map_elites, &config, gen, &mut rng)
         };
 
         pop.tell_fitnesses(&fitnesses);
+
+        // Add each genome's behavior to MAP-Elites if in Phase 1
+        if current_phase == 1 {
+            for (i, behavior) in behaviors.iter().enumerate() {
+                let intent_pref =
+                    (behavior.intent_counts[1] as f64) / (behavior.total_actions.max(1) as f64);
+                let aggression = ((behavior.total_lead_points as f64)
+                    / (behavior.count_leads.max(1) as f64 * 10.0))
+                    .clamp(0.0, 1.0);
+                map_elites.add(&pop.genomes[i], fitnesses[i], gen, intent_pref, aggression);
+            }
+        }
 
         // Find best candidate
         let mut best_idx = 0;
@@ -437,15 +507,9 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
         let n_conns = best_genome.num_enabled();
         let n_hidden = best_genome.hidden_ids().len();
 
-        let tax = oracle_tax_penalty(
-            gen,
-            config.curriculum.phase0_gens,
-            config.evaluation.curriculum_gens,
-        );
-
         writeln!(
             csv_file,
-            "{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{:.2},{:.2}",
+            "{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{:.2}",
             gen,
             current_phase,
             best_fit,
@@ -457,7 +521,6 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             n_species,
             n_conns,
             n_hidden,
-            tax,
             elapsed
         )?;
         csv_file.flush()?;
@@ -479,17 +542,29 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
         );
 
         // Breed next generation
+        if current_phase == 1 && pop.generations_since_improvement > 20 {
+            if let Some(gb_clone) = pop.global_best_genome.as_ref().map(|g| g.copy()) {
+                println!(
+                    "  >>> No improvement for {} generations. Reseeding species with mutations of the global best champion...",
+                    pop.generations_since_improvement
+                );
+                pop.reseed_from_champion(&gb_clone, 0.10, &registry, &mut rng);
+                pop.generations_since_improvement = 0;
+            }
+        }
+
         pop.speciate_and_evolve(
             current_phase,
             config.curriculum.bulking_gens,
             &mut rng,
-            &mut registry,
+            &registry,
         );
 
         // Checkpointing
         if (gen + 1) % 10 == 0 || gen == config.population.generations - 1 {
             // Save HOF
             let hof_path = Path::new(&config.output.checkpoint_dir)
+                .join("genomes")
                 .join(format!("hof_gen{:04}.json", gen + 1));
             let json_hof = JsonHallOfFame::from_hof(&hof);
             let hof_file = fs::File::create(hof_path)?;
@@ -498,6 +573,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             // Save global best genome
             if let Some(ref gb) = pop.global_best_genome {
                 let best_path = Path::new(&config.output.checkpoint_dir)
+                    .join("genomes")
                     .join(format!("best_genome_gen{:04}.json", gen + 1));
                 let json_gb = JsonGenome::from_genome(gb);
                 let gb_file = fs::File::create(best_path)?;
@@ -506,6 +582,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
 
             // Save generation best genome
             let gen_best_path = Path::new(&config.output.checkpoint_dir)
+                .join("genomes")
                 .join(format!("gen_best_genome_gen{:04}.json", gen + 1));
             let json_gen_best = JsonGenome::from_genome(&pop.genomes[best_idx]);
             let gen_best_file = fs::File::create(gen_best_path)?;
@@ -520,21 +597,23 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                 genomes: pop.genomes.clone(),
                 species: pop.species_list.clone(),
                 hof: hof.clone(),
-                next_innovation: registry.next_innovation,
+                next_innovation: registry.lock().unwrap().next_innovation,
                 current_phase,
+                generations_since_improvement: pop.generations_since_improvement,
+                map_elites: map_elites.clone(),
             };
             state.save_to_file(&state_checkpoint_path)?;
         }
     }
 
     // Save final files
-    let hof_path = Path::new(&config.output.checkpoint_dir).join("hof_final.json");
+    let hof_path = Path::new(&config.output.checkpoint_dir).join("genomes").join("hof_final.json");
     let json_hof = JsonHallOfFame::from_hof(&hof);
     let hof_file = fs::File::create(hof_path)?;
     serde_json::to_writer_pretty(hof_file, &json_hof)?;
 
     if let Some(ref gb) = pop.global_best_genome {
-        let best_path = Path::new(&config.output.checkpoint_dir).join("best_genome_final.json");
+        let best_path = Path::new(&config.output.checkpoint_dir).join("genomes").join("best_genome_final.json");
         let json_gb = JsonGenome::from_genome(gb);
         let gb_file = fs::File::create(best_path)?;
         serde_json::to_writer_pretty(gb_file, &json_gb)?;
