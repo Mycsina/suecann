@@ -45,16 +45,16 @@ pub const CARD_RANK: [u8; 40] = [
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct GameState {
-    pub(crate) hands: [u64; 4],             // 4 hands represented as bitboards
-    pub(crate) trump: u8,                   // 0..3
-    pub(crate) led_suit: u8,                // 0..3 (4 if none)
-    pub(crate) current_player: u8,          // 0..3 (counter-clockwise)
-    pub(crate) current_trick_winner: u8,    // 0..3
-    pub(crate) current_trick_best_card: u8, // 0..39 (40 if none)
-    pub(crate) cards_played_in_trick: u8,   // 0..4
-    pub(crate) team_02_score: u8,           // 0..120
-    pub(crate) team_13_score: u8,           // 0..120
-    pub(crate) trick_number: u8,            // 0..10
+    pub hands: [u64; 4],             // 4 hands represented as bitboards
+    pub trump: u8,                   // 0..3
+    pub led_suit: u8,                // 0..3 (4 if none)
+    pub current_player: u8,          // 0..3 (counter-clockwise)
+    pub current_trick_winner: u8,    // 0..3
+    pub current_trick_best_card: u8, // 0..39 (40 if none)
+    pub cards_played_in_trick: u8,   // 0..4
+    pub team_02_score: u8,           // 0..120
+    pub team_13_score: u8,           // 0..120
+    pub trick_number: u8,            // 0..10
 }
 
 impl fmt::Debug for GameState {

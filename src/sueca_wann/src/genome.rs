@@ -5,6 +5,7 @@ pub use sueca_solver::constants::{
     BIAS_ID, FIRST_HIDDEN_ID, INPUT_COUNT, INPUT_START, OUTPUT_COUNT, OUTPUT_START,
 };
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeType {
     INPUT = 0,
@@ -13,6 +14,7 @@ pub enum NodeType {
     OUTPUT = 3,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActivationFn {
     IDENTITY = 0,
@@ -20,6 +22,7 @@ pub enum ActivationFn {
     THRESHOLD = 2,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AggregationFn {
     SUM = 0,
@@ -98,7 +101,7 @@ impl Genome {
         conn_genes: Option<Vec<ConnGene>>,
         next_innovation: usize,
     ) -> Self {
-        let mut nodes = if let Some(ng_list) = node_genes {
+        let nodes = if let Some(ng_list) = node_genes {
             let mut v = ng_list;
             v.sort_by_key(|n| n.id);
             v.dedup_by_key(|n| n.id);
@@ -130,7 +133,7 @@ impl Genome {
             v
         };
 
-        let mut conns = if let Some(cg_list) = conn_genes {
+        let conns = if let Some(cg_list) = conn_genes {
             let mut v = cg_list;
             v.sort_by_key(|c| c.innovation);
             v.dedup_by_key(|c| c.innovation);
@@ -231,6 +234,7 @@ impl Genome {
             .find(|c| c.src == src && c.dst == dst)
     }
 
+    #[allow(dead_code)]
     pub fn enabled_connections(&self) -> Vec<&ConnGene> {
         self.conn_genes.iter().filter(|c| c.enabled).collect()
     }
@@ -239,6 +243,7 @@ impl Genome {
         self.conn_genes.iter().filter(|c| c.enabled).count()
     }
 
+    #[allow(dead_code)]
     pub fn num_nodes(&self) -> usize {
         self.node_genes.len()
     }
@@ -327,7 +332,7 @@ impl Genome {
         }
     }
 
-    pub fn to_rust_wann(&self) -> sueca_solver::wann::RustWannNetwork {
+    pub fn to_rust_wann(&self) -> crate::wann_network::RustWannNetwork {
         let num_nodes = self.node_genes.last().map(|n| n.id).unwrap_or(0) + 1;
 
         let mut node_ids = Vec::with_capacity(self.node_genes.len());
@@ -349,7 +354,7 @@ impl Genome {
         let conn_signs: Vec<i8> = enabled.iter().map(|c| c.sign).collect();
         let conn_enableds: Vec<bool> = vec![true; enabled.len()];
 
-        sueca_solver::wann::RustWannNetwork::new(
+        crate::wann_network::RustWannNetwork::new(
             &node_ids,
             &node_activations,
             &node_aggregations,

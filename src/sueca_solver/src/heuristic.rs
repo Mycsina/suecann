@@ -16,12 +16,160 @@ pub fn select_card_random(legal_mask: u64, rng: &mut LcgRng) -> u8 {
     temp.trailing_zeros() as u8
 }
 
+fn is_partner_secure(
+    game: &SuecaSimulatorGame,
+    seat: u8,
+    winner_card: u8,
+    current_hands: u64,
+) -> bool {
+    let trump = game.state.trump;
+    let led_suit = game.current_trick[0] / 10;
+
+    // Check if there are any opponents who still have to play in this trick
+    let mut opponents_still_to_play = false;
+    for opp in 0..4 {
+        if opp % 2 != seat % 2
+            && !game.current_trick_seats[0..game.current_trick_len].contains(&opp)
+        {
+            opponents_still_to_play = true;
+            break;
+        }
+    }
+
+    if !opponents_still_to_play {
+        return true;
+    }
+
+    // Check if any card outstanding (excluding our own hand) beats the partner's card
+    let outstanding_cards = current_hands & !game.state.hands[seat as usize];
+    let mut temp = outstanding_cards;
+    while temp != 0 {
+        let card = temp.trailing_zeros() as u8;
+        if GameState::beats_card(card, winner_card, trump, led_suit) {
+            return false;
+        }
+        temp &= temp - 1;
+    }
+
+    true
+}
+
+fn select_smear_card(suited_mask: u64, led_suit: u8, current_hands: u64) -> u8 {
+    let mut best_card = None;
+    let mut best_is_master = true;
+    let mut best_points = 0;
+    let mut best_rank = 10;
+
+    let mut led_master_card = None;
+    for r in (0..10).rev() {
+        let card = led_suit * 10 + r;
+        if (current_hands & (1u64 << card)) != 0 {
+            led_master_card = Some(card);
+            break;
+        }
+    }
+
+    let has_multiple = suited_mask.count_ones() > 1;
+
+    let mut temp = suited_mask;
+    while temp != 0 {
+        let card = temp.trailing_zeros() as u8;
+        let is_master = Some(card) == led_master_card && has_multiple;
+        let points = CARD_POINTS[card as usize];
+        let rank = crate::engine::CARD_RANK[card as usize];
+
+        let is_better = if best_card.is_none() {
+            true
+        } else if is_master != best_is_master {
+            // Prefer non-master
+            !is_master
+        } else if points != best_points {
+            // Prefer higher points
+            points > best_points
+        } else {
+            // Prefer lower rank
+            rank < best_rank
+        };
+
+        if is_better {
+            best_card = Some(card);
+            best_is_master = is_master;
+            best_points = points;
+            best_rank = rank;
+        }
+
+        temp &= temp - 1;
+    }
+
+    best_card.unwrap()
+}
+
+fn select_bleed_card(non_trump_mask: u64, current_hands: u64) -> u8 {
+    let mut best_card = None;
+    let mut best_is_master = true;
+    let mut best_points = 0;
+    let mut best_len = 10;
+    let mut best_rank = 10;
+
+    let mut temp = non_trump_mask;
+    while temp != 0 {
+        let card = temp.trailing_zeros() as u8;
+        let suit = crate::engine::CARD_SUIT[card as usize];
+        let rank = crate::engine::CARD_RANK[card as usize];
+        let points = CARD_POINTS[card as usize];
+        let len = (non_trump_mask & (0x3FFu64 << (suit * 10))).count_ones();
+
+        let mut master_card = None;
+        for r in (0..10).rev() {
+            let m_card = suit * 10 + r;
+            if (current_hands & (1u64 << m_card)) != 0 {
+                master_card = Some(m_card);
+                break;
+            }
+        }
+        let is_master = Some(card) == master_card;
+
+        let is_better = if best_card.is_none() {
+            true
+        } else if is_master != best_is_master {
+            !is_master
+        } else if points != best_points {
+            points > best_points
+        } else if len != best_len {
+            len < best_len
+        } else {
+            rank < best_rank
+        };
+
+        if is_better {
+            best_card = Some(card);
+            best_is_master = is_master;
+            best_points = points;
+            best_len = len;
+            best_rank = rank;
+        }
+
+        temp &= temp - 1;
+    }
+
+    best_card.unwrap()
+}
+
 pub fn select_card_heuristic(game: &SuecaSimulatorGame, seat: u8) -> u8 {
     let legal = game.state.legal_moves();
     let trump = game.state.trump;
 
+    let mut current_hands = 0u64;
+    for h in &game.state.hands {
+        current_hands |= h;
+    }
+
     if game.current_trick_len == 0 {
-        // Leading: strongest non-trump card in longest non-trump suit.
+        // Leading: cash guaranteed master card first, otherwise probe longest non-trump suit.
+        if let Some(master_card) = get_deterministic_cash_master_card(game, seat) {
+            return master_card;
+        }
+
         let mut counts = [0; 4];
         let mut suit_legal = [0u64; 4];
         for s in 0..4 {
@@ -46,7 +194,8 @@ pub fn select_card_heuristic(game: &SuecaSimulatorGame, seat: u8) -> u8 {
 
         if let Some(s) = best_suit {
             let suited = suit_legal[s as usize];
-            return 63 - suited.leading_zeros() as u8;
+            // Probe with the lowest card in the longest suit to extract trumps or high cards safely.
+            return suited.trailing_zeros() as u8;
         }
 
         let trumps = legal & (0x3FFu64 << (trump * 10));
@@ -68,6 +217,9 @@ pub fn select_card_heuristic(game: &SuecaSimulatorGame, seat: u8) -> u8 {
         }
 
         if (seat % 2) == (winner_seat % 2) {
+            if is_partner_secure(game, seat, winner_card, current_hands) {
+                return select_smear_card(suited, led_suit, current_hands);
+            }
             return suited.trailing_zeros() as u8;
         }
 
@@ -120,7 +272,18 @@ pub fn select_card_heuristic(game: &SuecaSimulatorGame, seat: u8) -> u8 {
 
         if (seat % 2) == (winner_seat % 2) {
             if non_trump != 0 {
-                return dump_lowest_off_suit();
+                let mut winner_card = 0;
+                for i in 0..game.current_trick_len {
+                    if game.current_trick_seats[i] == winner_seat {
+                        winner_card = game.current_trick[i];
+                        break;
+                    }
+                }
+                if is_partner_secure(game, seat, winner_card, current_hands) {
+                    return select_bleed_card(non_trump, current_hands);
+                } else {
+                    return dump_lowest_off_suit();
+                }
             }
             return trump_cards.trailing_zeros() as u8;
         }
@@ -284,18 +447,14 @@ fn get_highest_ranking_card(mask: u64) -> u8 {
         let c = temp.trailing_zeros() as u8;
         let rank = crate::engine::CARD_RANK[c as usize];
         let suit = crate::engine::CARD_SUIT[c as usize];
-        if best_card == 40 {
+        if best_card == 40 || rank > best_rank {
             best_card = c;
             best_rank = rank;
-        } else if rank > best_rank {
-            best_card = c;
-            best_rank = rank;
-        } else if rank == best_rank {
-            if get_suit_priority(suit)
+        } else if rank == best_rank
+            && get_suit_priority(suit)
                 < get_suit_priority(crate::engine::CARD_SUIT[best_card as usize])
-            {
-                best_card = c;
-            }
+        {
+            best_card = c;
         }
         temp &= temp - 1;
     }
@@ -539,16 +698,16 @@ pub fn select_card_from_outputs(
     adjusted_outputs[3] -= 0.25;
 
     let mut max_val = adjusted_outputs[0];
-    for i in 1..crate::constants::OUTPUT_COUNT {
-        if adjusted_outputs[i] > max_val {
-            max_val = adjusted_outputs[i];
+    for &val in &adjusted_outputs[1..] {
+        if val > max_val {
+            max_val = val;
         }
     }
 
     let mut best_intents = [0usize; crate::constants::OUTPUT_COUNT];
     let mut best_count = 0;
-    for i in 0..crate::constants::OUTPUT_COUNT {
-        if (adjusted_outputs[i] - max_val).abs() < 1e-9 {
+    for (i, &val) in adjusted_outputs.iter().enumerate() {
+        if (val - max_val).abs() < 1e-9 {
             best_intents[best_count] = i;
             best_count += 1;
         }
@@ -561,6 +720,140 @@ pub fn select_card_from_outputs(
     };
 
     resolve_intent(chosen_intent, game, seat)
+}
+
+pub fn select_card_heuristic_old(game: &SuecaSimulatorGame, seat: u8) -> u8 {
+    let legal = game.state.legal_moves();
+    let trump = game.state.trump;
+
+    if game.current_trick_len == 0 {
+        // Leading: strongest non-trump card in longest non-trump suit.
+        let mut counts = [0; 4];
+        let mut suit_legal = [0u64; 4];
+        for s in 0..4 {
+            if s != trump {
+                let mask = (0x3FFu64 << (s * 10)) & legal;
+                counts[s as usize] = mask.count_ones();
+                suit_legal[s as usize] = mask;
+            }
+        }
+
+        let mut best_suit = None;
+        let mut max_val = (0, 0);
+        for s in 0..4 {
+            if s != trump {
+                let count = counts[s as usize];
+                if count > 0 && (count, s) >= max_val {
+                    max_val = (count, s);
+                    best_suit = Some(s);
+                }
+            }
+        }
+
+        if let Some(s) = best_suit {
+            let suited = suit_legal[s as usize];
+            return 63 - suited.leading_zeros() as u8;
+        }
+
+        let trumps = legal & (0x3FFu64 << (trump * 10));
+        return trumps.trailing_zeros() as u8;
+    }
+
+    let led_suit = crate::engine::CARD_SUIT[game.current_trick[0] as usize];
+    let suited = legal & (0x3FFu64 << (led_suit * 10));
+
+    if suited != 0 {
+        // Following: try to win cheaply, otherwise dump.
+        let winner_seat = trick_winner_seat(game).unwrap();
+        let mut winner_card = 0;
+        for i in 0..game.current_trick_len {
+            if game.current_trick_seats[i] == winner_seat {
+                winner_card = game.current_trick[i];
+                break;
+            }
+        }
+
+        if (seat % 2) == (winner_seat % 2) {
+            return suited.trailing_zeros() as u8;
+        }
+
+        let win_suit = crate::engine::CARD_SUIT[winner_card as usize];
+        let win_rank = crate::engine::CARD_RANK[winner_card as usize];
+
+        let mut beating = 0u64;
+        let mut temp = suited;
+        while temp != 0 {
+            let card = temp.trailing_zeros() as u8;
+            let rank = crate::engine::CARD_RANK[card as usize];
+            let beats_winner = if win_suit == trump {
+                led_suit == trump && rank > win_rank
+            } else if win_suit == led_suit {
+                rank > win_rank
+            } else {
+                true
+            };
+            if beats_winner {
+                beating |= 1u64 << card;
+            }
+            temp &= temp - 1;
+        }
+
+        if beating != 0 {
+            return beating.trailing_zeros() as u8;
+        }
+        suited.trailing_zeros() as u8
+    } else {
+        // Void: cut with lowest trump if partner isn't winning.
+        let winner_seat = trick_winner_seat(game).unwrap();
+        let trump_cards = legal & (0x3FFu64 << (trump * 10));
+        let non_trump = legal & !(0x3FFu64 << (trump * 10));
+
+        let dump_lowest_off_suit = || -> u8 {
+            if non_trump != 0 {
+                for r in 0..10 {
+                    for s in 0..4 {
+                        if s != trump {
+                            let card = s * 10 + r;
+                            if (non_trump & (1u64 << card)) != 0 {
+                                return card;
+                            }
+                        }
+                    }
+                }
+            }
+            legal.trailing_zeros() as u8
+        };
+
+        if (seat % 2) == (winner_seat % 2) {
+            if non_trump != 0 {
+                return dump_lowest_off_suit();
+            }
+            return trump_cards.trailing_zeros() as u8;
+        }
+
+        if trump_cards != 0 {
+            let mut winner_card = 0;
+            for i in 0..game.current_trick_len {
+                if game.current_trick_seats[i] == winner_seat {
+                    winner_card = game.current_trick[i];
+                    break;
+                }
+            }
+
+            if crate::engine::CARD_SUIT[winner_card as usize] == trump {
+                let win_rank = crate::engine::CARD_RANK[winner_card as usize];
+                let higher_trumps = trump_cards & (0x3FFu64 << (trump * 10 + win_rank + 1));
+                if higher_trumps != 0 {
+                    return higher_trumps.trailing_zeros() as u8;
+                }
+                return dump_lowest_off_suit();
+            } else {
+                return trump_cards.trailing_zeros() as u8;
+            }
+        }
+
+        dump_lowest_off_suit()
+    }
 }
 
 #[cfg(test)]

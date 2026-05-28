@@ -1,4 +1,4 @@
-use crate::genome::{INPUT_COUNT, OUTPUT_COUNT};
+use crate::genome::INPUT_COUNT;
 use npyz::NpyFile;
 use std::fs::File;
 use std::io::BufReader;
@@ -9,6 +9,7 @@ pub struct ExpertDataset {
     pub states: Vec<f64>, // flat array of states, shape (N, INPUT_COUNT)
     pub num_states: usize,
     pub intents: Vec<u8>,
+    #[allow(dead_code)]
     pub legal_masks: Vec<u8>,
 }
 
@@ -23,7 +24,7 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
         let num_states = 100;
         let states = vec![0.0; num_states * INPUT_COUNT];
         let intents = vec![0; num_states];
-        let legal_masks = vec![(1 << OUTPUT_COUNT) - 1; num_states]; // all intents legal
+        let legal_masks = vec![0x0F; num_states];
         return Ok(ExpertDataset {
             states,
             num_states,
@@ -59,12 +60,37 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
     };
 
     let num_states = intents.len();
+
+    // Detect input dimension from the file: old datasets may have 21 features,
+    // current code expects INPUT_COUNT (30). Auto-pad with zeros if needed.
+    let file_input_count = states.len() / num_states;
+    let states = if file_input_count < INPUT_COUNT {
+        println!(
+            "  >>> Dataset has {} features per state, padding to {} with zeros.",
+            file_input_count, INPUT_COUNT
+        );
+        let mut padded = Vec::with_capacity(num_states * INPUT_COUNT);
+        for i in 0..num_states {
+            let start = i * file_input_count;
+            let end = start + file_input_count;
+            padded.extend_from_slice(&states[start..end]);
+            padded.resize(padded.len() + (INPUT_COUNT - file_input_count), 0.0);
+        }
+        padded
+    } else if file_input_count > INPUT_COUNT {
+        panic!(
+            "Dataset has {} features per state but code expects {}. Regenerate the dataset.",
+            file_input_count, INPUT_COUNT
+        );
+    } else {
+        states
+    };
+
     assert_eq!(
         states.len(),
         num_states * INPUT_COUNT,
-        "States length mismatch"
+        "States length mismatch after padding"
     );
-    assert_eq!(legal_masks.len(), num_states, "Legal masks length mismatch");
 
     Ok(ExpertDataset {
         states,

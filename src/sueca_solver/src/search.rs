@@ -172,7 +172,6 @@ pub fn alpha_beta(
 
     let hash = get_hash(state);
     if let Some((val, flag, _best)) = tt.lookup(hash, plies_left) {
-        let val = val;
         if flag == 0 {
             return val;
         } else if flag == 1 {

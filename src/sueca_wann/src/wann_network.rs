@@ -46,27 +46,27 @@ impl RustWannNetwork {
         let mut hidden_ids: Vec<usize> = node_ids
             .iter()
             .cloned()
-            .filter(|&nid| nid >= crate::constants::FIRST_HIDDEN_ID)
+            .filter(|&nid| nid >= sueca_solver::constants::FIRST_HIDDEN_ID)
             .collect();
         hidden_ids.sort_unstable();
 
         let get_priority = |nid: usize| -> usize {
-            if nid < crate::constants::INPUT_COUNT {
+            if nid < sueca_solver::constants::INPUT_COUNT {
                 nid
-            } else if nid == crate::constants::INPUT_COUNT {
-                crate::constants::INPUT_COUNT
-            } else if nid >= crate::constants::FIRST_HIDDEN_ID {
+            } else if nid == sueca_solver::constants::INPUT_COUNT {
+                sueca_solver::constants::INPUT_COUNT
+            } else if nid >= sueca_solver::constants::FIRST_HIDDEN_ID {
                 match hidden_ids.binary_search(&nid) {
-                    Ok(idx) => crate::constants::OUTPUT_START + idx,
+                    Ok(idx) => sueca_solver::constants::OUTPUT_START + idx,
                     Err(_) => 999999,
                 }
-            } else if (crate::constants::OUTPUT_START
-                ..(crate::constants::OUTPUT_START + crate::constants::OUTPUT_COUNT))
+            } else if (sueca_solver::constants::OUTPUT_START
+                ..(sueca_solver::constants::OUTPUT_START + sueca_solver::constants::OUTPUT_COUNT))
                 .contains(&nid)
             {
-                crate::constants::OUTPUT_START
+                sueca_solver::constants::OUTPUT_START
                     + hidden_ids.len()
-                    + (nid - crate::constants::OUTPUT_START)
+                    + (nid - sueca_solver::constants::OUTPUT_START)
             } else {
                 999999
             }
@@ -172,24 +172,24 @@ impl RustWannNetwork {
     /// The output intents will rest in scratchpad[22..26].
     pub fn forward(
         &self,
-        inputs: &[f64; crate::constants::INPUT_COUNT],
+        inputs: &[f64; sueca_solver::constants::INPUT_COUNT],
         weight: f64,
         scratchpad: &mut [f64],
     ) {
         // 1. Copy inputs into scratchpad[0..INPUT_COUNT] and set bias scratchpad[INPUT_COUNT] = 1.0
-        for i in 0..crate::constants::INPUT_COUNT {
+        for i in 0..sueca_solver::constants::INPUT_COUNT {
             scratchpad[i] = inputs[i].clamp(0.0, 1.0);
         }
-        scratchpad[crate::constants::INPUT_COUNT] = 1.0;
+        scratchpad[sueca_solver::constants::INPUT_COUNT] = 1.0;
 
         // Reset the rest of the nodes (outputs and hiddens)
-        for i in crate::constants::OUTPUT_START..self.num_nodes {
+        for i in sueca_solver::constants::OUTPUT_START..self.num_nodes {
             scratchpad[i] = 0.0;
         }
 
         // 2. Evaluate all nodes in topological order
         for &nid in &self.topological_order {
-            if nid <= crate::constants::BIAS_ID {
+            if nid <= sueca_solver::constants::BIAS_ID {
                 continue; // input or bias, already set
             }
 

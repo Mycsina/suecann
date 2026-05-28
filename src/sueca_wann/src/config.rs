@@ -7,7 +7,6 @@ pub struct PopulationConfig {
     pub pop_size: usize,
     pub generations: usize,
     pub elitism: usize,
-    pub seed_fraction: f64,
     pub pareto_complexity_prob: f64,
 }
 

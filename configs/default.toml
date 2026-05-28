@@ -5,13 +5,12 @@
 pop_size = 1000               # Massively expands structural diversity and niche protection
 generations = 1200             # Deep training run to allow complex emergent strategies
 elitism = 3                    # Protects top 3 performers per species from mutation corruption
-seed_fraction = 0.15           # 150 networks initialized with structural strategic biases
 pareto_complexity_prob = 0.80  # 80% Pareto pressure, 20% protection for innovative bulk structures
 
 [evaluation]
 n_deals = 128                  # 128 duplicate deals = 512 total games per rollout sweep
 curriculum_gens = 300          # Smoothly linearizes the rollout environment introduction
-sweep_weights = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0] # Fully unlocks inhibitory vetoing logic
+sweep_weights = [1.0]
 seed = 1337
 
 [species]

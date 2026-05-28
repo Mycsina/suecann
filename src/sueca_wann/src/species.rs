@@ -143,6 +143,7 @@ pub fn compatibility_distance(
         + c3 * node_diff
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn speciate(
     genomes: &[Genome],
     species_list: &mut Vec<Species>,

@@ -4,57 +4,65 @@
 
 Neurosymbolic AI that evolves Weight-Agnostic Neural Networks (WANNs) to play **Sueca** (Portuguese trick-taking card game). Networks use logical gates instead of traditional activations, output abstract play intents (not cards), and are compiled into human-readable IF/THEN rules.
 
-The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the Rust game engine (`sueca_solver`). Python is used only for benchmarking, rule extraction, graphing, and the PyO3 FFI layer.
+The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the Rust game engine (`sueca_solver`). Python is used only for cross-run comparison visualization (`scripts/compare_runs.py`).
 
 ## Project Documentation
 
 - **`reference.md`** — Literature references with specific ideas taken from each paper.
-- **`ideas.md`** — Future improvement paths and untested ideas.
+- **`ideas.md`** — Completed milestones and future improvement paths.
 
 ## Tooling
 
-- **Python 3.13** (stable GIL-enabled), managed by `uv`
-- **Rust workspace**: `src/sueca_solver` (game engine + PyO3 bindings) and `src/sueca_wann` (training binary)
-- **Build Rust Module**: `cargo build -p sueca_solver --release && cp target/release/libsueca_solver.so .venv/lib/python3.13/site-packages/sueca_solver/sueca_solver.cpython-313-x86_64-linux-gnu.so`
+- **Rust workspace**: `src/sueca_solver` (pure game engine, rlib only) and `src/sueca_wann` (training binary + CLI)
+- **No PyO3 / FFI** — all game simulation, benchmarking, rule compilation, and dataset generation run natively in Rust
 - **Build Training Binary**: `cargo build -p sueca_wann --release`
-- **Testing**: `uv run pytest tests/ -v` (Python), `cargo test --all` (Rust)
-- **Linting**: `cargo clippy --all`, `uv run black .`
-- **Dependencies**: numpy, pandas, graphviz, seaborn, matplotlib, pytest
+- **Testing**: `cargo test --all`
+- **Linting**: `cargo clippy --all`
+- **Python deps**: numpy, pandas, matplotlib, seaborn (visualization only)
 
 ## Running Training
 
 ```bash
-# Build both crates
-cargo build -p sueca_solver --release
 cargo build -p sueca_wann --release
 
 # Run training (creates checkpoints/YYYY-MM-DD-N/)
-./target/release/sueca_wann --config configs/default.toml
+./target/release/sueca_wann train --config configs/default.toml
 
 # Resume from checkpoint
-./target/release/sueca_wann --config configs/default.toml --resume
+./target/release/sueca_wann train --config configs/default.toml --resume
 ```
 
-Training creates dated run folders: `checkpoints/2026-05-26-1/`, `checkpoints/2026-05-26-2/`, etc. Each contains `training_stats.csv`, `training_state.bin`, and a `genomes/` subfolder containing `best_genome_final.json`, `hof_final.json`, and snapshots.
+Training creates dated run folders containing `training_stats.csv`, `training_state.bin`, `best_genome_final.json`, `hof_final.json`.
 
 ## Running Benchmarks
 
 ```bash
-# Auto-detect latest genome and run tournament
-PYTHONPATH=. uv run python src/benchmark.py --deals 200
-
-# Specify genome and output dir
-PYTHONPATH=. uv run python src/benchmark.py --deals 200 --genome checkpoints/2026-05-26-1/genomes/best_genome_final.json --output-dir checkpoints/2026-05-26-1
+./target/release/sueca_wann benchmark --deals 200 --genome checkpoints/2026-05-27-1/best_genome_final.json
 ```
+
+## Extracting Rules
+
+```bash
+./target/release/sueca_wann compile-rules --genome checkpoints/2026-05-27-1/best_genome_final.json --output-dir checkpoints/2026-05-27-1
+```
+
+Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topology_graph.png` (via Graphviz `dot`).
+
+## Generating Expert Dataset
+
+```bash
+./target/release/sueca_wann generate-dataset \
+  --n-worlds 80 --search-depth 4 --target-count 10000 \
+  --output expert_states.npz
+```
+
+Generates class-balanced PIMC expert states for Phase 0 pretraining. Samples only the current player's turn (not all 4 seats) to ensure legal-move / perspective alignment.
 
 ## Comparing Training Runs
 
 ```bash
-# Plot all runs
 uv run python scripts/compare_runs.py
-
-# Compare specific runs
-uv run python scripts/compare_runs.py --runs 2026-05-26-1 2026-05-26-2
+uv run python scripts/compare_runs.py --runs 2026-05-27-1 2026-05-27-2
 ```
 
 Saves `checkpoints/run_comparison.png` with 4 panels: fitness, delta vs HeuristicBot, species diversity, network complexity.
@@ -74,30 +82,37 @@ Saves `checkpoints/run_comparison.png` with 4 panels: fitness, delta vs Heuristi
 ## Architecture
 
 ```
-Belief State (21 floats) → WANN (logical gates) → Oracle Intent (5 outputs) → Legal Subsystem → Card
+Belief State (30 floats) → WANN (logical gates) → Oracle Intent (4 outputs) → Legal Subsystem → Card
 ```
 
-**Crate dependency**: `sueca_wann` → `sueca_solver`. The solver crate contains the game engine, WANN inference, PIMC search, and PyO3 bindings. The wann crate contains the NEAT evolution loop.
+**Crate dependency**: `sueca_wann` → `sueca_solver`. The solver is a pure game engine (rlib only, no PyO3). The wann crate contains WANN inference, evaluator, NEAT evolution, and CLI.
 
-**Key modules in `sueca_solver`**:
+**Key modules in `sueca_solver`** (pure game engine):
 - `engine.rs` — Bitboard game state, card logic, beats comparison
-- `wann.rs` — CSR-format WANN inference with zero-allocation forward pass
-- `evaluator.rs` — Game simulation, bot types, delta-fitness evaluation (re-exports from split modules)
 - `simulator.rs` — SuecaSimulatorGame wrapper with void tracking
-- `belief.rs` — Belief state encoder (21 floats from game state)
+- `belief.rs` — Belief state encoder (30 floats from game state)
 - `heuristic.rs` — Card selection heuristics, intent-to-card resolver
 - `pimc.rs` — Perfect Information Monte Carlo solver with late-game minimax switch
 - `search.rs` — Alpha-beta search with Zobrist hashing and transposition table
 - `rng.rs` — Shared LCG random number generator
-- `py_bindings/` — PyO3 FFI layer
+- `constants.rs` — WANN layout dimension constants (INPUT_COUNT, OUTPUT_COUNT, etc.)
 
 **Key modules in `sueca_wann`**:
+- `main.rs` — CLI entry point (train / benchmark / compile-rules / generate-dataset subcommands)
+- `wann_network.rs` — CSR-format WANN inference with zero-allocation forward pass
+- `evaluator.rs` — Bot simulation, delta-fitness evaluation
+- `train.rs` — Training loop, Phase 0/1 evaluation, HOF transfer
 - `genome.rs` — Genome representation, topological sort, CSR conversion
 - `population.rs` — Population management, crossover, Pareto ranking, parallel breeding
-- `species.rs` — Compatibility distance, speciation (parallel distance computation)
+- `species.rs` — Compatibility distance, speciation
 - `mutations.rs` — NEAT mutation operators, innovation registry
-- `train.rs` — Training loop, Phase 0/1 evaluation, HOF transfer
 - `hall_of_fame.rs` — HOF management with sampling
+- `map_elites.rs` — MAP-Elites quality-diversity archive
+- `constants.rs` — Evolutionary hyperparameters, feature/intent name mappings
+- `benchmark.rs` — Tournament benchmarking
+- `compile_rules.rs` — Rule compiler, Graphviz DOT export, PNG rendering
+- `dataset_gen.rs` — PIMC expert dataset generation with ego-turn synchronization
+- `dataset.rs` — Expert dataset loading (NPZ reader with backward compat for old 21-input files)
 - `config.rs` — TOML configuration loading
 
 ### Belief State (30 inputs, all in [0,1])
@@ -150,7 +165,7 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 ### WANN Constraints
 
 - **Gene representation**: Connection genes `[5,N]` (innovation, src, dst, sign ∈ {+1,−1}, enabled). Node genes `[4,M]` (id, type, activation_fn, aggregation_fn).
-- **Initialization**: 30 input + 1 bias + 4 output nodes. 15% of population seeded with known Sueca heuristic strategies, rest get random connections.
+- **Initialization**: 30 input + 1 bias + 4 output nodes. All genomes start with these base nodes and receive random connections.
 - **Sign-only weights**: Connections carry only a sign (+1 or −1), not a learned weight. A shared weight W is used for evaluation. sign=-1 inverts the signal (1.0 - x) before aggregation.
 - **Aggregation functions** (3 only): SUM=0, MIN(AND)=1, MAX(OR)=2. **No MEAN** — it causes float-precision issues at the THRESHOLD boundary.
 - **Activation functions** (3 only): IDENTITY=0, NOT=1, THRESHOLD=2. **No SIGMOID** — it breaks IF/THEN rule extraction.
@@ -167,50 +182,32 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 
 **Parallelism**: Rayon parallelizes genome→WANN conversion, speciation distance computation, Pareto domination detection, stagnation updates, and offspring generation. Innovation registry uses a Mutex for thread-safe mutation operations.
 
-### Seed Strategies (Initial Population)
-
-15% of the initial population is seeded with genomes encoding known Sueca heuristics:
-- **Aggressive**: BIAS → FORCE_HIGH (always play strongest card)
-- **Take Cheaply**: BIAS → TAKE_CHEAPLY
-- **Partner Aware**: duck when partner wins, else attack
-- **Trump Cutter**: cut when void in led suit and have trump
-- **Feeder**: feed points to winning partner
-- **Lead Attacker**: force high when leading
-- **Last Taker**: take cheaply when last to play
-- **Combined Basic**: partner-aware + position-aware
-- **Late Trump Aggressor**: cut/force when few trumps remain
-- **Score Aware**: play safe when ahead, aggressive when behind
-- **Trick Point Taker**: take cheaply when trick has value and partner isn't winning
-- **Void Exploiter**: force high when opponent is void in led suit
-- **Full Strategic**: combines partner, position, score, and trump awareness (7 connections)
-
 ### Evolution
 
-- **Duplicate deals**: 48 deals per generation × 4 seat rotations = 192 games/genome. Deals are **re-seeded each generation** (`seed=gen`) to prevent overfitting.
+- **Duplicate deals**: Deals per generation × 4 seat rotations. Deals are **re-seeded each generation** (`seed=gen`) to prevent overfitting.
 - **Delta-fitness**: Each genome compared against HeuristicBot on the exact same deal/seat/opponents (Common Random Numbers). Eliminates deal-luck variance.
 - **Rank-based selection**: Raw fitness converted to normalized ranks before tournament selection for noise robustness.
 - **Multi-objective Pareto ranking**: 80% of the time, rank by (performance, simplicity) Pareto front with lexicographic tie-breaking; 20% by performance only. Prevents bloat while maintaining selection pressure.
 - **Hall of Fame**: Frozen champion archive (size 30). Sampled as partners/opponents during Phase 1.
+- **MAP-Elites**: 10×10 grid archiving behavioral specialists by intent preference and aggression. Sampled at 50% rate for opponent selection.
 - **Mutations**: Add node, add connection, toggle connection, flip sign, change activation, change aggregation. No weight mutation.
 
 ## Code Conventions
 
-- All Python source in `src/`, tests in `tests/`.
-- Rust source: `src/sueca_solver/src/` (engine + bindings), `src/sueca_wann/src/` (training).
-- Python imports use `from src.X import Y` style.
+- Rust source: `src/sueca_solver/src/` (engine), `src/sueca_wann/src/` (training + CLI).
+- Python is visualization-only: `scripts/compare_runs.py` (cross-run plots).
 - Tests must be thorough — test invariants (e.g., total points = 120), edge cases, and boundary values.
-- Use `numpy.random.Generator` (not legacy `numpy.random`), pass seeds explicitly for reproducibility.
-- Type hints on all Python function signatures.
 - Rust functions: `#[inline(always)]` on hot-path bitboard/WANN ops.
 
 ## Common Pitfalls
 
 1. **Never leak opponent hand data** into visible state or belief vector.
-2. **Rank ordering is NOT standard** — 7 beats K in Sueca. Use the `Rank` IntEnum values, not card face values.
+2. **Rank ordering is NOT standard** — 7 beats K in Sueca. Use `CARD_RANK` lookups, not card face values.
 3. **Partner = (seat + 2) % 4**, not seat ± 1.
 4. **Counter-clockwise**: after seat 0, it's seat 3, not seat 1.
 5. **Void tracking is per-suit**: a player void in hearts may still have diamonds.
 6. **Duplicate deals must differ across generations** — same seed within a gen for fairness, different seed between gens to prevent memorization.
 7. **argmax tie-breaking**: When WANN outputs tie, use random choice among tied maximums, NOT deterministic argmax.
 8. **Delta-fitness baseline bot must see the same cards**: The baseline plays the exact same seat rotation with the same deal to ensure valid comparison.
-9. **Workspace target dir**: Always build from repo root (`cargo build --release -p sueca_solver`), not `--manifest-path`. The .so lives in `target/release/`, not `src/sueca_solver/target/release/`.
+9. **Build from repo root**: Always use `cargo build -p sueca_wann --release`. There is no `.so` / FFI build step.
+10. **Dataset ego-turn sync**: `legal_moves()` always returns moves for `game.state.current_player`. Never loop over all 4 seats at a frozen game state — the belief, legal mask, and intent resolver must all reference the active player.

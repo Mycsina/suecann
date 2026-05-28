@@ -216,7 +216,7 @@ pub fn encode_belief_state(game: &SuecaSimulatorGame, seat: u8) -> [f64; 30] {
 
         // Depletion count using POPCNT on history mask
         let count = (prev_played & suit_mask).count_ones() as usize;
-        vec[21 + j * 3 + 0] = DEPLETION_LOOKUP[count];
+        vec[21 + j * 3] = DEPLETION_LOOKUP[count];
 
         // Ace Played (rank 9)
         vec[21 + j * 3 + 1] = if (prev_played & (1u64 << (suit * 10 + 9))) != 0 {

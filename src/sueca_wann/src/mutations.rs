@@ -31,7 +31,7 @@ impl InnovationRegistry {
 }
 
 fn pick_random_connection<R: Rng>(genome: &Genome, rng: &mut R) -> Option<ConnGene> {
-    let conns: Vec<ConnGene> = genome.conn_genes.iter().cloned().collect();
+    let conns: Vec<ConnGene> = genome.conn_genes.to_vec();
     if conns.is_empty() {
         return None;
     }
@@ -60,7 +60,7 @@ fn pick_random_node<R: Rng>(
     exclude_bias: bool,
     exclude_outputs: bool,
 ) -> Option<NodeGene> {
-    let mut candidates: Vec<NodeGene> = genome.node_genes.iter().cloned().collect();
+    let mut candidates: Vec<NodeGene> = genome.node_genes.to_vec();
     if exclude_inputs {
         candidates.retain(|n| n.node_type != NodeType::INPUT);
     }
@@ -272,6 +272,7 @@ pub fn mutate_change_aggregation<R: Rng>(genome: &mut Genome, rng: &mut R) -> bo
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_mutations<R: Rng>(
     genome: &mut Genome,
     registry: &Mutex<InnovationRegistry>,

@@ -21,7 +21,7 @@ pub fn generate_deals_rust(
     gen: usize,
     n_deals: usize,
     base_seed: u64,
-) -> Vec<sueca_solver::evaluator::EvaluatorDeal> {
+) -> Vec<crate::evaluator::EvaluatorDeal> {
     let seed = base_seed + gen as u64;
     let mut deals = Vec::new();
 
@@ -41,7 +41,7 @@ pub fn generate_deals_rust(
         }
 
         let trump = rng.gen_range(0..4) as u8;
-        deals.push(sueca_solver::evaluator::EvaluatorDeal {
+        deals.push(crate::evaluator::EvaluatorDeal {
             hands,
             trump,
             seed: deal_seed,
@@ -55,7 +55,7 @@ pub fn generate_deals_rust(
 // Phase 0: Supervised classification accuracy
 // ---------------------------------------------------------------------------
 pub fn evaluate_phase0(
-    genomes: &[sueca_solver::wann::RustWannNetwork],
+    genomes: &[crate::wann_network::RustWannNetwork],
     dataset: &ExpertDataset,
     sweep_weights: &[f64],
 ) -> Vec<f64> {
@@ -77,7 +77,6 @@ pub fn evaluate_phase0(
                     inputs[i] = dataset.states[idx * INPUT_COUNT + i];
                 }
                 let target_intent = dataset.intents[idx] as usize;
-                let mask = dataset.legal_masks[idx];
 
                 let mut total_outputs = [0.0f64; OUTPUT_COUNT];
                 for &w in sweep_weights {
@@ -90,13 +89,12 @@ pub fn evaluate_phase0(
                 let mut best_intent = 0;
                 let mut max_val = f64::NEG_INFINITY;
                 for i in 0..OUTPUT_COUNT {
-                    let is_legal = (mask & (1 << i)) != 0;
                     let val = if i == 3 {
                         total_outputs[i] - 0.25 * (sweep_weights.len() as f64)
                     } else {
                         total_outputs[i]
                     };
-                    if is_legal && val > max_val {
+                    if val > max_val {
                         max_val = val;
                         best_intent = i;
                     }
@@ -115,21 +113,18 @@ pub fn evaluate_phase0(
 // ---------------------------------------------------------------------------
 // Phase 1: Self-play with HOF opponents
 // ---------------------------------------------------------------------------
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_phase1(
-    genomes: &[sueca_solver::wann::RustWannNetwork],
-    deals: &[sueca_solver::evaluator::EvaluatorDeal],
-    hof_networks: &[sueca_solver::wann::RustWannNetwork],
+    genomes: &[crate::wann_network::RustWannNetwork],
+    deals: &[crate::evaluator::EvaluatorDeal],
+    hof_networks: &[crate::wann_network::RustWannNetwork],
     partner_bot_type: i32,
     opp1_bot_type: i32,
     opp2_bot_type: i32,
     baseline_bot_type: i32,
     sweep_weights: &[f64],
     base_seed: u64,
-) -> (
-    Vec<f64>,
-    Vec<f64>,
-    Vec<sueca_solver::evaluator::WannBehavior>,
-) {
+) -> (Vec<f64>, Vec<f64>, Vec<crate::evaluator::WannBehavior>) {
     let max_nodes = genomes
         .iter()
         .map(|g| g.num_nodes)
@@ -137,12 +132,12 @@ pub fn evaluate_phase1(
         .max()
         .unwrap_or(FIRST_HIDDEN_ID);
 
-    let results: Vec<(f64, sueca_solver::evaluator::WannBehavior)> = genomes
+    let results: Vec<(f64, crate::evaluator::WannBehavior)> = genomes
         .into_par_iter()
         .enumerate()
         .map(|(i, candidate)| {
             let mut scratchpad = vec![0.0f64; max_nodes];
-            sueca_solver::evaluator::evaluate_genome_delta(
+            crate::evaluator::evaluate_genome_delta(
                 candidate,
                 baseline_bot_type,
                 partner_bot_type,
@@ -174,7 +169,7 @@ pub fn evaluate_phase1(
 // Per-generation evaluation dispatchers
 // ---------------------------------------------------------------------------
 fn run_phase0_generation(
-    genomes: &[sueca_solver::wann::RustWannNetwork],
+    genomes: &[crate::wann_network::RustWannNetwork],
     dataset: &ExpertDataset,
     sweep_weights: &[f64],
 ) -> (Vec<f64>, Vec<f64>) {
@@ -183,17 +178,13 @@ fn run_phase0_generation(
 }
 
 fn run_phase1_generation(
-    genomes: &[sueca_solver::wann::RustWannNetwork],
+    genomes: &[crate::wann_network::RustWannNetwork],
     hof: &HallOfFame,
     map_elites: &crate::map_elites::MapElitesArchive,
     config: &Config,
     gen: usize,
     rng: &mut Pcg64,
-) -> (
-    Vec<f64>,
-    Vec<f64>,
-    Vec<sueca_solver::evaluator::WannBehavior>,
-) {
+) -> (Vec<f64>, Vec<f64>, Vec<crate::evaluator::WannBehavior>) {
     let deals = generate_deals_rust(
         gen,
         config.evaluation.n_deals,
@@ -201,16 +192,17 @@ fn run_phase1_generation(
     );
 
     let mut hof_genomes = Vec::new();
-    let partner_bot_type: i32;
-    let opp1_bot_type: i32;
-    let opp2_bot_type: i32;
 
     let sample_seat_bot = |rng: &mut Pcg64,
                            h: &HallOfFame,
                            me: &crate::map_elites::MapElitesArchive,
-                           hg: &mut Vec<sueca_solver::wann::RustWannNetwork>|
+                           hg: &mut Vec<crate::wann_network::RustWannNetwork>|
      -> i32 {
-        if rng.gen_bool(0.5) {
+        let elite_prob = ((gen as f64 - 200.0) / 400.0).clamp(0.0, 0.40); // Scales from 0% to 40% presence
+
+        if rng.gen_bool(elite_prob) {
+            3 // EliteHeuristicBot
+        } else if rng.gen_bool(0.5) {
             let use_map_elites = rng.gen_bool(0.5);
             let sampled = if use_map_elites {
                 me.sample_random(rng)
@@ -220,21 +212,21 @@ fn run_phase1_generation(
             let genome = sampled.or_else(|| h.sample(rng, 1).first().cloned());
 
             if let Some(g) = genome {
-                let bot_type = 2 + hg.len() as i32;
+                let bot_type = 10 + hg.len() as i32; // WANNs start at 10
                 hg.push(g.to_rust_wann());
                 bot_type
             } else {
-                1
+                1 // OldHeuristicBot
             }
         } else {
-            1
+            1 // Old HeuristicBot (Baseline Sanity)
         }
     };
 
     let mut sample_rng = rng.clone();
-    partner_bot_type = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
-    opp1_bot_type = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
-    opp2_bot_type = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
+    let partner_bot_type: i32 = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
+    let opp1_bot_type: i32 = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
+    let opp2_bot_type: i32 = sample_seat_bot(&mut sample_rng, hof, map_elites, &mut hof_genomes);
     *rng = sample_rng;
 
     evaluate_phase1(
@@ -418,7 +410,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                     config.evaluation.seed * 1000,
                 );
 
-                let unique_networks: Vec<sueca_solver::wann::RustWannNetwork> =
+                let unique_networks: Vec<crate::wann_network::RustWannNetwork> =
                     unique_genomes.iter().map(|g| g.to_rust_wann()).collect();
 
                 let (fitnesses, _, _) = evaluate_phase1(
@@ -448,7 +440,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             }
         }
 
-        let rust_genomes: Vec<sueca_solver::wann::RustWannNetwork> =
+        let rust_genomes: Vec<crate::wann_network::RustWannNetwork> =
             pop.genomes.par_iter().map(|g| g.to_rust_wann()).collect();
 
         let (fitnesses, deltas, behaviors) = if current_phase == 0 {
@@ -607,13 +599,17 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
     }
 
     // Save final files
-    let hof_path = Path::new(&config.output.checkpoint_dir).join("genomes").join("hof_final.json");
+    let hof_path = Path::new(&config.output.checkpoint_dir)
+        .join("genomes")
+        .join("hof_final.json");
     let json_hof = JsonHallOfFame::from_hof(&hof);
     let hof_file = fs::File::create(hof_path)?;
     serde_json::to_writer_pretty(hof_file, &json_hof)?;
 
     if let Some(ref gb) = pop.global_best_genome {
-        let best_path = Path::new(&config.output.checkpoint_dir).join("genomes").join("best_genome_final.json");
+        let best_path = Path::new(&config.output.checkpoint_dir)
+            .join("genomes")
+            .join("best_genome_final.json");
         let json_gb = JsonGenome::from_genome(gb);
         let gb_file = fs::File::create(best_path)?;
         serde_json::to_writer_pretty(gb_file, &json_gb)?;

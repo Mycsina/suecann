@@ -1,95 +1,13 @@
 use crate::config::Config;
-use crate::genome::{ConnGene, Genome, BIAS_ID, INPUT_START, OUTPUT_START};
+use crate::genome::Genome;
 use crate::mutations::{apply_mutations, mutate_add_connection, InnovationRegistry};
 use crate::species::{speciate, Species};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
-
-// Seed strategies matching Python SEED_STRATEGIES
-// Each strategy is a tuple (name, list of (src, dst, sign))
-const SEED_STRATEGIES: &[(&str, &[(usize, usize, i8)])] = &[
-    ("aggressive", &[(BIAS_ID, OUTPUT_START + 0, 1)]),
-    ("take_cheaply", &[(BIAS_ID, OUTPUT_START + 2, 1)]),
-    (
-        "partner_aware",
-        &[
-            (INPUT_START + 7, OUTPUT_START + 1, 1),
-            (INPUT_START + 7, OUTPUT_START + 0, -1),
-        ],
-    ),
-    (
-        "trump_cutter",
-        &[
-            (INPUT_START, OUTPUT_START + 2, -1),
-            (INPUT_START + 1, OUTPUT_START + 2, 1),
-        ],
-    ),
-    ("feeder", &[(INPUT_START + 7, OUTPUT_START + 3, 1)]),
-    ("lead_attacker", &[(INPUT_START + 5, OUTPUT_START + 0, 1)]),
-    ("last_taker", &[(INPUT_START + 6, OUTPUT_START + 2, 1)]),
-    (
-        "combined_basic",
-        &[
-            (INPUT_START + 7, OUTPUT_START + 1, 1),
-            (INPUT_START + 7, OUTPUT_START + 0, -1),
-            (INPUT_START + 5, OUTPUT_START + 0, 1),
-        ],
-    ),
-    (
-        "late_trump_aggressor",
-        &[
-            (INPUT_START + 19, OUTPUT_START + 2, -1),
-            (INPUT_START + 1, OUTPUT_START + 2, 1),
-            (INPUT_START + 19, OUTPUT_START + 0, -1),
-        ],
-    ),
-    (
-        "score_aware",
-        &[
-            (INPUT_START + 20, OUTPUT_START + 1, 1),
-            (INPUT_START + 20, OUTPUT_START + 0, -1),
-        ],
-    ),
-    (
-        "trick_point_taker",
-        &[
-            (INPUT_START + 8, OUTPUT_START + 2, 1),
-            (INPUT_START + 7, OUTPUT_START + 2, -1),
-        ],
-    ),
-    (
-        "void_exploiter",
-        &[
-            (INPUT_START + 12, OUTPUT_START + 0, 1),
-            (INPUT_START + 5, OUTPUT_START + 0, 1),
-        ],
-    ),
-    (
-        "full_strategic",
-        &[
-            (INPUT_START + 7, OUTPUT_START + 1, 1),
-            (INPUT_START + 7, OUTPUT_START + 0, -1),
-            (INPUT_START + 5, OUTPUT_START + 0, 1),
-            (INPUT_START + 6, OUTPUT_START + 2, 1),
-            (INPUT_START + 20, OUTPUT_START + 0, -1),
-            (INPUT_START + 1, OUTPUT_START + 2, 1),
-            (INPUT_START, OUTPUT_START + 2, -1),
-        ],
-    ),
-];
-
-fn create_seed_genome(strategy: &[(usize, usize, i8)]) -> Genome {
-    let mut g = Genome::initial();
-    for &(src, dst, sign) in strategy {
-        let inno = g.next_innovation;
-        g.add_connection(ConnGene::make(inno, src, dst, sign, true));
-    }
-    g
-}
 
 pub fn rank_values(values: &[f64]) -> Vec<f64> {
     let n = values.len();
@@ -291,37 +209,10 @@ impl Population {
         let mut fitnesses = Vec::new();
 
         let pop_size = config.population.pop_size;
-        let seed_fraction = config.population.seed_fraction;
-        let n_seeds = ((pop_size as f64 * seed_fraction) as usize).max(1);
-
-        // --- Seed genomes ---
-        for i in 0..n_seeds {
-            let strategy_idx = i % SEED_STRATEGIES.len();
-            let strategy_conns = SEED_STRATEGIES[strategy_idx].1;
-            let mut g = create_seed_genome(strategy_conns);
-
-            // Add 1-2 random mutations
-            let n_extra = rng.gen_range(0..2);
-            for _ in 0..n_extra {
-                apply_mutations(
-                    &mut g,
-                    registry,
-                    rng,
-                    config.mutation.p_add_node,
-                    config.mutation.p_add_conn,
-                    config.mutation.p_toggle_conn,
-                    config.mutation.p_flip_sign,
-                    config.mutation.p_change_act,
-                    config.mutation.p_change_agg,
-                );
-            }
-            genomes.push(g);
-            fitnesses.push(0.0);
-        }
 
         // --- Random-link genomes ---
         let base = Genome::initial();
-        let remaining_count = pop_size - n_seeds;
+        let remaining_count = pop_size;
         for i in 0..remaining_count {
             let mut g = base.copy();
 

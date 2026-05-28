@@ -4,7 +4,6 @@
 pop_size = 100
 generations = 30
 elitism = 3
-seed_fraction = 0.15
 pareto_complexity_prob = 0.80
 
 [evaluation]

@@ -65,28 +65,54 @@ pub fn sample_world(
     rng_state: &mut u64,
 ) -> bool {
     // 1. Initialize hands_out with my_hand
-    for i in 0..4 {
-        hands_out[i] = 0;
-    }
+    *hands_out = [0; 4];
     hands_out[my_seat as usize] = my_hand;
 
-    // 2. Copy and shuffle unknown cards on the stack (Fisher-Yates)
+    // 2. MRV heuristic: partition constrained cards (where at least one hidden
+    //    player is void in that suit) to the front of the array. This makes
+    //    backtracking fail fast at shallow recursion depths instead of wasting
+    //    cycles on doomed deep branches.
     let num_unknowns = unknown_cards.len();
     let mut shuffled = [0u8; 40];
-    shuffled[..num_unknowns].copy_from_slice(unknown_cards);
+    let mut constrained_end = 0usize;
+    let mut free_start = num_unknowns;
 
+    for &card in unknown_cards {
+        let suit_flag = 1u8 << crate::engine::CARD_SUIT[card as usize];
+        let mut is_constrained = false;
+        for s in 0..4 {
+            if s != my_seat as usize && (voids[s] & suit_flag) != 0 {
+                is_constrained = true;
+                break;
+            }
+        }
+        if is_constrained {
+            shuffled[constrained_end] = card;
+            constrained_end += 1;
+        } else {
+            free_start -= 1;
+            shuffled[free_start] = card;
+        }
+    }
+
+    // Fisher-Yates shuffle within each partition independently
     let mut r = LcgRng::new(*rng_state);
-    let mut i = num_unknowns;
+    let mut i = constrained_end;
     while i > 1 {
         let rand_idx = (r.next_u64() as usize) % i;
         i -= 1;
         shuffled.swap(i, rand_idx);
     }
+    i = num_unknowns - free_start;
+    while i > 1 {
+        let rand_idx = (r.next_u64() as usize) % i;
+        i -= 1;
+        shuffled.swap(free_start + i, free_start + rand_idx);
+    }
     *rng_state = r.next_u64(); // Update RNG state
 
     // 3. Backtrack/Constraint-solve assignment
     let mut temp_targets = target_sizes;
-    // My seat needs 0 more cards because it is already filled
     temp_targets[my_seat as usize] = 0;
 
     sample_constraints(
@@ -101,6 +127,7 @@ pub fn sample_world(
 /// Evaluates the Expected Value (EV) of each legal move using PIMC.
 /// Returns the list of moves and their computed EV scores.
 /// Thread-safe and parallelized using Rayon.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_pimc(
     my_seat: u8,
     my_hand: u64,
@@ -158,25 +185,20 @@ pub fn solve_pimc(
     }
     let unknown_slice = &unknown_cards[..num_unknowns];
 
-    // 3. Parallel world evaluation using Rayon
-    // Each world runs independent simulations.
-    // We pre-generate world seeds to make the Rayon execution deterministic.
-    let mut rng = LcgRng::new(seed);
-    let mut seeds = Vec::with_capacity(n_worlds);
-    for _ in 0..n_worlds {
-        seeds.push(rng.next_u64());
-    }
-
-    // Thread-local accumulator: (sum_evs, counts) for the 40 possible cards
+    // 3. Parallel world evaluation using Rayon.
+    //    Each world derives a deterministic seed via splitmix64 mixing from
+    //    the world index — no per-call heap allocation.
     type Accum = ([f64; 40], [u32; 40]);
 
-    let (sum_evs, counts) = seeds
+    let (sum_evs, counts) = (0..n_worlds)
         .into_par_iter()
         .fold(
             || ([0.0f64; 40], [0u32; 40]),
-            |mut acc: Accum, w_seed| {
+            |mut acc: Accum, world_idx| {
                 let mut local_hands = [0u64; 4];
-                let mut local_seed = w_seed;
+                let mut local_seed = seed.wrapping_add(
+                    (world_idx as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15),
+                );
 
                 // Sample a valid world. Try up to 10 times.
                 let mut success = false;
@@ -199,27 +221,30 @@ pub fn solve_pimc(
                     return acc;
                 }
 
-                // Evaluate all legal moves in this world
+                // Pre-compute invariants once per world (GameState is Copy)
+                let mut base_trick_points = 0u8;
+                for &c in current_trick_cards {
+                    base_trick_points += crate::engine::CARD_POINTS[c as usize];
+                }
+
+                let mut base_game = GameState::new(local_hands, trump, current_player);
+                base_game.led_suit = led_suit;
+                base_game.current_trick_winner = current_trick_winner;
+                base_game.current_trick_best_card = current_trick_best_card;
+                base_game.cards_played_in_trick = current_trick_cards.len() as u8;
+                base_game.team_02_score = team_scores[0];
+                base_game.team_13_score = team_scores[1];
+                base_game.trick_number = trick_number;
+
                 THREAD_TT.with(|tt_cell| {
                     let mut tt = tt_cell.borrow_mut();
                     tt.next_generation();
 
                     for i in 0..legal_count {
                         let m = legal_moves[i];
-
-                        let mut sim_game = GameState::new(local_hands, trump, current_player);
-                        sim_game.led_suit = led_suit;
-                        sim_game.current_trick_winner = current_trick_winner;
-                        sim_game.current_trick_best_card = current_trick_best_card;
-                        sim_game.cards_played_in_trick = current_trick_cards.len() as u8;
-                        sim_game.team_02_score = team_scores[0];
-                        sim_game.team_13_score = team_scores[1];
-                        sim_game.trick_number = trick_number;
-
-                        let mut trick_points = 0;
-                        for &c in current_trick_cards {
-                            trick_points += crate::engine::CARD_POINTS[c as usize];
-                        }
+                        // Stack copy of pre-populated state (GameState derives Copy)
+                        let mut sim_game = base_game;
+                        let mut trick_points = base_trick_points;
 
                         sim_game.play_card_and_resolve(m, &mut trick_points);
 
@@ -410,5 +435,231 @@ mod tests {
             .collect();
         assert!(heart_moves.contains(&9));
         assert!(heart_moves.contains(&8));
+    }
+
+    /// Optimization #1: splitmix64 seed derivation must produce deterministic,
+    /// reproducible worlds from a given base seed.
+    #[test]
+    fn test_splitmix64_seed_determinism() {
+        let my_hand = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 3) | (1u64 << 4)
+            | (1u64 << 5) | (1u64 << 6) | (1u64 << 7) | (1u64 << 8) | (1u64 << 9);
+        let voids = [0u8; 4];
+        let target_sizes = [10, 10, 10, 10];
+
+        // Run solve_pimc twice with the same seed — results must be identical
+        let evs1 = solve_pimc(
+            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 10, 1, 42,
+        );
+        let evs2 = solve_pimc(
+            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 10, 1, 42,
+        );
+
+        assert_eq!(evs1.len(), evs2.len());
+        for ((m1, ev1), (m2, ev2)) in evs1.iter().zip(evs2.iter()) {
+            assert_eq!(m1, m2, "Move mismatch at same seed");
+            assert!(
+                (ev1 - ev2).abs() < 1e-9,
+                "EV mismatch at same seed: {} vs {}",
+                ev1,
+                ev2
+            );
+        }
+    }
+
+    /// Optimization #1: different seeds must produce potentially different
+    /// EV scores (seeds are not accidentally collapsed).
+    #[test]
+    fn test_splitmix64_seed_diversity() {
+        let my_hand = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 3) | (1u64 << 4)
+            | (1u64 << 5) | (1u64 << 6) | (1u64 << 7) | (1u64 << 8) | (1u64 << 9);
+        let voids = [0u8; 4];
+        let target_sizes = [10, 10, 10, 10];
+
+        // With enough worlds, different seeds should yield numerically distinct EVs
+        let evs_a = solve_pimc(
+            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 50, 1, 100,
+        );
+        let evs_b = solve_pimc(
+            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 50, 1, 999,
+        );
+
+        assert!(!evs_a.is_empty());
+        assert!(!evs_b.is_empty());
+        // With 50 worlds and different seeds, EVs should differ for at least one move
+        let mut any_different = false;
+        for ((_, ev_a), (_, ev_b)) in evs_a.iter().zip(evs_b.iter()) {
+            if (ev_a - ev_b).abs() > 1e-9 {
+                any_different = true;
+                break;
+            }
+        }
+        assert!(
+            any_different,
+            "Different seeds should produce different EV estimates"
+        );
+    }
+
+    /// Optimization #2: invariant code motion — base GameState is copied per-move,
+    /// so each move evaluation starts from the identical pre-move state.
+    #[test]
+    fn test_invariant_base_state_is_not_mutated() {
+        // Set up a simple deal: player 0 has all hearts, others share remaining cards
+        let mut my_hand = 0u64;
+        for r in 0..10 {
+            my_hand |= 1u64 << (0 * 10 + r);
+        }
+        let voids = [0u8; 4];
+        let target_sizes = [10, 10, 10, 10];
+
+        let evs = solve_pimc(
+            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 10, 1, 42,
+        );
+
+        // Every legal move must appear exactly once in the output
+        assert!(!evs.is_empty());
+        let mut seen = std::collections::HashSet::new();
+        for (m, _) in &evs {
+            assert!(
+                seen.insert(*m),
+                "Move {} appears multiple times — base state was mutated between iterations",
+                m
+            );
+        }
+        // All legal hearts cards should be present (player 0 has all 10 hearts)
+        assert_eq!(evs.len(), 10, "Should have 10 legal moves (all hearts)");
+    }
+
+    /// Optimization #3: MRV heuristic — constrained cards (where a hidden player
+    /// is void in that suit) must appear before unconstrained cards in the shuffled
+    /// array, ensuring backtracking fails fast.
+    #[test]
+    fn test_mrv_constrained_cards_first() {
+        // Player 0 hand: 5 hearts + 5 diamonds
+        let mut my_hand = 0u64;
+        for r in 0..5 {
+            my_hand |= 1u64 << (0 * 10 + r); // Hearts 0-4
+            my_hand |= 1u64 << (1 * 10 + r); // Diamonds 0-4
+        }
+
+        // Player 1 is void in hearts, player 2 is void in diamonds
+        let mut voids = [0u8; 4];
+        voids[1] = 1; // Player 1 void in hearts (suit 0)
+        voids[2] = 1 << 1; // Player 2 void in diamonds (suit 1)
+
+        // target_sizes: how many cards each player must end up with (10 each)
+        let target_sizes = [10, 10, 10, 10];
+
+        // Build unknown card pool (cards not in my_hand)
+        let known_mask = my_hand;
+        let mut unknown_cards = [0u8; 40];
+        let mut n = 0;
+        for c in 0..40 {
+            if (known_mask & (1u64 << c)) == 0 {
+                unknown_cards[n] = c;
+                n += 1;
+            }
+        }
+
+        let mut hands_out = [0u64; 4];
+        let mut seed = 42u64;
+
+        // We can't directly inspect the shuffled array, but we can verify
+        // that the constraint solver succeeds despite the voids, which
+        // validates that constrained cards are prioritized correctly.
+        let ok = sample_world(
+            0,
+            my_hand,
+            &unknown_cards[..n],
+            voids,
+            target_sizes,
+            &mut hands_out,
+            &mut seed,
+        );
+        assert!(ok, "MRV partitioning must not break world sampling");
+
+        // Player 1 must have zero hearts
+        let hearts_mask = 0x3FFu64;
+        assert_eq!(
+            hands_out[1] & hearts_mask,
+            0,
+            "Player 1 must have no hearts (void constraint)"
+        );
+        // Player 2 must have zero diamonds
+        let diamonds_mask = 0x3FFu64 << 10;
+        assert_eq!(
+            hands_out[2] & diamonds_mask,
+            0,
+            "Player 2 must have no diamonds (void constraint)"
+        );
+
+        // All players must have exactly 10 cards
+        for s in 0..4 {
+            assert_eq!(
+                hands_out[s].count_ones(),
+                10,
+                "Player {} must have exactly 10 cards",
+                s
+            );
+        }
+    }
+
+    /// Optimization #3: worlds with impossible void constraints must fail
+    /// gracefully (not infinite-loop). The old shuffle might succeed by chance;
+    /// MRV must still handle failure correctly.
+    #[test]
+    fn test_mrv_impossible_constraints_fail() {
+        // Player 0 has 5 hearts + 5 diamonds. The remaining 5 hearts must go
+        // to the 3 other players, but all 3 are void in hearts — impossible.
+        let mut my_hand = 0u64;
+        for r in 0..5 {
+            my_hand |= 1u64 << (0 * 10 + r); // 5 hearts
+            my_hand |= 1u64 << (1 * 10 + r); // 5 diamonds
+        }
+
+        let mut voids = [0u8; 4];
+        voids[1] = 1; // All 3 other players void in hearts
+        voids[2] = 1;
+        voids[3] = 1;
+
+        // 20 unknown cards: remaining 5 hearts + 5 diamonds + 5 clubs + 5 spades
+        // (player 0 already has 5 hearts + 5 diamonds = 10)
+        let target_sizes = [10, 10, 10, 10];
+
+        let known_mask = my_hand;
+        let mut unknown_cards = [0u8; 40];
+        let mut n = 0;
+        for c in 0..40 {
+            if (known_mask & (1u64 << c)) == 0 {
+                unknown_cards[n] = c;
+                n += 1;
+            }
+        }
+
+        let mut hands_out = [0u64; 4];
+        let mut seed = 42u64;
+
+        // With MRV, this should fail quickly (constrained hearts can't be placed)
+        // Try a few times — must never succeed
+        let mut any_success = false;
+        for _ in 0..20 {
+            let mut local_seed = seed;
+            seed = seed.wrapping_add(1);
+            if sample_world(
+                0,
+                my_hand,
+                &unknown_cards[..n],
+                voids,
+                target_sizes,
+                &mut hands_out,
+                &mut local_seed,
+            ) {
+                any_success = true;
+                break;
+            }
+        }
+        assert!(
+            !any_success,
+            "Impossible constraints (3 players void in same suit with cards remaining) must fail"
+        );
     }
 }

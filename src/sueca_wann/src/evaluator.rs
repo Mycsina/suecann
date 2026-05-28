@@ -1,12 +1,11 @@
-use crate::wann::RustWannNetwork;
+use crate::wann_network::RustWannNetwork;
 
-// Re-export split modules for backwards compatibility.
-pub use crate::belief::encode_belief_state;
-pub use crate::heuristic::{
-    resolve_intent, select_card_from_outputs, select_card_heuristic, select_card_random,
+use sueca_solver::belief::encode_belief_state;
+use sueca_solver::heuristic::{
+    resolve_intent, select_card_heuristic, select_card_heuristic_old, select_card_random,
 };
-pub use crate::rng::LcgRng;
-pub use crate::simulator::{trick_winner_seat, SuecaSimulatorGame};
+use sueca_solver::rng::LcgRng;
+use sueca_solver::simulator::SuecaSimulatorGame;
 
 #[derive(Debug, Clone, Default)]
 pub struct WannBehavior {
@@ -22,6 +21,7 @@ pub struct WannBehavior {
 #[derive(Clone, Debug)]
 pub enum SimulatorBot<'a> {
     Random,
+    OldHeuristic,
     Heuristic,
     Wann {
         network: &'a RustWannNetwork,
@@ -47,21 +47,22 @@ impl<'a> SimulatorBot<'a> {
                 let legal = game.state.legal_moves();
                 select_card_random(legal, rng)
             }
+            SimulatorBot::OldHeuristic => select_card_heuristic_old(game, seat),
             SimulatorBot::Heuristic => select_card_heuristic(game, seat),
             SimulatorBot::Wann { network, weights } => {
                 let belief = encode_belief_state(game, seat);
 
                 // Weight sweep output averaging
-                let mut sum_outputs = [0.0f64; crate::constants::OUTPUT_COUNT];
+                let mut sum_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
                 for &w in *weights {
                     network.forward(&belief, w, scratchpad);
-                    for i in 0..crate::constants::OUTPUT_COUNT {
-                        sum_outputs[i] += scratchpad[crate::constants::OUTPUT_START + i];
+                    for i in 0..sueca_solver::constants::OUTPUT_COUNT {
+                        sum_outputs[i] += scratchpad[sueca_solver::constants::OUTPUT_START + i];
                     }
                 }
 
-                let mut mean_outputs = [0.0f64; crate::constants::OUTPUT_COUNT];
-                for i in 0..crate::constants::OUTPUT_COUNT {
+                let mut mean_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
+                for i in 0..sueca_solver::constants::OUTPUT_COUNT {
                     mean_outputs[i] = sum_outputs[i] / (weights.len() as f64);
                 }
 
@@ -70,15 +71,15 @@ impl<'a> SimulatorBot<'a> {
                 adjusted_outputs[3] -= 0.25;
 
                 let mut max_val = adjusted_outputs[0];
-                for i in 1..crate::constants::OUTPUT_COUNT {
+                for i in 1..sueca_solver::constants::OUTPUT_COUNT {
                     if adjusted_outputs[i] > max_val {
                         max_val = adjusted_outputs[i];
                     }
                 }
 
-                let mut best_intents = [0usize; crate::constants::OUTPUT_COUNT];
+                let mut best_intents = [0usize; sueca_solver::constants::OUTPUT_COUNT];
                 let mut best_count = 0;
-                for i in 0..crate::constants::OUTPUT_COUNT {
+                for i in 0..sueca_solver::constants::OUTPUT_COUNT {
                     if (adjusted_outputs[i] - max_val).abs() < 1e-9 {
                         best_intents[best_count] = i;
                         best_count += 1;
@@ -98,7 +99,8 @@ impl<'a> SimulatorBot<'a> {
                         beh.intent_counts[chosen_intent] += 1;
                     }
                     if game.current_trick_len == 0 {
-                        beh.total_lead_points += crate::engine::CARD_POINTS[card as usize] as usize;
+                        beh.total_lead_points +=
+                            sueca_solver::engine::CARD_POINTS[card as usize] as usize;
                         beh.count_leads += 1;
                     }
                     beh.total_actions += 1;
@@ -127,14 +129,14 @@ impl<'a> SimulatorBot<'a> {
                 }
 
                 let led_suit = if game.current_trick_len > 0 {
-                    crate::engine::CARD_SUIT[game.current_trick[0] as usize]
+                    sueca_solver::engine::CARD_SUIT[game.current_trick[0] as usize]
                 } else {
                     4
                 };
 
                 let current_trick_cards = &game.current_trick[..game.current_trick_len];
 
-                let evs = crate::pimc::solve_pimc(
+                let evs = sueca_solver::pimc::solve_pimc(
                     seat,
                     game.state.hands[seat as usize],
                     played_cards_mask,
@@ -187,6 +189,7 @@ fn rotate_first_player(first_player: u8, rotation: usize) -> u8 {
 // ---------------------------------------------------------------------------
 // Game Simulation Runner
 // ---------------------------------------------------------------------------
+#[allow(dead_code)]
 pub struct GameResultSim {
     pub team_02_score: u8,
     pub team_13_score: u8,
@@ -263,9 +266,10 @@ pub fn get_bot_from_type<'a>(
             search_depth: 1,
         },
         0 => SimulatorBot::Random,
-        1 => SimulatorBot::Heuristic,
-        t if t >= 2 => {
-            let idx = (t - 2) as usize;
+        1 => SimulatorBot::OldHeuristic,
+        3 => SimulatorBot::Heuristic,
+        t if t >= 10 => {
+            let idx = (t - 10) as usize;
             SimulatorBot::Wann {
                 network: &hof_networks[idx],
                 weights: sweep_weights,
@@ -277,6 +281,7 @@ pub fn get_bot_from_type<'a>(
 
 /// Evaluate a candidate genome vs a baseline bot on the same deals with CRN.
 /// Returns (average_delta, behavior_metrics) — fitness is computed in Python.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_genome_delta(
     candidate: &RustWannNetwork,
     baseline_bot_type: i32,
@@ -356,8 +361,8 @@ pub fn evaluate_genome_delta(
                 &mut dummy_behavior,
             );
 
-            total_score_candidate += result_candidate.team_02_game_points as f64;
-            total_score_baseline += result_baseline.team_02_game_points as f64;
+            total_score_candidate += result_candidate.team_02_score as f64;
+            total_score_baseline += result_baseline.team_02_score as f64;
         }
     }
 

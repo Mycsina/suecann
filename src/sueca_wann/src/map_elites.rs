@@ -50,10 +50,8 @@ impl MapElitesArchive {
     pub fn sample_random<R: Rng>(&self, rng: &mut R) -> Option<Genome> {
         let mut occupied = Vec::new();
         for row in &self.grid {
-            for cell in row {
-                if let Some(entry) = cell {
-                    occupied.push(&entry.genome);
-                }
+            for entry in row.iter().flatten() {
+                occupied.push(&entry.genome);
             }
         }
         if occupied.is_empty() {
