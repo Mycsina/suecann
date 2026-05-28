@@ -262,7 +262,7 @@ pub fn get_bot_from_type<'a>(
 ) -> SimulatorBot<'a> {
     match bot_type {
         -1 => SimulatorBot::Pimc {
-            n_worlds: 10,
+            n_worlds: 5,
             search_depth: 1,
         },
         0 => SimulatorBot::Random,

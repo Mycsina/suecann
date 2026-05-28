@@ -1,20 +1,20 @@
-# configs/test.toml
+# configs/test.toml — fast training cycle for development
 
 [population]
 pop_size = 100
-generations = 30
+generations = 50
 elitism = 3
 pareto_complexity_prob = 0.80
 
 [evaluation]
-n_deals = 16
+n_deals = 32
 curriculum_gens = 10
-sweep_weights = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
+sweep_weights = [1.0]
 seed = 42
 
 [species]
 compatibility_threshold = 1.2
-stagnation_limit = 25
+stagnation_limit = 20
 c_excess = 1.0
 c_disjoint = 1.0
 c_mismatch = 0.4
@@ -29,17 +29,17 @@ p_change_agg = 0.15
 p_crossover = 0.40
 
 [curriculum]
-phase0_gens = 20
+phase0_gens = 25
 bulking_gens = 5
 phase0_threshold = -0.10
 phase1_threshold = -0.05
-phase0_dataset = "expert_states_w80_d4.npz"
+phase0_dataset = "expert_states_w40_d3.npz"
 phase2_hof_min = 3
 min_gens_per_phase = 2
 adaptive_window = 2
 
 [hall_of_fame]
-hof_size = 5
+hof_size = 10
 
 [output]
 checkpoint_dir = "checkpoints/test"

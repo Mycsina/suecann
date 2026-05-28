@@ -1,41 +1,40 @@
-# configs/production.toml
-# High-Fidelity Hyperparameters for Production WANN Sueca Training
+# Full-scale production config — 3-4 hour runtime
 
 [population]
-pop_size = 1000               # Massively expands structural diversity and niche protection
-generations = 1200             # Deep training run to allow complex emergent strategies
-elitism = 3                    # Protects top 3 performers per species from mutation corruption
-pareto_complexity_prob = 0.80  # 80% Pareto pressure, 20% protection for innovative bulk structures
+pop_size = 1000
+generations = 1200
+elitism = 3
+pareto_complexity_prob = 0.80
 
 [evaluation]
-n_deals = 128                  # 128 duplicate deals = 512 total games per rollout sweep
-curriculum_gens = 300          # Smoothly linearizes the rollout environment introduction
+n_deals = 128
+curriculum_gens = 300
 sweep_weights = [1.0]
 seed = 1337
 
 [species]
-compatibility_threshold = 1.4  # Dynamically bounds roughly 8 to 15 parallel species
-stagnation_limit = 40          # Gives complex networks ample generations to optimize before extinction
+compatibility_threshold = 1.4
+stagnation_limit = 40
 c_excess = 1.0
 c_disjoint = 1.0
 c_mismatch = 0.5
 
 [mutation]
-p_add_node = 0.20              # High structural expansion pressure
-p_add_conn = 0.35              # High exploratory routing connectivity
+p_add_node = 0.20
+p_add_conn = 0.35
 p_toggle_conn = 0.05
 p_flip_sign = 0.10
-p_change_act = 0.25            # Encourages frequent logic shifts to MIN/MAX/THRESHOLD
+p_change_act = 0.25
 p_change_agg = 0.15
-p_crossover = 0.40             # High recombination rate once species establish
+p_crossover = 0.40
 
 [curriculum]
-phase0_gens = 200              # Long pre-training window to climb the deterministic gradient
-bulking_gens = 100             # 100 gens of pure accuracy growth, followed by 100 gens of Pareto cutting
-phase0_dataset = "expert_states_w80_d4.npz"
+phase0_gens = 200
+bulking_gens = 100
+phase0_dataset = "expert_states_w20_d2.npz"
 
 [hall_of_fame]
-hof_size = 50                  # Expands self-play opponent variety to prevent strategic exploit cycles
+hof_size = 50
 
 [output]
 checkpoint_dir = "checkpoints/production"

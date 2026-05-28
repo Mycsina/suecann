@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = dataset_gen::DatasetConfig {
                 n_worlds,
                 search_depth,
-                target_per_intent: target_count,
+                target_total: target_count,
                 seed,
                 output_path: output,
             };
@@ -171,11 +171,6 @@ fn run_benchmark(
         benchmark::BotEntry {
             name: "EliteHeuristicBot".into(),
             bot_type: 3,
-            genome_path: None,
-        },
-        benchmark::BotEntry {
-            name: "PIMCBot".into(),
-            bot_type: -1,
             genome_path: None,
         },
         benchmark::BotEntry {

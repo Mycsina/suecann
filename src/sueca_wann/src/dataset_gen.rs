@@ -2,7 +2,6 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use sueca_solver::belief::encode_belief_state;
 use sueca_solver::constants::{INPUT_COUNT, OUTPUT_COUNT};
 use sueca_solver::engine::CARD_SUIT;
@@ -12,43 +11,34 @@ use sueca_solver::simulator::SuecaSimulatorGame;
 pub struct DatasetConfig {
     pub n_worlds: usize,
     pub search_depth: u8,
-    pub target_per_intent: usize,
+    pub target_total: usize,
     pub seed: u64,
     pub output_path: String,
 }
 
 pub fn generate_dataset(config: &DatasetConfig) {
-    let target_per_intent = config.target_per_intent;
-    let total_target = target_per_intent * OUTPUT_COUNT;
+    let total_target = config.target_total;
 
     println!(
-        "Generating expert dataset: {} worlds, depth {}, {} states per intent ({} total)...",
-        config.n_worlds, config.search_depth, target_per_intent, total_target
+        "Generating expert dataset: {} worlds, depth {}, {} total states...",
+        config.n_worlds, config.search_depth, total_target
     );
 
-    // Thread-local accumulators
-    let counters: Vec<AtomicUsize> = (0..OUTPUT_COUNT).map(|_| AtomicUsize::new(0)).collect();
-    let total_generated = AtomicUsize::new(0);
-
-    // Flat master accumulators — the post-collect loop runs on the main thread
-    // (rayon::current_thread_index() always returns None after .collect()),
-    // so thread-local buffers serve no purpose.
-    let mut all_states = Vec::with_capacity(total_target * INPUT_COUNT / 4);
-    let mut all_intents = Vec::with_capacity(total_target / 4);
-    let mut all_masks = Vec::with_capacity(total_target / 4);
+    let mut all_states = Vec::with_capacity(total_target * INPUT_COUNT);
+    let mut all_intents = Vec::with_capacity(total_target);
+    let mut all_masks = Vec::with_capacity(total_target);
+    let mut intent_counts = [0usize; OUTPUT_COUNT];
 
     let mut batch_seed = config.seed;
     let mut batches = 0;
 
     loop {
-        let current_total = total_generated.load(Ordering::Relaxed);
-        if current_total >= total_target {
+        if all_intents.len() >= total_target {
             break;
         }
         batches += 1;
 
-        // Generate a batch of deal states in parallel
-        let batch_size = 256;
+        let batch_size = 512;
         let batch_results: Vec<Vec<(Vec<f64>, u8, u8)>> = (0..batch_size)
             .into_par_iter()
             .map(|i| {
@@ -60,10 +50,8 @@ pub fn generate_dataset(config: &DatasetConfig) {
 
         for results in batch_results {
             for (state, intent, mask) in results {
-                let i = intent as usize;
-                if i < OUTPUT_COUNT && counters[i].load(Ordering::Relaxed) < target_per_intent {
-                    counters[i].fetch_add(1, Ordering::Relaxed);
-                    total_generated.fetch_add(1, Ordering::Relaxed);
+                if all_intents.len() < total_target {
+                    intent_counts[intent as usize] += 1;
                     all_states.extend(&state);
                     all_intents.push(intent);
                     all_masks.push(mask);
@@ -74,50 +62,23 @@ pub fn generate_dataset(config: &DatasetConfig) {
         batch_seed += batch_size as u64;
 
         if batches % 10 == 0 {
-            let counts: Vec<usize> = counters.iter().map(|c| c.load(Ordering::Relaxed)).collect();
-            let total = total_generated.load(Ordering::Relaxed);
             println!(
                 "  batch {}, total: {}/{}, per intent: {:?}",
-                batches, total, total_target, counts
+                batches, all_intents.len(), total_target, intent_counts
             );
-        }
-
-        // Stop if all intents reached target
-        if counters
-            .iter()
-            .all(|c| c.load(Ordering::Relaxed) >= target_per_intent)
-        {
-            break;
-        }
-    }
-
-    // Trim to exact target per intent
-    let mut trimmed_states = Vec::with_capacity(total_target * INPUT_COUNT);
-    let mut trimmed_intents = Vec::with_capacity(total_target);
-    let mut trimmed_masks = Vec::with_capacity(total_target);
-    let mut intent_counts = vec![0usize; OUTPUT_COUNT];
-    for (i, &intent) in all_intents.iter().enumerate() {
-        let idx = intent as usize;
-        if idx < OUTPUT_COUNT && intent_counts[idx] < target_per_intent {
-            let start = i * INPUT_COUNT;
-            trimmed_states.extend_from_slice(&all_states[start..start + INPUT_COUNT]);
-            trimmed_intents.push(intent);
-            trimmed_masks.push(all_masks[i]);
-            intent_counts[idx] += 1;
         }
     }
 
     println!(
         "Final dataset: {} states, intent distribution: {:?}",
-        trimmed_intents.len(),
+        all_intents.len(),
         intent_counts
     );
 
-    // Save as NPZ
     save_npz(
-        &trimmed_states,
-        &trimmed_intents,
-        &trimmed_masks,
+        &all_states,
+        &all_intents,
+        &all_masks,
         &config.output_path,
     );
 }
@@ -143,7 +104,7 @@ pub fn generate_deal_states(rng: &mut Pcg64, config: &DatasetConfig) -> Vec<(Vec
     let first_player = (rng.gen_range(0u64..4)) as u8;
 
     // Play random cards until a random mid-game position
-    let max_tricks = (rng.gen_range(0u64..9)) as usize; // 0 to 8 tricks played
+    let max_tricks = (rng.gen_range(1u64..9)) as usize; // 1 to 8 tricks played
     let mut game = SuecaSimulatorGame::new(hands, trump, first_player);
 
     for _ in 0..max_tricks {
@@ -232,24 +193,28 @@ pub fn generate_deal_states(rng: &mut Pcg64, config: &DatasetConfig) -> Vec<(Vec
         }
     }
 
-    let intent = map_card_to_intent(best_card, &game, seat);
-    let legal_mask = build_legal_mask(legal, &game, seat);
-    let state_vec: Vec<f64> = belief.to_vec();
-    results.push((state_vec, intent, legal_mask));
+    if let Some(intent) = map_card_to_intent(best_card, &game, seat) {
+        let legal_mask = build_legal_mask(legal, &game, seat);
+        let state_vec: Vec<f64> = belief.to_vec();
+        results.push((state_vec, intent, legal_mask));
+    }
+    // Unclassifiable states are rejected — no fallback pollution.
 
     results
 }
 
-pub fn map_card_to_intent(card: u8, game: &SuecaSimulatorGame, seat: u8) -> u8 {
-    // Try each oracle intent; return the one that matches the PIMC card
-    for &intent in &[2u8, 0, 3, 1] {
-        // EFFICIENT_WIN first (preferred), then MAX_FORCE, EQUITY_BUILDER, MIN_FORCE
+pub fn map_card_to_intent(card: u8, game: &SuecaSimulatorGame, seat: u8) -> Option<u8> {
+    // MIN_FORCE first — defensive plays are the hardest to classify, so test
+    // them before more generic intents that would steal the label. If none of
+    // the 4 heuristics produce this card, reject the state rather than
+    // polluting MAX_FORCE with unclassifiable defensive decisions.
+    for &intent in &[1u8, 2, 3, 0] {
         let resolved = resolve_intent(intent as usize, game, seat);
         if resolved == card {
-            return intent;
+            return Some(intent);
         }
     }
-    0 // fallback: MAX_FORCE
+    None
 }
 
 pub fn build_legal_mask(legal: u64, game: &SuecaSimulatorGame, seat: u8) -> u8 {
@@ -352,7 +317,7 @@ mod tests {
         DatasetConfig {
             n_worlds: 10,
             search_depth: 2,
-            target_per_intent: 25,
+            target_total: 100,
             seed: 12345,
             output_path: String::new(),
         }
@@ -421,7 +386,7 @@ mod tests {
         let config = DatasetConfig {
             n_worlds: 20,
             search_depth: 2,
-            target_per_intent: 1000,
+            target_total: 4000,
             seed: 777,
             output_path: String::new(),
         };
@@ -527,14 +492,13 @@ mod tests {
         }
     }
 
-    /// map_card_to_intent must always find a matching intent for any legal card.
-    /// The fallback (0 = MAX_FORCE) should only be hit if no intent matches.
+    /// When map_card_to_intent returns Some(intent), the intent must resolve
+    /// to a legal card. Unclassifiable cards return None — no fallback pollution.
     #[test]
-    fn test_intent_mapping_is_exhaustive() {
+    fn test_intent_mapping_is_clean() {
         let mut rng = Pcg64::seed_from_u64(123);
 
         for _ in 0..100 {
-            // Create a fresh game state
             let mut deck: Vec<u8> = (0..40).collect();
             for i in (1..40).rev() {
                 let j = (rng.gen_range(0u64..((i + 1) as u64))) as usize;
@@ -550,7 +514,6 @@ mod tests {
             let first_player = (rng.gen_range(0u64..4)) as u8;
             let mut game = SuecaSimulatorGame::new(hands, trump, first_player);
 
-            // Play a few tricks
             let tricks = (rng.gen_range(0u64..5)) as usize;
             for _ in 0..tricks {
                 if game.state.trick_number >= 10 {
@@ -578,22 +541,21 @@ mod tests {
                 continue;
             }
 
-            // For every legal card, verify map_card_to_intent matches at least one intent
+            // For every legal card: if classified, the intent must be valid
             let mut temp = legal;
             while temp != 0 {
                 let card = temp.trailing_zeros() as u8;
-                let intent = map_card_to_intent(card, &game, seat);
-
-                // The returned intent must resolve back to this card (or another
-                // legal card — but the mapping should be consistent)
-                let resolved = resolve_intent(intent as usize, &game, seat);
-                assert!(
-                    (legal & (1u64 << resolved)) != 0,
-                    "Intent {} resolved to card {} which is not legal for seat {}",
-                    intent,
-                    resolved,
-                    seat
-                );
+                if let Some(intent) = map_card_to_intent(card, &game, seat) {
+                    let resolved = resolve_intent(intent as usize, &game, seat);
+                    assert!(
+                        (legal & (1u64 << resolved)) != 0,
+                        "Intent {} resolved to card {} which is not legal for seat {}",
+                        intent,
+                        resolved,
+                        seat
+                    );
+                }
+                // else: card is unclassifiable — allowed, it's rejected upstream
                 temp &= temp - 1;
             }
         }
@@ -662,12 +624,14 @@ mod tests {
 
     /// All 4 oracle intents must appear in the generated data.
     /// No single intent should dominate — the class balancing must work.
+    /// All 4 oracle intents must appear in the generated data.
+    /// Distribution will be natural (not forced uniform).
     #[test]
     fn test_intent_diversity() {
         let config = DatasetConfig {
             n_worlds: 10,
             search_depth: 1,
-            target_per_intent: 50,
+            target_total: 200,
             seed: 999,
             output_path: String::new(),
         };
@@ -771,28 +735,25 @@ mod tests {
         let config = DatasetConfig {
             n_worlds: 10,
             search_depth: 1,
-            target_per_intent: 10,
+            target_total: 40,
             seed: 42,
             output_path: "/tmp/test_roundtrip.npz".into(),
         };
 
-        // Generate a small dataset
+        // Collect states with natural distribution
         let mut rng = Pcg64::seed_from_u64(config.seed);
         let mut states = Vec::new();
         let mut intents = Vec::new();
         let mut masks = Vec::new();
-        let mut counts = [0usize; 4];
         loop {
             for (state, intent, mask) in generate_deal_states(&mut rng, &config) {
-                let i = intent as usize;
-                if counts[i] < config.target_per_intent {
+                if intents.len() < config.target_total {
                     states.extend(state);
                     intents.push(intent);
                     masks.push(mask);
-                    counts[i] += 1;
                 }
             }
-            if counts.iter().all(|&c| c >= config.target_per_intent) {
+            if intents.len() >= config.target_total {
                 break;
             }
         }
