@@ -24,7 +24,8 @@ pub enum SimulatorBot<'a> {
     OldHeuristic,
     Heuristic,
     Wann {
-        network: &'a RustWannNetwork,
+        lead_brain: &'a RustWannNetwork,
+        follow_brain: &'a RustWannNetwork,
         weights: &'a [f64],
     },
     Pimc {
@@ -49,8 +50,22 @@ impl<'a> SimulatorBot<'a> {
             }
             SimulatorBot::OldHeuristic => select_card_heuristic_old(game, seat),
             SimulatorBot::Heuristic => select_card_heuristic(game, seat),
-            SimulatorBot::Wann { network, weights } => {
+            SimulatorBot::Wann {
+                lead_brain,
+                follow_brain,
+                weights,
+            } => {
                 let belief = encode_belief_state(game, seat);
+
+                // Dynamically route to Lead or Follow brain per card-play slice
+                let network =
+                    if (belief[crate::constants::BeliefFeature::AmILeading as usize] - 1.0).abs()
+                        < 1e-9
+                    {
+                        lead_brain
+                    } else {
+                        follow_brain
+                    };
 
                 // Weight sweep output averaging
                 let mut sum_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
@@ -257,7 +272,8 @@ pub struct EvaluatorDeal {
 
 pub fn get_bot_from_type<'a>(
     bot_type: i32,
-    hof_networks: &'a [RustWannNetwork],
+    hof_lead_networks: &'a [RustWannNetwork],
+    hof_follow_networks: &'a [RustWannNetwork],
     sweep_weights: &'a [f64],
 ) -> SimulatorBot<'a> {
     match bot_type {
@@ -267,11 +283,13 @@ pub fn get_bot_from_type<'a>(
         },
         0 => SimulatorBot::Random,
         1 => SimulatorBot::OldHeuristic,
+        2 => SimulatorBot::Heuristic,
         3 => SimulatorBot::Heuristic,
         t if t >= 10 => {
             let idx = (t - 10) as usize;
             SimulatorBot::Wann {
-                network: &hof_networks[idx],
+                lead_brain: &hof_lead_networks[idx],
+                follow_brain: &hof_follow_networks[idx],
                 weights: sweep_weights,
             }
         }
@@ -283,12 +301,14 @@ pub fn get_bot_from_type<'a>(
 /// Returns (average_delta, behavior_metrics) — fitness is computed in Python.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_genome_delta(
-    candidate: &RustWannNetwork,
+    candidate_lead: &RustWannNetwork,
+    candidate_follow: &RustWannNetwork,
     baseline_bot_type: i32,
     partner_bot_type: i32,
     opp1_bot_type: i32,
     opp2_bot_type: i32,
-    hof_networks: &[RustWannNetwork],
+    hof_lead_networks: &[RustWannNetwork],
+    hof_follow_networks: &[RustWannNetwork],
     sweep_weights: &[f64],
     deals: &[EvaluatorDeal],
     base_seed: u64,
@@ -300,13 +320,14 @@ pub fn evaluate_genome_delta(
 
     let first_player = 0;
 
-    let partner = get_bot_from_type(partner_bot_type, hof_networks, sweep_weights);
-    let opp1 = get_bot_from_type(opp1_bot_type, hof_networks, sweep_weights);
-    let opp2 = get_bot_from_type(opp2_bot_type, hof_networks, sweep_weights);
-    let baseline = get_bot_from_type(baseline_bot_type, hof_networks, sweep_weights);
+    let partner = get_bot_from_type(partner_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+    let opp1 = get_bot_from_type(opp1_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+    let opp2 = get_bot_from_type(opp2_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+    let baseline = get_bot_from_type(baseline_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
 
     let candidate_bot = SimulatorBot::Wann {
-        network: candidate,
+        lead_brain: candidate_lead,
+        follow_brain: candidate_follow,
         weights: sweep_weights,
     };
 

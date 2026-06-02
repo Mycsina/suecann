@@ -716,7 +716,7 @@ pub fn select_card_from_outputs(
     seat: u8,
     rng: &mut LcgRng,
 ) -> u8 {
-    let mut adjusted_outputs = *outputs;
+    let adjusted_outputs = *outputs;
 
     let mut max_val = adjusted_outputs[0];
     for &val in &adjusted_outputs[1..] {
