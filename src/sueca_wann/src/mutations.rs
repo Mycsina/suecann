@@ -2,8 +2,53 @@ use crate::genome::{
     ActivationFn, AggregationFn, ConnGene, Genome, NodeGene, NodeType, FIRST_HIDDEN_ID,
 };
 use rand::Rng;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
+
+pub struct TabuVetoList {
+    pub dynamic_queue: Mutex<VecDeque<(usize, usize)>>,
+    pub max_size: usize,
+}
+
+impl TabuVetoList {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            dynamic_queue: Mutex::new(VecDeque::with_capacity(max_size)),
+            max_size,
+        }
+    }
+
+    pub fn is_tabu(&self, src: usize, dst: usize) -> bool {
+        // 1. Static cycle check and input/bias destination check
+        if src == dst {
+            return true;
+        }
+        if dst <= sueca_solver::constants::BIAS_ID {
+            return true;
+        }
+
+        // 2. Dynamic queue check
+        let q = self.dynamic_queue.lock().unwrap();
+        q.contains(&(src, dst))
+    }
+
+    pub fn add_tabu(&self, src: usize, dst: usize) {
+        let mut q = self.dynamic_queue.lock().unwrap();
+        if q.contains(&(src, dst)) {
+            return;
+        }
+        if q.len() >= self.max_size {
+            q.pop_front();
+        }
+        q.push_back((src, dst));
+    }
+
+    #[allow(dead_code)]
+    pub fn clear(&self) {
+        let mut q = self.dynamic_queue.lock().unwrap();
+        q.clear();
+    }
+}
 
 pub struct InnovationRegistry {
     pub next_innovation: usize,
@@ -80,6 +125,7 @@ fn pick_random_node<R: Rng>(
 pub fn mutate_add_node<R: Rng>(
     genome: &mut Genome,
     registry: &Mutex<InnovationRegistry>,
+    _tabu_list: &TabuVetoList,
     rng: &mut R,
 ) -> bool {
     let conn = match pick_random_enabled_connection(genome, rng) {
@@ -130,6 +176,7 @@ pub fn mutate_add_node<R: Rng>(
 pub fn mutate_add_connection<R: Rng>(
     genome: &mut Genome,
     registry: &Mutex<InnovationRegistry>,
+    tabu_list: &TabuVetoList,
     rng: &mut R,
 ) -> bool {
     // All the expensive work happens OUTSIDE the lock
@@ -163,7 +210,7 @@ pub fn mutate_add_connection<R: Rng>(
             if src_depth >= depth[&dst] {
                 continue;
             }
-            if !existing.contains(&(src, dst)) {
+            if !existing.contains(&(src, dst)) && !tabu_list.is_tabu(src, dst) {
                 candidates.push((src, dst));
             }
         }
@@ -276,6 +323,7 @@ pub fn mutate_change_aggregation<R: Rng>(genome: &mut Genome, rng: &mut R) -> bo
 pub fn apply_mutations<R: Rng>(
     genome: &mut Genome,
     registry: &Mutex<InnovationRegistry>,
+    tabu_list: &TabuVetoList,
     rng: &mut R,
     p_add_node: f64,
     p_add_conn: f64,
@@ -285,10 +333,10 @@ pub fn apply_mutations<R: Rng>(
     p_change_agg: f64,
 ) -> usize {
     let mut n = 0;
-    if rng.gen_bool(p_add_node) && mutate_add_node(genome, registry, rng) {
+    if rng.gen_bool(p_add_node) && mutate_add_node(genome, registry, tabu_list, rng) {
         n += 1;
     }
-    if rng.gen_bool(p_add_conn) && mutate_add_connection(genome, registry, rng) {
+    if rng.gen_bool(p_add_conn) && mutate_add_connection(genome, registry, tabu_list, rng) {
         n += 1;
     }
     if rng.gen_bool(p_toggle_conn) && mutate_toggle_connection(genome, rng) {
@@ -304,4 +352,75 @@ pub fn apply_mutations<R: Rng>(
         n += 1;
     }
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::genome::Genome;
+    use sueca_solver::constants::{BIAS_ID, INPUT_START};
+
+    #[test]
+    fn test_tabu_static_rules() {
+        let tabu = TabuVetoList::new(10);
+        // Self loop
+        assert!(tabu.is_tabu(5, 5));
+        // Input as destination
+        assert!(tabu.is_tabu(10, INPUT_START));
+        // Bias as destination
+        assert!(tabu.is_tabu(10, BIAS_ID));
+        // Allowed connection (forward from input to hidden/output)
+        assert!(!tabu.is_tabu(INPUT_START, 45));
+    }
+
+    #[test]
+    fn test_tabu_dynamic_queue() {
+        let tabu = TabuVetoList::new(3);
+        // Initially empty
+        assert!(!tabu.is_tabu(15, 45));
+
+        tabu.add_tabu(15, 45);
+        assert!(tabu.is_tabu(15, 45));
+
+        tabu.add_tabu(16, 45);
+        tabu.add_tabu(17, 45);
+
+        // 3 items in queue now: (15,45), (16,45), (17,45)
+        assert!(tabu.is_tabu(15, 45));
+        assert!(tabu.is_tabu(16, 45));
+        assert!(tabu.is_tabu(17, 45));
+
+        // Add 4th item, (15,45) should be popped (FIFO)
+        tabu.add_tabu(18, 45);
+        assert!(!tabu.is_tabu(15, 45));
+        assert!(tabu.is_tabu(16, 45));
+        assert!(tabu.is_tabu(17, 45));
+        assert!(tabu.is_tabu(18, 45));
+    }
+
+    #[test]
+    fn test_tabu_blocks_mutation() {
+        let mut genome = Genome::initial();
+        let registry = Mutex::new(InnovationRegistry::new(0));
+        let tabu = TabuVetoList::new(2000);
+        let mut rng = rand::thread_rng();
+
+        // Initially we can add connections
+        let before_conns = genome.conn_genes.len();
+        let success = mutate_add_connection(&mut genome, &registry, &tabu, &mut rng);
+        assert!(success);
+        assert_eq!(genome.conn_genes.len(), before_conns + 1);
+
+        // Clear and add all potential connections to Tabu list
+        let order = genome.topological_order();
+        for &src in &order {
+            for &dst in &order {
+                tabu.add_tabu(src, dst);
+            }
+        }
+
+        // Now mutate_add_connection must return false because all options are tabu
+        let success_tabu = mutate_add_connection(&mut genome, &registry, &tabu, &mut rng);
+        assert!(!success_tabu);
+    }
 }

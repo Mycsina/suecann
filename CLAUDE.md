@@ -22,6 +22,9 @@ The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the R
 
 ## Running Training
 
+For hard computing tasks, you may choose to use arise. It has a RTX 3080, 64GB of ram and a i7-10750H.
+To connect you can just use ssh arise, it also has a Projects folder, which you are to always use.
+
 ```bash
 cargo build -p sueca_wann --release
 
@@ -174,9 +177,15 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 
 ### Training Pipeline
 
-**Phase 0 (gens 0–`phase0_gens`): Supervised pretraining.** WANNs are trained to match PIMC expert intents on a pre-generated dataset. Fitness = classification accuracy. No game simulation.
+**Phase 0 (gens 0–`phase0_gens`): Supervised pretraining.**
+* **Dataset Split:** Expert PIMC dataset is split into `lead_dataset` and `follow_dataset` using the `BeliefFeature::AmILeading` flag.
+* **PFS-NEAT:** Populations start with exactly 0 active connections. Connection mutations are evaluated dynamically on 1000-state samples and rejected if they degrade accuracy compared to their parents (Online Mutational Filtering). Degraded mutations are logged into a FIFO `TabuVetoList` of size 1000.
+* **Fitness:** Supervised classification accuracy on respective splits. No game simulation.
 
-**Phase 1 (gens `phase0_gens`–1000): Self-play evolution.** Fitness = raw game-point delta vs HeuristicBot. Partners/opponents sampled from Hall of Fame and MAP-Elites. Delta computed via Common Random Numbers on the same deals.
+**Phase 1 (gens `phase0_gens`–`generations`): Co-evolutionary Self-play.**
+* **Co-Evolution:** Lead and Follow brains co-evolve. Matches pair candidate Lead WANNs with reference Follow WANN champions, and vice versa.
+* **Dynamic Routing:** Games are played trick-by-trick and card-by-card. The simulator dynamically routes queries to the Lead or Follow brain on every decision slice based on `belief[BeliefFeature::AmILeading as usize]`.
+* **Fitness:** Raw game-point delta vs HeuristicBot. Partners/opponents sampled from HOF and MAP-Elites. Delta computed via Common Random Numbers on the same duplicate deals (seat rotations).
 
 **Phase 0→1 HOF transfer**: HOF entries are re-evaluated under Phase 1 fitness at the transition point, preserving knowledge from supervised pretraining.
 
@@ -211,3 +220,4 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 8. **Delta-fitness baseline bot must see the same cards**: The baseline plays the exact same seat rotation with the same deal to ensure valid comparison.
 9. **Build from repo root**: Always use `cargo build -p sueca_wann --release`. There is no `.so` / FFI build step.
 10. **Dataset ego-turn sync**: `legal_moves()` always returns moves for `game.state.current_player`. Never loop over all 4 seats at a frozen game state — the belief, legal mask, and intent resolver must all reference the active player.
+11. **Weight Sweep Discrepancy**: Evolving on a single weight (e.g. `[1.0]`) while benchmarking on a multi-weight sweep (e.g. `[-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]`) leads to severe performance degradation. Ensure configuration aligns with evaluation goals.

@@ -524,6 +524,12 @@ impl Genome {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonGenomeJoint {
+    pub lead: Option<JsonGenome>,
+    pub follow: Option<JsonGenome>,
+}
+
 // Flat structure for JSON serialization compatibility with Python
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonGenome {
@@ -697,7 +703,7 @@ mod tests {
         let g2 = json.to_genome();
         assert_eq!(g.node_ids(), g2.node_ids());
         assert_eq!(g.conn_genes.len(), g2.conn_genes.len());
-        for (i, c) in g.conn_genes.iter().enumerate() {
+        for c in &g.conn_genes {
             let c2 = g2.get_conn_by_inno(c.innovation).unwrap();
             assert_eq!(c.src, c2.src);
             assert_eq!(c.dst, c2.dst);

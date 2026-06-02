@@ -67,6 +67,8 @@ enum Command {
         seed: u64,
         #[arg(long, default_value = "expert_states.npz")]
         output: String,
+        #[arg(long, default_value = "0.5")]
+        pimc_min_margin: f64,
     },
 }
 
@@ -102,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_count,
             seed,
             output,
+            pimc_min_margin,
         } => {
             let config = dataset_gen::DatasetConfig {
                 n_worlds,
@@ -109,10 +112,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target_total: target_count,
                 seed,
                 output_path: output,
+                pimc_min_margin,
             };
             dataset_gen::generate_dataset(&config);
         }
     }
+
 
     Ok(())
 }
@@ -231,7 +236,22 @@ fn run_benchmark(
 
 fn run_compile_rules(genome_path: &str, weight: f64, output_dir: &str) {
     std::fs::create_dir_all(output_dir).ok();
-    let genome = compile_rules::load_genome(genome_path);
-    let rules = compile_rules::compile_rules(&genome, weight, output_dir);
-    println!("{}", rules);
+    match compile_rules::load_genome(genome_path) {
+        Ok((lead_opt, follow_opt)) => {
+            if let Some(lead) = lead_opt {
+                println!("Compiling Lead Brain rules...");
+                let rules = compile_rules::compile_rules(&lead, weight, output_dir, "lead");
+                println!("{}", rules);
+            }
+            if let Some(follow) = follow_opt {
+                println!("\nCompiling Follow Brain rules...");
+                let rules = compile_rules::compile_rules(&follow, weight, output_dir, "follow");
+                println!("{}", rules);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error loading genome: {}", e);
+            std::process::exit(1);
+        }
+    }
 }

@@ -28,25 +28,40 @@ pub fn generate_deals(n_deals: usize, gen: u64, base_seed: u64) -> Vec<Evaluator
     crate::train::generate_deals_rust(gen as usize, n_deals, base_seed)
 }
 
-pub fn load_genome(path: &str) -> Genome {
-    use crate::genome::JsonGenome;
-    use std::io::BufReader;
-    let file = std::fs::File::open(path).unwrap_or_else(|e| {
-        eprintln!("Error: Cannot open genome file '{}': {}", path, e);
+pub fn load_joint_genome(path: &str) -> (Genome, Genome) {
+    use crate::genome::{JsonGenome, JsonGenomeJoint};
+
+    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error: Cannot read genome file '{}': {}", path, e);
         std::process::exit(1);
     });
-    let reader = BufReader::new(file);
-    let jg: JsonGenome = serde_json::from_reader(reader).unwrap_or_else(|e| {
-        eprintln!("Error: Invalid JSON in genome file '{}': {}", path, e);
+
+    if let Ok(joint) = serde_json::from_str::<JsonGenomeJoint>(&content) {
+        let lead = joint.lead.map(|jg| jg.to_genome()).unwrap_or_else(|| {
+            eprintln!("Error: Lead genome missing in joint genome file '{}'", path);
+            std::process::exit(1);
+        });
+        let follow = joint.follow.map(|jg| jg.to_genome()).unwrap_or_else(|| {
+            eprintln!(
+                "Error: Follow genome missing in joint genome file '{}'",
+                path
+            );
+            std::process::exit(1);
+        });
+        (lead, follow)
+    } else if let Ok(single) = serde_json::from_str::<JsonGenome>(&content) {
+        let genome = single.to_genome();
+        (genome.copy(), genome)
+    } else {
+        eprintln!("Error: Invalid JSON format in genome file '{}'. Could not parse as single or joint genome.", path);
         std::process::exit(1);
-    });
-    jg.to_genome()
+    }
 }
 
 pub fn run_matchup(
-    bot_a_network: Option<&RustWannNetwork>,
+    bot_a_networks: Option<&(RustWannNetwork, RustWannNetwork)>,
     bot_a_type: i32,
-    bot_b_network: Option<&RustWannNetwork>,
+    bot_b_networks: Option<&(RustWannNetwork, RustWannNetwork)>,
     bot_b_type: i32,
     deals: &[EvaluatorDeal],
     sweep_weights: &[f64],
@@ -59,13 +74,16 @@ pub fn run_matchup(
         .map(|_| Mutex::new(vec![0.0f64; 4096]))
         .collect();
 
-    // Build a combined network list for bot type resolution
-    let mut all_nets = Vec::new();
-    if let Some(n) = bot_a_network {
-        all_nets.push(n.clone());
+    // Build combined lead and follow network lists for bot type resolution
+    let mut all_lead_nets = Vec::new();
+    let mut all_follow_nets = Vec::new();
+    if let Some((lead, follow)) = bot_a_networks {
+        all_lead_nets.push(lead.clone());
+        all_follow_nets.push(follow.clone());
     }
-    if let Some(n) = bot_b_network {
-        all_nets.push(n.clone());
+    if let Some((lead, follow)) = bot_b_networks {
+        all_lead_nets.push(lead.clone());
+        all_follow_nets.push(follow.clone());
     }
 
     let results: Vec<(f64, f64)> = deals
@@ -83,13 +101,33 @@ pub fn run_matchup(
 
                 let (a_bot, b_bot) = if !swapped {
                     (
-                        crate::evaluator::get_bot_from_type(bot_a_type, &all_nets, sweep_weights),
-                        crate::evaluator::get_bot_from_type(bot_b_type, &all_nets, sweep_weights),
+                        crate::evaluator::get_bot_from_type(
+                            bot_a_type,
+                            &all_lead_nets,
+                            &all_follow_nets,
+                            sweep_weights,
+                        ),
+                        crate::evaluator::get_bot_from_type(
+                            bot_b_type,
+                            &all_lead_nets,
+                            &all_follow_nets,
+                            sweep_weights,
+                        ),
                     )
                 } else {
                     (
-                        crate::evaluator::get_bot_from_type(bot_b_type, &all_nets, sweep_weights),
-                        crate::evaluator::get_bot_from_type(bot_a_type, &all_nets, sweep_weights),
+                        crate::evaluator::get_bot_from_type(
+                            bot_b_type,
+                            &all_lead_nets,
+                            &all_follow_nets,
+                            sweep_weights,
+                        ),
+                        crate::evaluator::get_bot_from_type(
+                            bot_a_type,
+                            &all_lead_nets,
+                            &all_follow_nets,
+                            sweep_weights,
+                        ),
                     )
                 };
 
@@ -162,11 +200,11 @@ pub fn run_tournament(bots: &[BotEntry], config: &TournamentConfig) -> Tournamen
     let deals = generate_deals(config.n_deals, 0, config.base_seed * 1000);
 
     // Load genomes
-    let mut networks: Vec<Option<RustWannNetwork>> = Vec::new();
+    let mut networks: Vec<Option<(RustWannNetwork, RustWannNetwork)>> = Vec::new();
     for bot in bots {
         if let Some(ref path) = bot.genome_path {
-            let genome = load_genome(path);
-            networks.push(Some(genome.to_rust_wann()));
+            let (lead, follow) = load_joint_genome(path);
+            networks.push(Some((lead.to_rust_wann(), follow.to_rust_wann())));
         } else {
             networks.push(None);
         }

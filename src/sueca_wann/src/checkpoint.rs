@@ -8,20 +8,24 @@ use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrainingState {
-    pub generation: usize,
-    pub next_species_id: usize,
-    pub global_best_fitness: f64,
-    pub global_best_genome: Option<Genome>,
+pub struct BrainTrainingState {
     pub genomes: Vec<Genome>,
     pub species: Vec<Species>,
     pub hof: HallOfFame,
-    pub next_innovation: usize,
-    pub current_phase: usize,
-    #[serde(default)]
-    pub generations_since_improvement: usize,
-    #[serde(default)]
     pub map_elites: MapElitesArchive,
+    pub next_species_id: usize,
+    pub global_best_fitness: f64,
+    pub global_best_genome: Option<Genome>,
+    pub generations_since_improvement: usize,
+    pub next_innovation: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingState {
+    pub generation: usize,
+    pub current_phase: usize,
+    pub lead: BrainTrainingState,
+    pub follow: BrainTrainingState,
 }
 
 impl TrainingState {

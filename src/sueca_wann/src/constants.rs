@@ -7,9 +7,6 @@
 // Floating-point epsilon for tie-breaking comparisons.
 pub const FLOAT_EPSILON: f64 = 1e-9;
 
-// Structural baseline penalty applied to the EQUITY_BUILDER (intent 3) output.
-pub const EQUITY_FALLBACK_PENALTY: f64 = 0.25;
-
 // Tournament / breeding hyperparameters.
 pub const TOURNAMENT_SIZE: usize = 3;
 pub const FITNESS_OFFSET: f64 = 0.1;
@@ -21,6 +18,41 @@ pub const RESEED_ADD_CONN_PROB: f64 = 0.10;
 
 // Partner / opponent seat offsets (partner = (seat + 2) % 4).
 pub const PARTNER_OFFSET: usize = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum BeliefFeature {
+    HasLedSuit = 0,
+    HasTrump = 1,
+    LedSuitPower = 2,
+    TrumpPower = 3,
+    HandPointDensity = 4,
+    AmILeading = 5,
+    AmILastToPlay = 6,
+    IsPartnerWinning = 7,
+    TrickPointValue = 8,
+    HasTrickBeenCut = 9,
+    PartnerVoidLed = 10,
+    PartnerVoidTrump = 11,
+    AnyOppVoidLed = 12,
+    AnyOppVoidTrump = 13,
+    LedSuitAcePlayed = 14,
+    LedSuit7Played = 15,
+    TrumpAcePlayed = 16,
+    GamePtsRemaining = 17,
+    TrickNumber = 18,
+    TrumpsRemaining = 19,
+    ScoreDelta = 20,
+    Side0Depletion = 21,
+    Side0AcePlayed = 22,
+    Side07Played = 23,
+    Side1Depletion = 24,
+    Side1AcePlayed = 25,
+    Side17Played = 26,
+    Side2Depletion = 27,
+    Side2AcePlayed = 28,
+    Side27Played = 29,
+}
 
 // Sueca feature names (indexed by belief-state dimension, 0..30).
 pub const FEATURE_NAMES: [&str; 30] = [
@@ -58,3 +90,6 @@ pub const FEATURE_NAMES: [&str; 30] = [
 
 // Oracle intent names (indexed by output neuron, 0..4).
 pub const OUTPUT_NAMES: [&str; 4] = ["MAX_FORCE", "MIN_FORCE", "EFFICIENT_WIN", "EQUITY_BUILDER"];
+
+// Number of worlds to use for the heuristic potential evaluation rollouts.
+pub const POTENTIAL_EVAL_WORLDS: usize = 5;

@@ -4,7 +4,7 @@ use rand_pcg::Pcg64;
 use rayon::prelude::*;
 use sueca_solver::belief::encode_belief_state;
 use sueca_solver::constants::{INPUT_COUNT, OUTPUT_COUNT};
-use sueca_solver::engine::CARD_SUIT;
+use sueca_solver::engine::{CARD_POINTS, CARD_SUIT};
 use sueca_solver::heuristic::resolve_intent;
 use sueca_solver::simulator::SuecaSimulatorGame;
 
@@ -14,6 +14,7 @@ pub struct DatasetConfig {
     pub target_total: usize,
     pub seed: u64,
     pub output_path: String,
+    pub pimc_min_margin: f64,
 }
 
 pub fn generate_dataset(config: &DatasetConfig) {
@@ -25,7 +26,7 @@ pub fn generate_dataset(config: &DatasetConfig) {
     );
 
     let mut all_states = Vec::with_capacity(total_target * INPUT_COUNT);
-    let mut all_intents = Vec::with_capacity(total_target);
+    let mut all_intents = Vec::with_capacity(total_target * 4);
     let mut all_masks = Vec::with_capacity(total_target);
     let mut intent_counts = [0usize; OUTPUT_COUNT];
 
@@ -33,13 +34,13 @@ pub fn generate_dataset(config: &DatasetConfig) {
     let mut batches = 0;
 
     loop {
-        if all_intents.len() >= total_target {
+        if all_intents.len() / 4 >= total_target {
             break;
         }
         batches += 1;
 
         let batch_size = 512;
-        let batch_results: Vec<Vec<(Vec<f64>, u8, u8)>> = (0..batch_size)
+        let batch_results: Vec<Vec<(Vec<f64>, [f32; 4], u8)>> = (0..batch_size)
             .into_par_iter()
             .map(|i| {
                 let deal_seed = batch_seed + i as u64;
@@ -49,11 +50,15 @@ pub fn generate_dataset(config: &DatasetConfig) {
             .collect();
 
         for results in batch_results {
-            for (state, intent, mask) in results {
-                if all_intents.len() < total_target {
-                    intent_counts[intent as usize] += 1;
+            for (state, soft_intent, mask) in results {
+                if all_intents.len() / 4 < total_target {
+                    for i in 0..4 {
+                        if soft_intent[i] > 0.0 {
+                            intent_counts[i] += 1;
+                        }
+                    }
                     all_states.extend(&state);
-                    all_intents.push(intent);
+                    all_intents.extend_from_slice(&soft_intent);
                     all_masks.push(mask);
                 }
             }
@@ -64,26 +69,24 @@ pub fn generate_dataset(config: &DatasetConfig) {
         if batches % 10 == 0 {
             println!(
                 "  batch {}, total: {}/{}, per intent: {:?}",
-                batches, all_intents.len(), total_target, intent_counts
+                batches,
+                all_intents.len() / 4,
+                total_target,
+                intent_counts
             );
         }
     }
 
     println!(
         "Final dataset: {} states, intent distribution: {:?}",
-        all_intents.len(),
+        all_intents.len() / 4,
         intent_counts
     );
 
-    save_npz(
-        &all_states,
-        &all_intents,
-        &all_masks,
-        &config.output_path,
-    );
+    save_npz(&all_states, &all_intents, &all_masks, &config.output_path);
 }
 
-pub fn generate_deal_states(rng: &mut Pcg64, config: &DatasetConfig) -> Vec<(Vec<f64>, u8, u8)> {
+pub fn generate_deal_states(rng: &mut Pcg64, config: &DatasetConfig) -> Vec<(Vec<f64>, [f32; 4], u8)> {
     let mut results = Vec::new();
 
     // Deal cards
@@ -184,37 +187,52 @@ pub fn generate_deal_states(rng: &mut Pcg64, config: &DatasetConfig) -> Vec<(Vec
         rng.gen_range(0u64..u64::MAX),
     );
 
-    let mut best_card = legal.trailing_zeros() as u8;
-    let mut max_ev = f64::NEG_INFINITY;
-    for (card, ev) in &evs {
-        if *ev > max_ev {
-            max_ev = *ev;
-            best_card = *card;
+    let mut sorted_evs = evs.clone();
+    sorted_evs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    if sorted_evs.is_empty() {
+        return results;
+    }
+
+    let best_card = sorted_evs[0].0;
+    if sorted_evs.len() >= 2 {
+        let second_best_card = sorted_evs[1].0;
+        let bypass_margin_check = CARD_SUIT[best_card as usize] == CARD_SUIT[second_best_card as usize]
+            && CARD_POINTS[best_card as usize] == 0
+            && CARD_POINTS[second_best_card as usize] == 0;
+
+        if !bypass_margin_check && (sorted_evs[0].1 - sorted_evs[1].1) < config.pimc_min_margin {
+            return results; // Reject true tactical ambiguity
         }
     }
 
-    if let Some(intent) = map_card_to_intent(best_card, &game, seat) {
+    if let Some(soft_intent) = map_card_to_soft_intents(best_card, &game, seat) {
         let legal_mask = build_legal_mask(legal, &game, seat);
         let state_vec: Vec<f64> = belief.to_vec();
-        results.push((state_vec, intent, legal_mask));
+        results.push((state_vec, soft_intent, legal_mask));
     }
     // Unclassifiable states are rejected — no fallback pollution.
 
     results
 }
 
-pub fn map_card_to_intent(card: u8, game: &SuecaSimulatorGame, seat: u8) -> Option<u8> {
-    // MIN_FORCE first — defensive plays are the hardest to classify, so test
-    // them before more generic intents that would steal the label. If none of
-    // the 4 heuristics produce this card, reject the state rather than
-    // polluting MAX_FORCE with unclassifiable defensive decisions.
-    for &intent in &[1u8, 2, 3, 0] {
-        let resolved = resolve_intent(intent as usize, game, seat);
+pub fn map_card_to_soft_intents(card: u8, game: &SuecaSimulatorGame, seat: u8) -> Option<[f32; 4]> {
+    let mut matching_intents = Vec::new();
+    for intent in 0..4 {
+        let resolved = resolve_intent(intent, game, seat);
         if resolved == card {
-            return Some(intent);
+            matching_intents.push(intent);
         }
     }
-    None
+    if matching_intents.is_empty() {
+        return None;
+    }
+    let prob = 1.0f32 / (matching_intents.len() as f32);
+    let mut target_vector = [0.0f32; 4];
+    for intent in matching_intents {
+        target_vector[intent] = prob;
+    }
+    Some(target_vector)
 }
 
 pub fn build_legal_mask(legal: u64, game: &SuecaSimulatorGame, seat: u8) -> u8 {
@@ -229,11 +247,11 @@ pub fn build_legal_mask(legal: u64, game: &SuecaSimulatorGame, seat: u8) -> u8 {
     mask
 }
 
-fn save_npz(states: &[f64], intents: &[u8], masks: &[u8], path: &str) {
+fn save_npz(states: &[f64], intents: &[f32], masks: &[u8], path: &str) {
     use std::io::Write;
     use zip::write::FileOptions;
 
-    let num_states = intents.len();
+    let num_states = intents.len() / 4;
     let states_f32: Vec<f32> = states.iter().map(|&v| v as f32).collect();
 
     // Helper: write a .npy file to a buffer
@@ -286,7 +304,10 @@ fn save_npz(states: &[f64], intents: &[u8], masks: &[u8], path: &str) {
 
     // intents.npy
     {
-        let npy = write_npy(intents, "|u1", &[num_states as u64]);
+        let raw: &[u8] = unsafe {
+            std::slice::from_raw_parts(intents.as_ptr() as *const u8, intents.len() * 4)
+        };
+        let npy = write_npy(raw, "<f4", &[num_states as u64, 4]);
         zip.start_file("intents.npy", opts).unwrap();
         zip.write_all(&npy).unwrap();
     }
@@ -320,6 +341,7 @@ mod tests {
             target_total: 100,
             seed: 12345,
             output_path: String::new(),
+            pimc_min_margin: 0.5,
         }
     }
 
@@ -389,6 +411,7 @@ mod tests {
             target_total: 4000,
             seed: 777,
             output_path: String::new(),
+            pimc_min_margin: 0.5,
         };
         let mut rng = Pcg64::seed_from_u64(777);
         // Generate a fresh deal state and trace through the logic manually
@@ -545,15 +568,19 @@ mod tests {
             let mut temp = legal;
             while temp != 0 {
                 let card = temp.trailing_zeros() as u8;
-                if let Some(intent) = map_card_to_intent(card, &game, seat) {
-                    let resolved = resolve_intent(intent as usize, &game, seat);
-                    assert!(
-                        (legal & (1u64 << resolved)) != 0,
-                        "Intent {} resolved to card {} which is not legal for seat {}",
-                        intent,
-                        resolved,
-                        seat
-                    );
+                if let Some(soft_intent) = map_card_to_soft_intents(card, &game, seat) {
+                    for intent in 0..4 {
+                        if soft_intent[intent] > 0.0 {
+                            let resolved = resolve_intent(intent, &game, seat);
+                            assert!(
+                                (legal & (1u64 << resolved)) != 0,
+                                "Intent {} resolved to card {} which is not legal for seat {}",
+                                intent,
+                                resolved,
+                                seat
+                            );
+                        }
+                    }
                 }
                 // else: card is unclassifiable — allowed, it's rejected upstream
                 temp &= temp - 1;
@@ -634,14 +661,19 @@ mod tests {
             target_total: 200,
             seed: 999,
             output_path: String::new(),
+            pimc_min_margin: 0.5,
         };
         let mut rng = Pcg64::seed_from_u64(999);
         let mut counts = [0usize; 4];
         let mut total = 0;
 
         for _ in 0..500 {
-            for (_, intent, _) in generate_deal_states(&mut rng, &config) {
-                counts[intent as usize] += 1;
+            for (_, soft_intent, _) in generate_deal_states(&mut rng, &config) {
+                for i in 0..4 {
+                    if soft_intent[i] > 0.0 {
+                        counts[i] += 1;
+                    }
+                }
                 total += 1;
             }
         }
@@ -738,6 +770,7 @@ mod tests {
             target_total: 40,
             seed: 42,
             output_path: "/tmp/test_roundtrip.npz".into(),
+            pimc_min_margin: 0.5,
         };
 
         // Collect states with natural distribution
@@ -747,13 +780,13 @@ mod tests {
         let mut masks = Vec::new();
         loop {
             for (state, intent, mask) in generate_deal_states(&mut rng, &config) {
-                if intents.len() < config.target_total {
+                if intents.len() / 4 < config.target_total {
                     states.extend(state);
-                    intents.push(intent);
+                    intents.extend_from_slice(&intent);
                     masks.push(mask);
                 }
             }
-            if intents.len() >= config.target_total {
+            if intents.len() / 4 >= config.target_total {
                 break;
             }
         }
@@ -765,8 +798,8 @@ mod tests {
         use crate::dataset::load_expert_dataset;
         let loaded = load_expert_dataset(&config.output_path).unwrap();
 
-        assert_eq!(loaded.num_states, intents.len());
-        assert_eq!(loaded.intents, intents);
+        assert_eq!(loaded.num_states, intents.len() / 4);
+        assert_eq!(loaded.soft_intents, intents);
         assert_eq!(loaded.states.len(), states.len());
 
         // Compare states with tolerance for f32→f64 round-trip
@@ -848,5 +881,151 @@ mod tests {
                 assert!(v.is_finite() && (0.0..=1.0).contains(&v));
             }
         }
+    }
+
+    #[test]
+    fn test_dataset_yield_ratio() {
+        let config = DatasetConfig {
+            n_worlds: 20, // small n_worlds for faster test execution
+            search_depth: 2,
+            target_total: 1000,
+            seed: 54321,
+            output_path: String::new(),
+            pimc_min_margin: 0.5,
+        };
+        let mut rng = Pcg64::seed_from_u64(config.seed);
+        let mut raw_tactical_states = 0;
+        let mut preserved_states = 0;
+
+        for _ in 0..1000 {
+            // Replicate the generation setup
+            let mut deck: Vec<u8> = (0..40).collect();
+            for i in (1..40).rev() {
+                let j = (rng.gen_range(0u64..((i + 1) as u64))) as usize;
+                deck.swap(i, j);
+            }
+
+            let mut hands = [0u64; 4];
+            for p in 0..4 {
+                for c in 0..10 {
+                    hands[p] |= 1u64 << deck[p * 10 + c];
+                }
+            }
+
+            let trump = (rng.gen_range(0u64..4)) as u8;
+            let first_player = (rng.gen_range(0u64..4)) as u8;
+
+            let max_tricks = (rng.gen_range(1u64..9)) as usize;
+            let mut game = SuecaSimulatorGame::new(hands, trump, first_player);
+
+            for _ in 0..max_tricks {
+                if game.state.trick_number >= 10 {
+                    break;
+                }
+                let legal = game.state.legal_moves();
+                if legal == 0 {
+                    break;
+                }
+                let count = legal.count_ones();
+                let idx = (rng.gen_range(0u64..(count as u64))) as usize;
+                let mut temp = legal;
+                for _ in 0..idx {
+                    temp &= temp - 1;
+                }
+                game.play_card(temp.trailing_zeros() as u8);
+            }
+
+            if game.state.trick_number >= 10 {
+                continue;
+            }
+
+            let seat = game.state.current_player;
+            let legal = game.state.legal_moves();
+            if legal.count_ones() <= 1 {
+                continue;
+            }
+
+            // This is a raw tactical state where decision is needed and PIMC is executed
+            raw_tactical_states += 1;
+
+            let current_scores = [game.state.team_02_score, game.state.team_13_score];
+            let current_trick_number = game.state.trick_number;
+            let mut current_hands = 0u64;
+            for h in &game.state.hands {
+                current_hands |= h;
+            }
+            let played_cards_mask = (!current_hands) & 0x000000FFFFFFFFFFu64;
+
+            let mut target_sizes = [0u8; 4];
+            for s in 0..4 {
+                target_sizes[s] = game.state.hands[s].count_ones() as u8;
+            }
+
+            let led_suit = if game.current_trick_len > 0 {
+                CARD_SUIT[game.current_trick[0] as usize]
+            } else {
+                4
+            };
+
+            let current_trick_cards = &game.current_trick[..game.current_trick_len];
+
+            let evs = sueca_solver::pimc::solve_pimc(
+                seat,
+                game.state.hands[seat as usize],
+                played_cards_mask,
+                game.voids,
+                target_sizes,
+                game.state.trump,
+                led_suit,
+                current_trick_cards,
+                seat,
+                game.state.current_trick_winner,
+                game.state.current_trick_best_card,
+                current_scores,
+                current_trick_number,
+                config.n_worlds,
+                config.search_depth,
+                rng.gen_range(0u64..u64::MAX),
+            );
+
+            let mut sorted_evs = evs.clone();
+            sorted_evs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            if sorted_evs.is_empty() {
+                continue;
+            }
+
+            let best_card = sorted_evs[0].0;
+            let mut pass_margin = true;
+            if sorted_evs.len() >= 2 {
+                let second_best_card = sorted_evs[1].0;
+                let bypass_margin_check = CARD_SUIT[best_card as usize] == CARD_SUIT[second_best_card as usize]
+                    && CARD_POINTS[best_card as usize] == 0
+                    && CARD_POINTS[second_best_card as usize] == 0;
+
+                if !bypass_margin_check && (sorted_evs[0].1 - sorted_evs[1].1) < config.pimc_min_margin {
+                    pass_margin = false;
+                }
+            }
+
+            if pass_margin {
+                if map_card_to_soft_intents(best_card, &game, seat).is_some() {
+                    preserved_states += 1;
+                }
+            }
+        }
+
+        let ratio = preserved_states as f64 / raw_tactical_states as f64;
+        println!(
+            "Dataset yield ratio: {:.2}% ({}/{} states preserved)",
+            ratio * 100.0,
+            preserved_states,
+            raw_tactical_states
+        );
+        assert!(
+            ratio >= 0.60,
+            "Yield ratio too low! Got {:.2}%, expected >= 60%. Consensus erasure or follow-suit starvation is too aggressive.",
+            ratio * 100.0
+        );
     }
 }

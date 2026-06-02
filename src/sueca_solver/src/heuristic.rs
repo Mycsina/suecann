@@ -220,6 +220,28 @@ pub fn select_card_heuristic(game: &SuecaSimulatorGame, seat: u8) -> u8 {
             if is_partner_secure(game, seat, winner_card, current_hands) {
                 return select_smear_card(suited, led_suit, current_hands);
             }
+            
+            // Partner is winning but NOT secure. Can we protect the trick?
+            let win_rank = crate::engine::CARD_RANK[winner_card as usize];
+            let mut higher_protective_cards = 0u64;
+            let mut temp = suited;
+            
+            while temp != 0 {
+                let card = temp.trailing_zeros() as u8;
+                let rank = crate::engine::CARD_RANK[card as usize];
+                // If we hold a card higher than our partner's winning card, track it
+                if rank > win_rank {
+                    higher_protective_cards |= 1u64 << card;
+                }
+                temp &= temp - 1;
+            }
+
+            if higher_protective_cards != 0 {
+                // Play our highest card to actively secure the trick and protect our partner's investment
+                return 63 - higher_protective_cards.leading_zeros() as u8;
+            }
+            
+            // We can't help or improve the trick, so safely dump our lowest card
             return suited.trailing_zeros() as u8;
         }
 
@@ -695,7 +717,6 @@ pub fn select_card_from_outputs(
     rng: &mut LcgRng,
 ) -> u8 {
     let mut adjusted_outputs = *outputs;
-    adjusted_outputs[3] -= 0.25;
 
     let mut max_val = adjusted_outputs[0];
     for &val in &adjusted_outputs[1..] {
@@ -764,6 +785,24 @@ pub fn select_card_heuristic_old(game: &SuecaSimulatorGame, seat: u8) -> u8 {
 
     if suited != 0 {
         // Following: try to win cheaply, otherwise dump.
+        let dump_suited_point_aware = |suited_cards: u64| -> u8 {
+            let mut best_dump_card = None;
+            let mut min_dump_score = i32::MAX;
+            let mut temp = suited_cards;
+            while temp != 0 {
+                let card = temp.trailing_zeros() as u8;
+                let points = crate::engine::CARD_POINTS[card as usize] as i32;
+                let rank = crate::engine::CARD_RANK[card as usize] as i32;
+                let dump_score = (points << 8) + rank;
+                if dump_score < min_dump_score {
+                    min_dump_score = dump_score;
+                    best_dump_card = Some(card);
+                }
+                temp &= temp - 1;
+            }
+            best_dump_card.unwrap()
+        };
+
         let winner_seat = trick_winner_seat(game).unwrap();
         let mut winner_card = 0;
         for i in 0..game.current_trick_len {
@@ -774,7 +813,7 @@ pub fn select_card_heuristic_old(game: &SuecaSimulatorGame, seat: u8) -> u8 {
         }
 
         if (seat % 2) == (winner_seat % 2) {
-            return suited.trailing_zeros() as u8;
+            return dump_suited_point_aware(suited);
         }
 
         let win_suit = crate::engine::CARD_SUIT[winner_card as usize];
@@ -801,7 +840,7 @@ pub fn select_card_heuristic_old(game: &SuecaSimulatorGame, seat: u8) -> u8 {
         if beating != 0 {
             return beating.trailing_zeros() as u8;
         }
-        suited.trailing_zeros() as u8
+        dump_suited_point_aware(suited)
     } else {
         // Void: cut with lowest trump if partner isn't winning.
         let winner_seat = trick_winner_seat(game).unwrap();

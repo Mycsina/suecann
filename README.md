@@ -120,23 +120,39 @@ Generates `compiled_rules.txt`, `topology_graph.dot`, and `topology_graph.png`.
 
 ## Training Pipeline
 
-**Phase 0 (gens 0–200): Supervised pretraining.** WANNs learn to match PIMC expert intents from a pre-generated dataset. Fitness is classification accuracy. No game simulation.
+The training pipeline consists of two distinct phases:
 
-**Phase 1 (gens 200+): Self-play evolution.** WANNs play duplicate deals against HeuristicBot with Hall of Fame and MAP-Elites partners and opponents. Fitness is raw point delta versus baseline, computed via Common Random Numbers.
+### Phase 0: Supervised Pretraining with Split Datasets (gens 0 to 200)
+WANNs are pretrained to match Perfect Information Monte Carlo (PIMC) expert intents.
+* **Dataset Splitting:** The input expert dataset (such as `expert_states_w20_d2.npz`) is partitioned into two subsets using the `BeliefFeature::AmILeading` flag: `lead_dataset` (low entropy, 87% concentrated on aggressive MAX_FORCE and equity actions) and `follow_dataset` (high entropy, distributed across passive and efficient actions).
+* **Zero-Connection Start (PFS-NEAT):** Both `lead_pop` and `follow_pop` populations are initialized with genomes carrying exactly 0 active connections.
+* **Online Mutational Filtering:** During connection mutations, candidates are checked against a thread-safe FIFO `TabuVetoList` of size 1000. If the path is not tabued, it is temporarily applied and evaluated on a 1000-state subset. If the mutation degrades accuracy compared to the parent, it is discarded and pushed onto the Tabu queue. Beneficial and neutral mutations are preserved; neutral mutations that fail to find a synergistic partner node are pruned by Pareto complexity domination.
+* **Training Output:** Phase 0 finishes when populations independently reach convergence, typically achieving over 60% aggregate accuracy.
+
+### Phase 1: Co-evolutionary Self-Play (gens 200+)
+* **Co-Evolution:** Lead Brains and Follow Brains co-evolve. In each duplicate matchup, a candidate Lead Brain is paired with the current champion Follow Brain, and a candidate Follow Brain is paired with the champion Lead Brain.
+* **Dynamic Routing:** During gameplay, cards are played seat-by-seat. The evaluator queries a unified `Wann` simulator bot which routes decisions dynamically at each card play slice:
+  ```rust
+  let network = if belief[BeliefFeature::AmILeading as usize] == 1.0 {
+      lead_brain
+  } else {
+      follow_brain
+  };
+  ```
+* **Duplicate Matching:** Delta-fitness is computed using Common Random Numbers (CRN) over seat rotations on duplicate deals to isolate pure strategic skill from card luck.
 
 ## Checkpoint Structure
+
+The training state is statefully saved to a binary file `training_state.bin` using Bincode. Lead and Follow training states are fully encapsulated inside separate fields utilizing `BrainTrainingState`:
 
 ```
 checkpoints/
   2026-05-27-1/
-    training_stats.csv
-    training_state.bin
-    best_genome_final.json
-    hof_final.json
-    compiled_rules.txt
-    topology_graph.dot
-    topology_graph.png
-  run_comparison.png
+    training_stats.csv       # Training stats for both brains (lead/follow accuracy & enabled connections)
+    training_state.bin       # Stateful binary containing encapsulated Lead and Follow BrainTrainingStates
+    genomes/
+      best_genome_final.json # Final JsonGenomeJoint containing lead and follow JSON genomes
+      hof_final.json         # Final JsonHallOfFameJoint containing HOF entries for both brains
 ```
 
 ## Configuration
@@ -195,3 +211,13 @@ configs/
 scripts/
   compare_runs.py           # Cross-run visualization
 ```
+
+## Implemented Milestones & Advanced Search
+
+### 1. Linear Input Pruning (PFS-NEAT)
+WANNs are evolved from an empty starting footprint (0 active connections). Online Mutational Filtering verifies performance lift on connection proposals, protecting genomes from noisy/redundant inputs. Pareto selection pressure filters out neutral mutations that do not provide synergistic lifts over generations.
+
+### 2. SNAP-NEAT + Tabu search + Multi-Brain Partitioning
+* **Two-Level Tabu Veto:** Compiles hardcoded static structural constraints (self-loops, bias/inputs as targets, and cycles) with a dynamic FIFO lock-free queue that stores degraded mutation paths to bypass redundant evaluation.
+* **Modular Multi-Brain co-evolution:** Evolve modular Lead Brain (leading hand) and Follow Brain (following hand) populations. Game actions route decisions dynamically per play using `BeliefFeature::AmILeading`. Split brains reduce strategic entropy, accelerating search accuracy.
+

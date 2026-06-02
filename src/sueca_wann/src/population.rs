@@ -1,7 +1,10 @@
 use crate::config::Config;
+use crate::dataset::ExpertDataset;
 use crate::genome::Genome;
-use crate::mutations::{apply_mutations, mutate_add_connection, InnovationRegistry};
+use crate::mutations::{apply_mutations, InnovationRegistry, TabuVetoList};
 use crate::species::{speciate, Species};
+use crate::wann_network::RustWannNetwork;
+
 use rand::Rng;
 use rand::SeedableRng;
 use rand_pcg::Pcg64;
@@ -204,43 +207,21 @@ pub struct Population {
 }
 
 impl Population {
-    pub fn new<R: Rng>(config: Config, rng: &mut R, registry: &Mutex<InnovationRegistry>) -> Self {
+    pub fn new<R: Rng>(
+        config: Config,
+        _rng: &mut R,
+        _registry: &Mutex<InnovationRegistry>,
+    ) -> Self {
         let mut genomes = Vec::new();
         let mut fitnesses = Vec::new();
 
         let pop_size = config.population.pop_size;
 
-        // --- Random-link genomes ---
+        // --- Zero-connection genomes for PFS-NEAT ---
         let base = Genome::initial();
         let remaining_count = pop_size;
-        for i in 0..remaining_count {
-            let mut g = base.copy();
-
-            // Every genome gets 2-3 connections
-            let n_conns = rng.gen_range(2..4);
-            for _ in 0..n_conns {
-                mutate_add_connection(&mut g, registry, rng);
-            }
-
-            // Top 30% get extra mutations including add_node
-            if i < (remaining_count as f64 * 0.3) as usize {
-                let n_mutations = rng.gen_range(2..5);
-                for _ in 0..n_mutations {
-                    apply_mutations(
-                        &mut g,
-                        registry,
-                        rng,
-                        config.mutation.p_add_node,
-                        config.mutation.p_add_conn,
-                        config.mutation.p_toggle_conn,
-                        config.mutation.p_flip_sign,
-                        config.mutation.p_change_act,
-                        config.mutation.p_change_agg,
-                    );
-                }
-            }
-
-            genomes.push(g);
+        for _ in 0..remaining_count {
+            genomes.push(base.copy());
             fitnesses.push(0.0);
         }
 
@@ -284,6 +265,8 @@ impl Population {
         &mut self,
         current_phase: usize,
         bulking_gens: usize,
+        tabu_list: &TabuVetoList,
+        phase0_eval_data: Option<(&ExpertDataset, &[f64])>,
         rng: &mut R,
         registry: &Mutex<InnovationRegistry>,
     ) {
@@ -330,7 +313,14 @@ impl Population {
         }
 
         // 3. Breed next generation
-        let new_genomes = self.breed_next_generation(current_phase, bulking_gens, rng, registry);
+        let new_genomes = self.breed_next_generation(
+            current_phase,
+            bulking_gens,
+            tabu_list,
+            phase0_eval_data,
+            rng,
+            registry,
+        );
         self.genomes = new_genomes;
         self.fitnesses = vec![0.0; self.genomes.len()];
         self.generation += 1;
@@ -340,6 +330,8 @@ impl Population {
         &self,
         current_phase: usize,
         bulking_gens: usize,
+        tabu_list: &TabuVetoList,
+        phase0_eval_data: Option<(&ExpertDataset, &[f64])>,
         rng: &mut R,
         registry: &Mutex<InnovationRegistry>,
     ) -> Vec<Genome> {
@@ -508,9 +500,11 @@ impl Population {
                                 genomes[parent].copy()
                             };
 
-                        apply_mutations(
+                        let parent_copy = child.copy();
+                        let n_mut = apply_mutations(
                             &mut child,
                             registry,
+                            tabu_list,
                             local_rng,
                             p_add_node,
                             p_add_conn,
@@ -519,6 +513,35 @@ impl Population {
                             p_change_act,
                             p_change_agg,
                         );
+
+                        if n_mut > 0 && current_phase == 0 {
+                            if let Some((dataset, sweep_weights)) = phase0_eval_data {
+                                let parent_net = parent_copy.to_rust_wann();
+                                let parent_acc = evaluate_single_phase0_sample(
+                                    &parent_net,
+                                    dataset,
+                                    sweep_weights,
+                                    1000,
+                                );
+
+                                let child_net = child.to_rust_wann();
+                                let child_acc = evaluate_single_phase0_sample(
+                                    &child_net,
+                                    dataset,
+                                    sweep_weights,
+                                    1000,
+                                );
+
+                                if child_acc < parent_acc {
+                                    for c in &child.conn_genes {
+                                        if c.enabled && !parent_copy.has_connection(c.src, c.dst) {
+                                            tabu_list.add_tabu(c.src, c.dst);
+                                        }
+                                    }
+                                    child = parent_copy;
+                                }
+                            }
+                        }
                         child
                     },
                 )
@@ -547,6 +570,7 @@ impl Population {
         &mut self,
         global_best_genome: &Genome,
         fraction: f64,
+        tabu_list: &TabuVetoList,
         registry: &Mutex<InnovationRegistry>,
         rng: &mut rand_pcg::Pcg64,
     ) {
@@ -606,6 +630,7 @@ impl Population {
             crate::mutations::apply_mutations(
                 &mut clone,
                 registry,
+                tabu_list,
                 rng,
                 p_add_node,
                 p_add_conn,
@@ -640,4 +665,59 @@ fn tournament_select<R: Rng>(
     }
 
     ranked_indices[best_idx]
+}
+
+pub fn evaluate_single_phase0_sample(
+    network: &RustWannNetwork,
+    dataset: &ExpertDataset,
+    sweep_weights: &[f64],
+    sample_size: usize,
+) -> f64 {
+    use crate::genome::{INPUT_COUNT, OUTPUT_COUNT, OUTPUT_START};
+
+    let n_states = dataset.num_states.min(sample_size);
+    if n_states == 0 {
+        return 0.0;
+    }
+
+    let mut scratchpad = vec![0.0f64; network.num_nodes];
+    let mut correct: u32 = 0;
+
+    for idx in 0..n_states {
+        // Zero-copy: read directly from flat array into stack array
+        let base = idx * INPUT_COUNT;
+        let mut inputs = [0.0f64; INPUT_COUNT];
+        inputs.copy_from_slice(&dataset.states[base..base + INPUT_COUNT]);
+
+        let mut total_outputs = [0.0f64; OUTPUT_COUNT];
+        for &w in sweep_weights {
+            network.forward(&inputs, w, &mut scratchpad);
+            total_outputs[0] += scratchpad[OUTPUT_START];
+            total_outputs[1] += scratchpad[OUTPUT_START + 1];
+            total_outputs[2] += scratchpad[OUTPUT_START + 2];
+            total_outputs[3] += scratchpad[OUTPUT_START + 3];
+        }
+
+        // Unrolled argmax
+        let v0 = total_outputs[0];
+        let v1 = total_outputs[1];
+        let v2 = total_outputs[2];
+        let v3 = total_outputs[3];
+
+        let best_intent = if v0 >= v1 && v0 >= v2 && v0 >= v3 {
+            0
+        } else if v1 >= v2 && v1 >= v3 {
+            1
+        } else if v2 >= v3 {
+            2
+        } else {
+            3
+        };
+
+        if dataset.soft_intents[idx * 4 + best_intent] > 0.0 {
+            correct += 1;
+        }
+    }
+
+    correct as f64 / n_states as f64
 }

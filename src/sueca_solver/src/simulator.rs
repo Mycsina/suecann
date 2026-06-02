@@ -1,7 +1,7 @@
 use crate::engine::GameState;
 
 /// Wrapper around GameState for Sueca simulation state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct SuecaSimulatorGame {
     pub state: GameState,
     pub current_trick: [u8; 4],

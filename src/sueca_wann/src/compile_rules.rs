@@ -4,19 +4,21 @@ use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use sueca_solver::constants::{BIAS_ID, FIRST_HIDDEN_ID, INPUT_COUNT, OUTPUT_COUNT, OUTPUT_START};
 
-pub fn load_genome(path: &str) -> Genome {
-    use crate::genome::JsonGenome;
-    use std::io::BufReader;
-    let file = std::fs::File::open(path).unwrap_or_else(|e| {
-        eprintln!("Error: Cannot open genome file '{}': {}", path, e);
-        std::process::exit(1);
-    });
-    let reader = BufReader::new(file);
-    let jg: JsonGenome = serde_json::from_reader(reader).unwrap_or_else(|e| {
-        eprintln!("Error: Invalid JSON in genome file '{}': {}", path, e);
-        std::process::exit(1);
-    });
-    jg.to_genome()
+pub fn load_genome(
+    path: &str,
+) -> Result<(Option<Genome>, Option<Genome>), Box<dyn std::error::Error>> {
+    use crate::genome::{JsonGenome, JsonGenomeJoint};
+    let content = std::fs::read_to_string(path)?;
+    if let Ok(joint) = serde_json::from_str::<JsonGenomeJoint>(&content) {
+        let lead = joint.lead.map(|jg| jg.to_genome());
+        let follow = joint.follow.map(|jg| jg.to_genome());
+        Ok((lead, follow))
+    } else if let Ok(single) = serde_json::from_str::<JsonGenome>(&content) {
+        let genome = single.to_genome();
+        Ok((Some(genome.copy()), Some(genome)))
+    } else {
+        Err("Invalid WANN genome format: neither single nor joint genome".into())
+    }
 }
 
 fn get_reachable_nodes(genome: &Genome) -> HashSet<usize> {
@@ -92,7 +94,7 @@ fn compute_depths(genome: &Genome, reachable: &HashSet<usize>) -> HashMap<usize,
     depths
 }
 
-pub fn export_topology(genome: &Genome, output_dir: &str, _wann: &RustWannNetwork) {
+pub fn export_topology(genome: &Genome, output_dir: &str, _wann: &RustWannNetwork, prefix: &str) {
     let reachable = get_reachable_nodes(genome);
     let depths = compute_depths(genome, &reachable);
     let max_depth = depths.values().max().copied().unwrap_or(1);
@@ -189,12 +191,22 @@ pub fn export_topology(genome: &Genome, output_dir: &str, _wann: &RustWannNetwor
     dot.push_str("}\n");
 
     // Write .dot file
-    let dot_path = format!("{}/topology_graph.dot", output_dir);
+    let dot_name = if prefix.is_empty() {
+        "topology_graph.dot".to_string()
+    } else {
+        format!("topology_graph_{}.dot", prefix)
+    };
+    let png_name = if prefix.is_empty() {
+        "topology_graph.png".to_string()
+    } else {
+        format!("topology_graph_{}.png", prefix)
+    };
+    let dot_path = format!("{}/{}", output_dir, dot_name);
     std::fs::write(&dot_path, &dot).unwrap();
     println!("Saved raw dot source to {}", dot_path);
 
     // Try rendering with Graphviz
-    let png_path = format!("{}/topology_graph.png", output_dir);
+    let png_path = format!("{}/{}", output_dir, png_name);
     match Command::new("dot")
         .args(["-Kdot", "-Tpng", "-o", &png_path, &dot_path])
         .output()
@@ -275,7 +287,7 @@ fn format_node_rhs(
     }
 }
 
-pub fn compile_rules(genome: &Genome, weight: f64, output_dir: &str) -> String {
+pub fn compile_rules(genome: &Genome, weight: f64, output_dir: &str, prefix: &str) -> String {
     let reachable = get_reachable_nodes(genome);
     let order = genome.topological_order();
     let feature_names = crate::constants::FEATURE_NAMES;
@@ -355,12 +367,17 @@ pub fn compile_rules(genome: &Genome, weight: f64, output_dir: &str) -> String {
         }
     }
 
-    let rules_path = format!("{}/compiled_rules.txt", output_dir);
+    let rules_name = if prefix.is_empty() {
+        "compiled_rules.txt".to_string()
+    } else {
+        format!("compiled_rules_{}.txt", prefix)
+    };
+    let rules_path = format!("{}/{}", output_dir, rules_name);
     std::fs::write(&rules_path, &out).unwrap();
     println!("Saved text rules to {}", rules_path);
 
     // Generate topology visualization
-    export_topology(genome, output_dir, &wann);
+    export_topology(genome, output_dir, &wann, prefix);
 
     out
 }

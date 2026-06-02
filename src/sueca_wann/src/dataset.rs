@@ -8,7 +8,7 @@ use zip::ZipArchive;
 pub struct ExpertDataset {
     pub states: Vec<f64>, // flat array of states, shape (N, INPUT_COUNT)
     pub num_states: usize,
-    pub intents: Vec<u8>,
+    pub soft_intents: Vec<f32>, // flat array of shape (N, 4)
     #[allow(dead_code)]
     pub legal_masks: Vec<u8>,
 }
@@ -23,12 +23,12 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
         );
         let num_states = 100;
         let states = vec![0.0; num_states * INPUT_COUNT];
-        let intents = vec![0; num_states];
+        let soft_intents = vec![0.25f32; num_states * 4];
         let legal_masks = vec![0x0F; num_states];
         return Ok(ExpertDataset {
             states,
             num_states,
-            intents,
+            soft_intents,
             legal_masks,
         });
     }
@@ -45,11 +45,28 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
         states_f32.into_iter().map(|v| v as f64).collect()
     };
 
-    // Read intents.npy
-    let intents: Vec<u8> = {
+    // Read intents.npy (dynamically handle legacy u8 vs new f32 soft targets)
+    let soft_intents: Vec<f32> = {
         let mut intents_file = archive.by_name("intents.npy")?;
         let intents_reader = NpyFile::new(&mut intents_file)?;
-        intents_reader.into_vec()?
+        let shape = intents_reader.shape().to_vec();
+
+        if shape.len() == 1 || (shape.len() == 2 && shape[1] == 1) {
+            let intents_u8: Vec<u8> = intents_reader.into_vec()?;
+            let mut soft = Vec::with_capacity(intents_u8.len() * 4);
+            for &val in &intents_u8 {
+                let mut vec = [0.0f32; 4];
+                if (val as usize) < 4 {
+                    vec[val as usize] = 1.0;
+                }
+                soft.extend_from_slice(&vec);
+            }
+            soft
+        } else if shape.len() == 2 && shape[1] == 4 {
+            intents_reader.into_vec()?
+        } else {
+            return Err(format!("Unexpected intents shape: {:?}", shape).into());
+        }
     };
 
     // Read legal_masks.npy
@@ -59,7 +76,7 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
         legal_masks_reader.into_vec()?
     };
 
-    let num_states = intents.len();
+    let num_states = legal_masks.len();
 
     // Detect input dimension from the file: old datasets may have 21 features,
     // current code expects INPUT_COUNT (30). Auto-pad with zeros if needed.
@@ -95,7 +112,7 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
     Ok(ExpertDataset {
         states,
         num_states,
-        intents,
+        soft_intents,
         legal_masks,
     })
 }

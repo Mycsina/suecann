@@ -76,7 +76,7 @@ pub fn evaluate_phase0(
                 for i in 0..INPUT_COUNT {
                     inputs[i] = dataset.states[idx * INPUT_COUNT + i];
                 }
-                let target_intent = dataset.intents[idx] as usize;
+                let target_intent = dataset.soft_intents[idx] as usize;
 
                 let mut total_outputs = [0.0f64; OUTPUT_COUNT];
                 for &w in sweep_weights {

@@ -48,7 +48,7 @@ This document outlines high-impact ideas, triaged by their mathematical viabilit
 
 ### 6. Deep PIMC Expert Dataset (d=4, 80 Worlds)
 * **Status:** `IMPLEMENTED`
-* **Implementation:** Generated `expert_states_w80_d4.npz` — 100k states from PIMC with depth 4 search and 80 worlds per state. Used as Phase 0 supervised pretraining target. Class-balanced across all 4 oracle intents.
+* **Implementation:** Generated the legacy `expert_states_w80_d4.npz` — 100k states from PIMC with depth 4 search and 80 worlds per state.
 * **Impact:** Deeper search produces higher-quality expert labels. Phase 0 accuracy reached 44.37% (up from d=2 baseline). Combined with polymorphic oracle, enabled the network to reach statistical parity with HeuristicBot (49.2% win rate, 59.9 vs 60.1 card points).
 
 ### 7. Quality-Diversity Archive (MAP-Elites)
@@ -68,9 +68,17 @@ This document outlines high-impact ideas, triaged by their mathematical viabilit
 
 ## 1. Structural & Architectural Ideas
 
-*(None pending — all major architectural ideas have been implemented.)*
+Tier 1
 
-## 2. Delivery
+SNAP-NEAT
+odNEAT's structural tabu list
+L-NEAT
+
+Tier 2
+Cascade-NEAT
+IFSE-NEAT
+
+## 2. Delivery (LATER)
 ### Fixed-Topology Fine-Tuning
 When we reach a good champion, freeze the topology (e.g. Gen 849) and evolve the connection weights into independent floats.
 

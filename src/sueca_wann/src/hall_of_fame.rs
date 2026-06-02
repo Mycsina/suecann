@@ -73,6 +73,12 @@ pub struct JsonHoFEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonHallOfFameJoint {
+    pub lead: JsonHallOfFame,
+    pub follow: JsonHallOfFame,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonHallOfFame {
     pub max_size: usize,
     pub entries: Vec<JsonHoFEntry>,

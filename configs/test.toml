@@ -1,23 +1,23 @@
-# configs/test.toml — fast training cycle for development
-
+# Temporary dry run config
 [population]
-pop_size = 100
-generations = 50
-elitism = 3
+pop_size = 10
+generations = 3
+elitism = 1
 pareto_complexity_prob = 0.80
 
 [evaluation]
-n_deals = 32
-curriculum_gens = 10
+n_deals = 2
+curriculum_gens = 2
 sweep_weights = [1.0]
-seed = 42
+seed = 1337
 
 [species]
-compatibility_threshold = 1.2
-stagnation_limit = 20
+compatibility_threshold = 1.4
+stagnation_limit = 40
 c_excess = 1.0
 c_disjoint = 1.0
-c_mismatch = 0.4
+c_mismatch = 0.5
+min_species_size = 1
 
 [mutation]
 p_add_node = 0.20
@@ -29,18 +29,18 @@ p_change_agg = 0.15
 p_crossover = 0.40
 
 [curriculum]
-phase0_gens = 25
-bulking_gens = 5
+phase0_gens = 1
+bulking_gens = 1
+phase0_dataset = "expert_states_w20_d2.npz"
 phase0_threshold = -0.10
 phase1_threshold = -0.05
-phase0_dataset = "expert_states_w40_d3.npz"
-phase2_hof_min = 3
-min_gens_per_phase = 2
-adaptive_window = 2
+phase2_hof_min = 1
+min_gens_per_phase = 1
+adaptive_window = 10
 
 [hall_of_fame]
-hof_size = 10
+hof_size = 5
 
 [output]
-checkpoint_dir = "checkpoints/test"
-stats_file = "test_training_stats.csv"
+checkpoint_dir = "checkpoints/test_run"
+stats_file = "checkpoints/test_run/training_stats.csv"

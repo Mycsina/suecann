@@ -196,9 +196,8 @@ pub fn solve_pimc(
             || ([0.0f64; 40], [0u32; 40]),
             |mut acc: Accum, world_idx| {
                 let mut local_hands = [0u64; 4];
-                let mut local_seed = seed.wrapping_add(
-                    (world_idx as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15),
-                );
+                let mut local_seed =
+                    seed.wrapping_add((world_idx as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15));
 
                 // Sample a valid world. Try up to 10 times.
                 let mut success = false;
@@ -441,17 +440,55 @@ mod tests {
     /// reproducible worlds from a given base seed.
     #[test]
     fn test_splitmix64_seed_determinism() {
-        let my_hand = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 3) | (1u64 << 4)
-            | (1u64 << 5) | (1u64 << 6) | (1u64 << 7) | (1u64 << 8) | (1u64 << 9);
+        let my_hand = (1u64 << 0)
+            | (1u64 << 1)
+            | (1u64 << 2)
+            | (1u64 << 3)
+            | (1u64 << 4)
+            | (1u64 << 5)
+            | (1u64 << 6)
+            | (1u64 << 7)
+            | (1u64 << 8)
+            | (1u64 << 9);
         let voids = [0u8; 4];
         let target_sizes = [10, 10, 10, 10];
 
         // Run solve_pimc twice with the same seed — results must be identical
         let evs1 = solve_pimc(
-            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 10, 1, 42,
+            0,
+            my_hand,
+            0,
+            voids,
+            target_sizes,
+            0,
+            0,
+            &[],
+            0,
+            0,
+            40,
+            [0, 0],
+            0,
+            10,
+            1,
+            42,
         );
         let evs2 = solve_pimc(
-            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 10, 1, 42,
+            0,
+            my_hand,
+            0,
+            voids,
+            target_sizes,
+            0,
+            0,
+            &[],
+            0,
+            0,
+            40,
+            [0, 0],
+            0,
+            10,
+            1,
+            42,
         );
 
         assert_eq!(evs1.len(), evs2.len());
@@ -470,17 +507,55 @@ mod tests {
     /// EV scores (seeds are not accidentally collapsed).
     #[test]
     fn test_splitmix64_seed_diversity() {
-        let my_hand = (1u64 << 0) | (1u64 << 1) | (1u64 << 2) | (1u64 << 3) | (1u64 << 4)
-            | (1u64 << 5) | (1u64 << 6) | (1u64 << 7) | (1u64 << 8) | (1u64 << 9);
+        let my_hand = (1u64 << 0)
+            | (1u64 << 1)
+            | (1u64 << 2)
+            | (1u64 << 3)
+            | (1u64 << 4)
+            | (1u64 << 5)
+            | (1u64 << 6)
+            | (1u64 << 7)
+            | (1u64 << 8)
+            | (1u64 << 9);
         let voids = [0u8; 4];
         let target_sizes = [10, 10, 10, 10];
 
         // With enough worlds, different seeds should yield numerically distinct EVs
         let evs_a = solve_pimc(
-            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 50, 1, 100,
+            0,
+            my_hand,
+            0,
+            voids,
+            target_sizes,
+            0,
+            0,
+            &[],
+            0,
+            0,
+            40,
+            [0, 0],
+            0,
+            50,
+            1,
+            100,
         );
         let evs_b = solve_pimc(
-            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 50, 1, 999,
+            0,
+            my_hand,
+            0,
+            voids,
+            target_sizes,
+            0,
+            0,
+            &[],
+            0,
+            0,
+            40,
+            [0, 0],
+            0,
+            50,
+            1,
+            999,
         );
 
         assert!(!evs_a.is_empty());
@@ -512,7 +587,22 @@ mod tests {
         let target_sizes = [10, 10, 10, 10];
 
         let evs = solve_pimc(
-            0, my_hand, 0, voids, target_sizes, 0, 0, &[], 0, 0, 40, [0, 0], 0, 10, 1, 42,
+            0,
+            my_hand,
+            0,
+            voids,
+            target_sizes,
+            0,
+            0,
+            &[],
+            0,
+            0,
+            40,
+            [0, 0],
+            0,
+            10,
+            1,
+            42,
         );
 
         // Every legal move must appear exactly once in the output
