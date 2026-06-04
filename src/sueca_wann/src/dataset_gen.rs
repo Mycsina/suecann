@@ -227,6 +227,16 @@ pub fn map_card_to_soft_intents(card: u8, game: &SuecaSimulatorGame, seat: u8) -
     if matching_intents.is_empty() {
         return None;
     }
+
+    // Apply Intent Demotion for leading states:
+    // If a card satisfies both MAX_FORCE (0) and EQUITY_BUILDER (3) when leading,
+    // break the tie in favor of the more specific tactical intent (EQUITY_BUILDER).
+    if game.current_trick_len == 0 {
+        if matching_intents.contains(&0) && matching_intents.contains(&3) {
+            matching_intents.retain(|&intent| intent != 0);
+        }
+    }
+
     let prob = 1.0f32 / (matching_intents.len() as f32);
     let mut target_vector = [0.0f32; 4];
     for intent in matching_intents {
@@ -1027,5 +1037,78 @@ mod tests {
             "Yield ratio too low! Got {:.2}%, expected >= 60%. Consensus erasure or follow-suit starvation is too aggressive.",
             ratio * 100.0
         );
+    }
+
+    #[test]
+    fn test_new_belief_features_bounds_and_values() {
+        let mut rng = Pcg64::seed_from_u64(42);
+        let mut deck: Vec<u8> = (0..40).collect();
+        for i in (1..40).rev() {
+            let j = (rng.gen_range(0u64..((i + 1) as u64))) as usize;
+            deck.swap(i, j);
+        }
+        let mut hands = [0u64; 4];
+        for p in 0..4 {
+            for c in 0..10 {
+                hands[p] |= 1u64 << deck[p * 10 + c];
+            }
+        }
+        let trump = 0;
+        let first_player = 0;
+        let mut game = SuecaSimulatorGame::new(hands, trump, first_player);
+
+        // Play some tricks to accumulate points and expose voids
+        for _ in 0..8 {
+            let legal = game.state.legal_moves();
+            if legal == 0 {
+                break;
+            }
+            let card = legal.trailing_zeros() as u8;
+            game.play_card(card);
+        }
+
+        let seat = game.state.current_player;
+        let belief = encode_belief_state(&game, seat);
+
+        assert_eq!(belief.len(), 33);
+        // Verify value bounds
+        for i in 30..33 {
+            assert!(
+                (0.0..=1.0).contains(&belief[i]),
+                "Feature {} has out-of-bounds value: {}",
+                i,
+                belief[i]
+            );
+        }
+
+        // Verify PointsSecured logic specifically
+        let expected_score = if (seat % 2) == 0 { game.state.team_02_score } else { game.state.team_13_score };
+        let expected_secured = (expected_score as f64) / 120.0;
+        assert!((belief[30] - expected_secured).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_intent_demotion_leading() {
+        // Test intent demotion specifically when leading (current_trick_len == 0)
+        let mut hands = [0u64; 4];
+        for p in 0..4 {
+            hands[p] = 0x3FFu64 << (p * 10);
+        }
+        let game = SuecaSimulatorGame::new(hands, 3, 0);
+        
+        // At Gen 0, seat 0 leading
+        assert_eq!(game.current_trick_len, 0);
+        
+        // Let's call map_card_to_soft_intents on a card that resolved to both.
+        // If there's a card that matches both, we check that intent 0 is filtered out:
+        // Let's find if there is a card where both intents resolve to it:
+        let card_0 = resolve_intent(0, &game, 0);
+        let card_3 = resolve_intent(3, &game, 0);
+        if card_0 == card_3 {
+            let soft = map_card_to_soft_intents(card_0, &game, 0).unwrap();
+            // Since it matched both, intent 0 must be demoted, so soft[0] should be 0.0, and soft[3] should be 1.0!
+            assert_eq!(soft[0], 0.0);
+            assert_eq!(soft[3], 1.0);
+        }
     }
 }

@@ -12,6 +12,7 @@ mod genome;
 mod hall_of_fame;
 mod map_elites;
 mod mutations;
+mod optimize;
 mod population;
 mod species;
 mod train;
@@ -45,6 +46,8 @@ enum Command {
         seed: u64,
         #[arg(long)]
         output_dir: Option<String>,
+        #[arg(long, default_value = "-2.0,-1.0,-0.5,0.5,1.0,2.0", value_delimiter = ',')]
+        weights: Vec<f64>,
     },
     /// Compile a genome into human-readable rules
     CompileRules {
@@ -70,6 +73,17 @@ enum Command {
         #[arg(long, default_value = "0.5")]
         pimc_min_margin: f64,
     },
+    /// Optimize independent continuous weights using Differential Evolution
+    OptimizeWeights {
+        #[arg(long)]
+        genome: String,
+        #[arg(long, default_value = "200")]
+        deals: usize,
+        #[arg(long, default_value = "50")]
+        generations: usize,
+        #[arg(long, default_value = "42")]
+        seed: u64,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,8 +102,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             genome,
             seed,
             output_dir,
+            weights,
         } => {
-            run_benchmark(deals, genome, seed, output_dir);
+            run_benchmark(deals, genome, seed, output_dir, weights);
         }
         Command::CompileRules {
             genome,
@@ -116,6 +131,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             dataset_gen::generate_dataset(&config);
         }
+        Command::OptimizeWeights {
+            genome,
+            deals,
+            generations,
+            seed,
+        } => {
+            optimize::run_weight_optimization(&genome, deals, generations, seed)?;
+        }
     }
 
 
@@ -127,6 +150,7 @@ fn run_benchmark(
     genome_path: Option<String>,
     seed: u64,
     output_dir: Option<String>,
+    sweep_weights: Vec<f64>,
 ) {
     // Resolve genome path
     let genome_path = genome_path.unwrap_or_else(|| {
@@ -160,30 +184,65 @@ fn run_benchmark(
     });
     std::fs::create_dir_all(&output_dir).ok();
 
-    let sweep_weights = vec![-2.0, -1.0, -0.5, 0.5, 1.0, 2.0];
+    let opt_weights_path = std::path::Path::new(&genome_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("optimized_weights.json");
 
-    let bots = vec![
+    let mut opt_lead = None;
+    let mut opt_follow = None;
+
+    if opt_weights_path.exists() {
+        println!("Detected optimized weights file: {}", opt_weights_path.display());
+        if let Ok(file) = std::fs::File::open(&opt_weights_path) {
+            if let Ok(report) = serde_json::from_reader::<_, crate::optimize::OptimizedWeightsReport>(file) {
+                println!("Loaded optimized weights (best fitness: {:.4})", report.best_fitness);
+                opt_lead = Some(report.lead_weights);
+                opt_follow = Some(report.follow_weights);
+            }
+        }
+    }
+
+    let mut bots = vec![
         benchmark::BotEntry {
             name: "RandomBot".into(),
             bot_type: 0,
             genome_path: None,
+            lead_weights: None,
+            follow_weights: None,
         },
         benchmark::BotEntry {
             name: "OldHeuristicBot".into(),
             bot_type: 1,
             genome_path: None,
+            lead_weights: None,
+            follow_weights: None,
         },
         benchmark::BotEntry {
             name: "EliteHeuristicBot".into(),
             bot_type: 3,
             genome_path: None,
+            lead_weights: None,
+            follow_weights: None,
         },
         benchmark::BotEntry {
             name: "WANN (Champion)".into(),
             bot_type: 10,
-            genome_path: Some(genome_path),
+            genome_path: Some(genome_path.clone()),
+            lead_weights: None,
+            follow_weights: None,
         },
     ];
+
+    if let (Some(lead_w), Some(follow_w)) = (opt_lead, opt_follow) {
+        bots.push(benchmark::BotEntry {
+            name: "WANN (Optimized)".into(),
+            bot_type: 100,
+            genome_path: Some(genome_path),
+            lead_weights: Some(lead_w),
+            follow_weights: Some(follow_w),
+        });
+    }
 
     let config = benchmark::TournamentConfig {
         n_deals,

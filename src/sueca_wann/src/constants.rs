@@ -19,6 +19,13 @@ pub const RESEED_ADD_CONN_PROB: f64 = 0.10;
 // Partner / opponent seat offsets (partner = (seat + 2) % 4).
 pub const PARTNER_OFFSET: usize = 2;
 
+// Differential Evolution hyperparameters for weight optimization.
+pub const DE_POP_SIZE: usize = 50;
+pub const DE_F_SCALING: f64 = 0.5;
+pub const DE_CR_CROSSOVER: f64 = 0.7;
+pub const DE_WEIGHT_MIN: f64 = -2.0;
+pub const DE_WEIGHT_MAX: f64 = 2.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum BeliefFeature {
@@ -52,10 +59,13 @@ pub enum BeliefFeature {
     Side2Depletion = 27,
     Side2AcePlayed = 28,
     Side27Played = 29,
+    PointsSecured = 30,
+    KnownVoidSuitsCount = 31,
+    DepletedSuitsCount = 32,
 }
 
-// Sueca feature names (indexed by belief-state dimension, 0..30).
-pub const FEATURE_NAMES: [&str; 30] = [
+// Sueca feature names (indexed by belief-state dimension, 0..33).
+pub const FEATURE_NAMES: [&str; 33] = [
     "Has_Led_Suit",
     "Has_Trump",
     "Led_Suit_Power",
@@ -86,6 +96,9 @@ pub const FEATURE_NAMES: [&str; 30] = [
     "Side2_Depletion",
     "Side2_Ace_Played",
     "Side2_7_Played",
+    "Points_Secured_Us",
+    "Known_Void_Suits_Count",
+    "Depleted_Suits_Count",
 ];
 
 // Oracle intent names (indexed by output neuron, 0..4).

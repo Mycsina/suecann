@@ -745,4 +745,36 @@ mod tests {
         let max_conns = g1.conn_genes.len().max(g2.conn_genes.len());
         assert!(child.conn_genes.len() <= max_conns);
     }
+
+    #[test]
+    fn test_forward_weighted_equivalence() {
+        let g = random_genome();
+        let net = g.to_rust_wann();
+
+        let mut scratch_forward = vec![0.0; net.num_nodes];
+        let mut scratch_weighted = vec![0.0; net.num_nodes];
+
+        let mut inputs = [0.0; INPUT_COUNT];
+        for i in 0..INPUT_COUNT {
+            inputs[i] = (i as f64) / (INPUT_COUNT as f64);
+        }
+
+        // Run forward with uniform weight W = 1.0
+        net.forward(&inputs, 1.0, &mut scratch_forward);
+
+        // Run forward_weighted with weights all set to 1.0
+        let weights = vec![1.0; net.incoming_srcs.len()];
+        net.forward_weighted(&inputs, &weights, &mut scratch_weighted);
+
+        // They must produce identical values on all output and hidden nodes
+        for i in 0..net.num_nodes {
+            assert!(
+                (scratch_forward[i] - scratch_weighted[i]).abs() < 1e-9,
+                "Mismatch at node {}: forward={}, forward_weighted={}",
+                i,
+                scratch_forward[i],
+                scratch_weighted[i]
+            );
+        }
+    }
 }

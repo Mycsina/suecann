@@ -1,5 +1,6 @@
 use crate::engine::CARD_POINTS;
 use crate::simulator::SuecaSimulatorGame;
+use crate::constants::INPUT_COUNT;
 
 // ---------------------------------------------------------------------------
 // Bitboard-based belief state encoder
@@ -30,8 +31,8 @@ fn sum_points(mut mask: u64) -> usize {
     pts
 }
 
-pub fn encode_belief_state(game: &SuecaSimulatorGame, seat: u8) -> [f64; 30] {
-    let mut vec = [0.0f64; 30];
+pub fn encode_belief_state(game: &SuecaSimulatorGame, seat: u8) -> [f64; INPUT_COUNT] {
+    let mut vec = [0.0f64; INPUT_COUNT];
     let hand = game.state.hands[seat as usize];
     let trump = game.state.trump;
     let position = game.current_trick_len;
@@ -232,6 +233,37 @@ pub fn encode_belief_state(game: &SuecaSimulatorGame, seat: u8) -> [f64; 30] {
             0.0
         };
     }
+
+    // --- New Features (3) ---
+    // PointsSecured
+    let our_score = if (seat % 2) == 0 { game.state.team_02_score } else { game.state.team_13_score };
+    vec[30] = (our_score as f64) / 120.0;
+
+    // KnownVoidSuitsCount
+    let mut void_suits_count = 0;
+    for suit in 0..4 {
+        let mut any_void = false;
+        for player in 0..4 {
+            if (game.voids[player] & (1 << suit)) != 0 {
+                any_void = true;
+            }
+        }
+        if any_void {
+            void_suits_count += 1;
+        }
+    }
+    vec[31] = (void_suits_count as f64) / 4.0;
+
+    // DepletedSuitsCount
+    let mut depleted_suits_count = 0;
+    for suit in 0..4 {
+        let suit_mask = 0x3FFu64 << (suit * 10);
+        let count = (prev_played & suit_mask).count_ones();
+        if count == 10 {
+            depleted_suits_count += 1;
+        }
+    }
+    vec[32] = (depleted_suits_count as f64) / 4.0;
 
     vec
 }

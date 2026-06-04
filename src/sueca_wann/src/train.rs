@@ -59,50 +59,56 @@ pub fn evaluate_phase0(
     dataset: &ExpertDataset,
     sweep_weights: &[f64],
 ) -> Vec<f64> {
-    let max_nodes = genomes
-        .iter()
-        .map(|g| g.num_nodes)
-        .max()
-        .unwrap_or(FIRST_HIDDEN_ID);
+    // Pre-compute constants outside the parallel closure
+    let n_states = dataset.num_states;
+
+    // Pre-convert flat states into fixed-size arrays — one copy, not N× copies
+    let states: Vec<[f64; INPUT_COUNT]> = dataset
+        .states
+        .chunks_exact(INPUT_COUNT)
+        .map(|chunk| {
+            let mut arr = [0.0f64; INPUT_COUNT];
+            arr.copy_from_slice(chunk);
+            arr
+        })
+        .collect();
 
     genomes
         .into_par_iter()
         .map(|candidate| {
-            let mut scratchpad = vec![0.0f64; max_nodes];
+            let mut scratchpad = vec![0.0f64; candidate.num_nodes];
             let mut correct = 0.0;
 
-            for idx in 0..dataset.num_states {
-                let mut inputs = [0.0f64; INPUT_COUNT];
-                for i in 0..INPUT_COUNT {
-                    inputs[i] = dataset.states[idx * INPUT_COUNT + i];
-                }
-
+            for (idx, inputs) in states.iter().enumerate() {
                 let mut total_outputs = [0.0f64; OUTPUT_COUNT];
                 for &w in sweep_weights {
-                    candidate.forward(&inputs, w, &mut scratchpad);
-                    for i in 0..OUTPUT_COUNT {
-                        total_outputs[i] += scratchpad[OUTPUT_START + i];
-                    }
+                    candidate.forward(inputs, w, &mut scratchpad);
+                    total_outputs[0] += scratchpad[OUTPUT_START];
+                    total_outputs[1] += scratchpad[OUTPUT_START + 1];
+                    total_outputs[2] += scratchpad[OUTPUT_START + 2];
+                    total_outputs[3] += scratchpad[OUTPUT_START + 3];
                 }
 
-                let mut best_intent = 0;
-                let mut max_val = f64::NEG_INFINITY;
-                for i in 0..OUTPUT_COUNT {
-                    let val = if i == 3 {
-                        total_outputs[i] - 0.25 * (sweep_weights.len() as f64)
-                    } else {
-                        total_outputs[i]
-                    };
-                    if val > max_val {
-                        max_val = val;
-                        best_intent = i;
-                    }
-                }
+                // Unrolled argmax
+                let v0 = total_outputs[0];
+                let v1 = total_outputs[1];
+                let v2 = total_outputs[2];
+                let v3 = total_outputs[3];
+
+                let best_intent = if v0 >= v1 && v0 >= v2 && v0 >= v3 {
+                    0
+                } else if v1 >= v2 && v1 >= v3 {
+                    1
+                } else if v2 >= v3 {
+                    2
+                } else {
+                    3
+                };
 
                 correct += dataset.soft_intents[idx * 4 + best_intent] as f64;
             }
 
-            correct / dataset.num_states as f64
+            correct / n_states as f64
         })
         .collect()
 }
@@ -110,7 +116,7 @@ pub fn evaluate_phase0(
 // ---------------------------------------------------------------------------
 // Phase 1: Self-play with HOF opponents
 // ---------------------------------------------------------------------------
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn evaluate_phase1(
     genomes: &[crate::wann_network::RustWannNetwork],
     is_lead: bool,
@@ -134,10 +140,47 @@ pub fn evaluate_phase1(
         .max()
         .unwrap_or(FIRST_HIDDEN_ID);
 
+    let baseline_scores: Vec<f64> = (0..deals.len() * 4)
+        .into_par_iter()
+        .map(|idx| {
+            let deal_idx = idx / 4;
+            let rot = idx % 4;
+            let deal = &deals[deal_idx];
+
+            let partner = crate::evaluator::get_bot_from_type(partner_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+            let opp1 = crate::evaluator::get_bot_from_type(opp1_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+            let opp2 = crate::evaluator::get_bot_from_type(opp2_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+            let baseline = crate::evaluator::get_bot_from_type(baseline_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+
+            let rotated_hands = crate::evaluator::rotate_hands(&deal.hands, rot);
+            let adj_first = (0 + rot as u8) % 4;
+            let evaluation_seed = base_seed ^ ((deal_idx as u64) << 32) ^ (rot as u64);
+
+            let bots_baseline = [
+                baseline,
+                opp1,
+                partner,
+                opp2,
+            ];
+
+            let mut dummy_behavior = crate::evaluator::WannBehavior::default();
+            let mut scratchpad = vec![0.0f64; max_nodes];
+            let result_baseline = crate::evaluator::play_game_sim(
+                rotated_hands,
+                deal.trump,
+                adj_first,
+                &bots_baseline,
+                evaluation_seed,
+                &mut scratchpad,
+                &mut dummy_behavior,
+            );
+            result_baseline.team_02_score as f64
+        })
+        .collect();
+
     let results: Vec<(f64, crate::evaluator::WannBehavior)> = genomes
         .into_par_iter()
-        .enumerate()
-        .map(|(i, candidate)| {
+        .map(|candidate| {
             let mut scratchpad = vec![0.0f64; max_nodes];
             let (candidate_lead, candidate_follow) = if is_lead {
                 (candidate, reference_brain)
@@ -147,7 +190,6 @@ pub fn evaluate_phase1(
             crate::evaluator::evaluate_genome_delta(
                 candidate_lead,
                 candidate_follow,
-                baseline_bot_type,
                 partner_bot_type,
                 opp1_bot_type,
                 opp2_bot_type,
@@ -155,7 +197,8 @@ pub fn evaluate_phase1(
                 hof_follow_networks,
                 sweep_weights,
                 deals,
-                base_seed + (i as u64),
+                base_seed,
+                &baseline_scores,
                 &mut scratchpad,
             )
         })
@@ -174,9 +217,109 @@ pub fn evaluate_phase1(
     (fitnesses, deltas, behaviors)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_phase1_joint(
+    lead_genomes: &[crate::wann_network::RustWannNetwork],
+    follow_genomes: &[crate::wann_network::RustWannNetwork],
+    deals: &[crate::evaluator::EvaluatorDeal],
+    hof_lead_networks: &[crate::wann_network::RustWannNetwork],
+    hof_follow_networks: &[crate::wann_network::RustWannNetwork],
+    partner_bot_type: i32,
+    opp1_bot_type: i32,
+    opp2_bot_type: i32,
+    baseline_bot_type: i32,
+    sweep_weights: &[f64],
+    base_seed: u64,
+) -> (Vec<f64>, Vec<crate::evaluator::WannBehavior>) {
+    let max_nodes = lead_genomes
+        .iter()
+        .map(|g| g.num_nodes)
+        .chain(follow_genomes.iter().map(|g| g.num_nodes))
+        .chain(hof_lead_networks.iter().map(|g| g.num_nodes))
+        .chain(hof_follow_networks.iter().map(|g| g.num_nodes))
+        .max()
+        .unwrap_or(FIRST_HIDDEN_ID);
+
+    let baseline_scores: Vec<f64> = (0..deals.len() * 4)
+        .into_par_iter()
+        .map(|idx| {
+            let deal_idx = idx / 4;
+            let rot = idx % 4;
+            let deal = &deals[deal_idx];
+
+            let partner = crate::evaluator::get_bot_from_type(partner_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+            let opp1 = crate::evaluator::get_bot_from_type(opp1_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+            let opp2 = crate::evaluator::get_bot_from_type(opp2_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+            let baseline = crate::evaluator::get_bot_from_type(baseline_bot_type, hof_lead_networks, hof_follow_networks, sweep_weights);
+
+            let rotated_hands = crate::evaluator::rotate_hands(&deal.hands, rot);
+            let adj_first = (0 + rot as u8) % 4;
+            let evaluation_seed = base_seed ^ ((deal_idx as u64) << 32) ^ (rot as u64);
+
+            let bots_baseline = [
+                baseline,
+                opp1,
+                partner,
+                opp2,
+            ];
+
+            let mut dummy_behavior = crate::evaluator::WannBehavior::default();
+            let mut scratchpad = vec![0.0f64; max_nodes];
+            let result_baseline = crate::evaluator::play_game_sim(
+                rotated_hands,
+                deal.trump,
+                adj_first,
+                &bots_baseline,
+                evaluation_seed,
+                &mut scratchpad,
+                &mut dummy_behavior,
+            );
+            result_baseline.team_02_score as f64
+        })
+        .collect();
+
+    let population_size = lead_genomes.len();
+    assert_eq!(population_size, follow_genomes.len());
+
+    let results: Vec<(f64, crate::evaluator::WannBehavior)> = (0..population_size)
+        .into_par_iter()
+        .map(|idx| {
+            let mut scratchpad = vec![0.0f64; max_nodes];
+            let candidate_lead = &lead_genomes[idx];
+            let candidate_follow = &follow_genomes[idx];
+            crate::evaluator::evaluate_genome_delta(
+                candidate_lead,
+                candidate_follow,
+                partner_bot_type,
+                opp1_bot_type,
+                opp2_bot_type,
+                hof_lead_networks,
+                hof_follow_networks,
+                sweep_weights,
+                deals,
+                base_seed,
+                &baseline_scores,
+                &mut scratchpad,
+            )
+        })
+        .collect();
+
+    let mut fitnesses = Vec::with_capacity(population_size);
+    let mut behaviors = Vec::with_capacity(population_size);
+
+    for (delta, behavior) in results {
+        fitnesses.push(delta);
+        behaviors.push(behavior);
+    }
+
+    (fitnesses, behaviors)
+}
+
+
 // ---------------------------------------------------------------------------
 // Per-generation evaluation dispatchers
 // ---------------------------------------------------------------------------
+#[allow(dead_code)]
 fn run_phase1_generation(
     genomes: &[crate::wann_network::RustWannNetwork],
     is_lead: bool,
@@ -283,6 +426,111 @@ fn run_phase1_generation(
     )
 }
 
+fn run_phase1_generation_joint(
+    lead_genomes: &[crate::wann_network::RustWannNetwork],
+    follow_genomes: &[crate::wann_network::RustWannNetwork],
+    hof_lead: &HallOfFame,
+    hof_follow: &HallOfFame,
+    map_elites_lead: &crate::map_elites::MapElitesArchive,
+    map_elites_follow: &crate::map_elites::MapElitesArchive,
+    config: &Config,
+    gen: usize,
+    rng: &mut Pcg64,
+) -> (Vec<f64>, Vec<crate::evaluator::WannBehavior>) {
+    let deals = generate_deals_rust(
+        gen,
+        config.evaluation.n_deals,
+        config.evaluation.seed * 1000,
+    );
+
+    let mut hof_lead_nets = Vec::new();
+    let mut hof_follow_nets = Vec::new();
+
+    let sample_seat_bot = |rng: &mut Pcg64,
+                           h_lead: &HallOfFame,
+                           h_follow: &HallOfFame,
+                           me_lead: &crate::map_elites::MapElitesArchive,
+                           me_follow: &crate::map_elites::MapElitesArchive,
+                           hg_lead: &mut Vec<crate::wann_network::RustWannNetwork>,
+                           hg_follow: &mut Vec<crate::wann_network::RustWannNetwork>|
+      -> i32 {
+        let elite_prob = ((gen as f64 - 200.0) / 400.0).clamp(0.0, 0.40);
+
+        if rng.gen_bool(elite_prob) {
+            2 // EliteHeuristicBot
+        } else if rng.gen_bool(0.5) {
+            let use_map_elites = rng.gen_bool(0.5);
+            let lead_genome = if use_map_elites {
+                me_lead.sample_random(rng)
+            } else {
+                None
+            }.or_else(|| h_lead.sample(rng, 1).first().cloned());
+
+            let follow_genome = if use_map_elites {
+                me_follow.sample_random(rng)
+            } else {
+                None
+            }.or_else(|| h_follow.sample(rng, 1).first().cloned());
+
+            if let (Some(g_lead), Some(g_follow)) = (lead_genome, follow_genome) {
+                let bot_type = 10 + hg_lead.len() as i32; // WANNs start at 10
+                hg_lead.push(g_lead.to_rust_wann());
+                hg_follow.push(g_follow.to_rust_wann());
+                bot_type
+            } else {
+                1 // OldHeuristicBot
+            }
+        } else {
+            1 // Old HeuristicBot (Baseline Sanity)
+        }
+    };
+
+    let mut sample_rng = rng.clone();
+    let partner_bot_type: i32 = sample_seat_bot(
+        &mut sample_rng,
+        hof_lead,
+        hof_follow,
+        map_elites_lead,
+        map_elites_follow,
+        &mut hof_lead_nets,
+        &mut hof_follow_nets,
+    );
+    let opp1_bot_type: i32 = sample_seat_bot(
+        &mut sample_rng,
+        hof_lead,
+        hof_follow,
+        map_elites_lead,
+        map_elites_follow,
+        &mut hof_lead_nets,
+        &mut hof_follow_nets,
+    );
+    let opp2_bot_type: i32 = sample_seat_bot(
+        &mut sample_rng,
+        hof_lead,
+        hof_follow,
+        map_elites_lead,
+        map_elites_follow,
+        &mut hof_lead_nets,
+        &mut hof_follow_nets,
+    );
+    *rng = sample_rng;
+
+    evaluate_phase1_joint(
+        lead_genomes,
+        follow_genomes,
+        &deals,
+        &hof_lead_nets,
+        &hof_follow_nets,
+        partner_bot_type,
+        opp1_bot_type,
+        opp2_bot_type,
+        2, // baseline = HeuristicBot
+        &config.evaluation.sweep_weights,
+        config.evaluation.seed + gen as u64 * 1000,
+    )
+}
+
+
 fn split_dataset(dataset: &ExpertDataset) -> (ExpertDataset, ExpertDataset) {
     let mut lead_states = Vec::new();
     let mut lead_soft_intents = Vec::new();
@@ -336,7 +584,29 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
 
     // Determine run directory: if resuming, use existing dir; otherwise create dated folder
     let run_dir = if resume {
-        config.output.checkpoint_dir.clone()
+        let base = std::path::Path::new(&config.output.checkpoint_dir);
+        let state_path = base.join("training_state.bin");
+        if state_path.exists() {
+            config.output.checkpoint_dir.clone()
+        } else {
+            // Auto-detect latest dated subdirectory
+            let mut dated_dirs: Vec<_> = std::fs::read_dir(base)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter(|e| e.path().join("training_state.bin").exists())
+                .collect();
+            dated_dirs.sort_by_key(|e| e.file_name());
+            if let Some(latest) = dated_dirs.last() {
+                println!("Resume: auto-detected run directory {}", latest.path().display());
+                latest.path().to_string_lossy().to_string()
+            } else {
+                eprintln!("No checkpoint found in {}. Starting fresh.", base.display());
+                config.output.checkpoint_dir.clone()
+            }
+        }
     } else {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let base = Path::new(&config.output.checkpoint_dir);
@@ -437,10 +707,12 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
 
     // CSV Stats
     let stats_path = Path::new(&config.output.stats_file);
+    let append = resume && stats_path.exists();
     let mut csv_file = OpenOptions::new()
-        .write(true)
         .create(true)
-        .truncate(!resume || !stats_path.exists())
+        .append(append)
+        .write(true)
+        .truncate(!append)
         .open(stats_path)?;
 
     if !resume || csv_file.metadata()?.len() == 0 {
@@ -482,18 +754,35 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             );
             current_phase = new_phase;
             if current_phase == 1 {
-                // Pre-populate Lead HOF
-                println!("  >>> Pre-populating Phase 1 HOF with top unique Phase 0 genomes...");
-                lead_hof.clear();
+                // 1. Sort and align populations by Phase 0 fitness
                 let mut lead_indices: Vec<usize> = (0..lead_pop.genomes.len()).collect();
                 lead_indices.sort_by(|&a, &b| lead_pop.fitnesses[b].partial_cmp(&lead_pop.fitnesses[a]).unwrap());
+
+                let mut follow_indices: Vec<usize> = (0..follow_pop.genomes.len()).collect();
+                follow_indices.sort_by(|&a, &b| follow_pop.fitnesses[b].partial_cmp(&follow_pop.fitnesses[a]).unwrap());
+
+                let sorted_lead: Vec<crate::genome::Genome> = lead_indices.iter().map(|&idx| lead_pop.genomes[idx].copy()).collect();
+                let sorted_follow: Vec<crate::genome::Genome> = follow_indices.iter().map(|&idx| follow_pop.genomes[idx].copy()).collect();
+
+                lead_pop.genomes = sorted_lead;
+                follow_pop.genomes = sorted_follow;
+
+                // Reset fitnesses to 0.0
+                lead_pop.fitnesses = vec![0.0; lead_pop.genomes.len()];
+                follow_pop.fitnesses = vec![0.0; follow_pop.genomes.len()];
+
+                // 2. Pre-populate HOF using top unique Phase 0 genomes
+                println!("  >>> Pre-populating Phase 1 HOF with top unique Phase 0 genomes...");
+                lead_hof.clear();
+                follow_hof.clear();
 
                 let mut unique_lead = Vec::new();
                 let c1 = config.species.c_excess;
                 let c2 = config.species.c_disjoint;
                 let c3 = config.species.c_mismatch;
 
-                for &idx in &lead_indices {
+                // Since they are sorted, we can search from top to bottom
+                for idx in 0..lead_pop.genomes.len() {
                     let candidate = &lead_pop.genomes[idx];
                     let is_unique = unique_lead.iter().all(|g| {
                         crate::species::compatibility_distance(candidate, g, c1, c2, c3) > 0.05
@@ -505,7 +794,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                         }
                     }
                 }
-                for &idx in &lead_indices {
+                for idx in 0..lead_pop.genomes.len() {
                     if unique_lead.len() >= 5 {
                         break;
                     }
@@ -517,13 +806,8 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                     }
                 }
 
-                // Pre-populate Follow HOF
-                follow_hof.clear();
-                let mut follow_indices: Vec<usize> = (0..follow_pop.genomes.len()).collect();
-                follow_indices.sort_by(|&a, &b| follow_pop.fitnesses[b].partial_cmp(&follow_pop.fitnesses[a]).unwrap());
-
                 let mut unique_follow = Vec::new();
-                for &idx in &follow_indices {
+                for idx in 0..follow_pop.genomes.len() {
                     let candidate = &follow_pop.genomes[idx];
                     let is_unique = unique_follow.iter().all(|g| {
                         crate::species::compatibility_distance(candidate, g, c1, c2, c3) > 0.05
@@ -535,7 +819,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                         }
                     }
                 }
-                for &idx in &follow_indices {
+                for idx in 0..follow_pop.genomes.len() {
                     if unique_follow.len() >= 5 {
                         break;
                     }
@@ -547,45 +831,23 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                     }
                 }
 
-                // Evaluate pre-populated Lead and Follow genomes
+                // Evaluate pre-populated Lead and Follow genomes jointly
                 let deals = generate_deals_rust(
                     gen,
                     config.evaluation.n_deals,
                     config.evaluation.seed * 1000,
                 );
 
+                let min_len = unique_lead.len().min(unique_follow.len());
                 let lead_networks: Vec<crate::wann_network::RustWannNetwork> =
-                    unique_lead.iter().map(|g| g.to_rust_wann()).collect();
+                    unique_lead[..min_len].iter().map(|g| g.to_rust_wann()).collect();
                 let follow_networks: Vec<crate::wann_network::RustWannNetwork> =
-                    unique_follow.iter().map(|g| g.to_rust_wann()).collect();
+                    unique_follow[..min_len].iter().map(|g| g.to_rust_wann()).collect();
 
-                let dummy_lead_ref = lead_networks[0].clone();
-                let dummy_follow_ref = follow_networks[0].clone();
-
-                let (lead_fitnesses, _, _) = evaluate_phase1(
+                let (joint_fitnesses, _) = evaluate_phase1_joint(
                     &lead_networks,
-                    true,
-                    &deals,
-                    &dummy_follow_ref,
-                    &[],
-                    &[],
-                    2,   // partner = HeuristicBot
-                    2,   // opp1 = HeuristicBot
-                    2,   // opp2 = HeuristicBot
-                    2,   // baseline = HeuristicBot
-                    &config.evaluation.sweep_weights,
-                    config.evaluation.seed + gen as u64 * 1000,
-                );
-
-                for (genome, fitness) in unique_lead.into_iter().zip(lead_fitnesses.into_iter()) {
-                    lead_hof.add(&genome, fitness, gen);
-                }
-
-                let (follow_fitnesses, _, _) = evaluate_phase1(
                     &follow_networks,
-                    false,
                     &deals,
-                    &dummy_lead_ref,
                     &[],
                     &[],
                     2,   // partner = HeuristicBot
@@ -596,8 +858,9 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                     config.evaluation.seed + gen as u64 * 1000,
                 );
 
-                for (genome, fitness) in unique_follow.into_iter().zip(follow_fitnesses.into_iter()) {
-                    follow_hof.add(&genome, fitness, gen);
+                for idx in 0..min_len {
+                    lead_hof.add(&unique_lead[idx], joint_fitnesses[idx], gen);
+                    follow_hof.add(&unique_follow[idx], joint_fitnesses[idx], gen);
                 }
 
                 println!(
@@ -621,50 +884,23 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
         let follow_rust_genomes: Vec<crate::wann_network::RustWannNetwork> =
             follow_pop.genomes.par_iter().map(|g| g.to_rust_wann()).collect();
 
-        let lead_champion = lead_pop.global_best_genome.as_ref().cloned()
-            .or_else(|| lead_hof.best().map(|e| e.genome.copy()))
-            .unwrap_or_else(|| lead_pop.genomes[0].copy())
-            .to_rust_wann();
-
-        let follow_champion = follow_pop.global_best_genome.as_ref().cloned()
-            .or_else(|| follow_hof.best().map(|e| e.genome.copy()))
-            .unwrap_or_else(|| follow_pop.genomes[0].copy())
-            .to_rust_wann();
-
-        let (lead_fitnesses, _lead_deltas, lead_behaviors) = if current_phase == 0 {
-            let accs = evaluate_phase0(&lead_rust_genomes, &lead_dataset, &config.evaluation.sweep_weights);
-            (accs.clone(), accs, Vec::new())
+        let (lead_fitnesses, follow_fitnesses, lead_behaviors, follow_behaviors) = if current_phase == 0 {
+            let lead_accs = evaluate_phase0(&lead_rust_genomes, &lead_dataset, &config.evaluation.sweep_weights);
+            let follow_accs = evaluate_phase0(&follow_rust_genomes, &follow_dataset, &config.evaluation.sweep_weights);
+            (lead_accs.clone(), follow_accs.clone(), Vec::new(), Vec::new())
         } else {
-            run_phase1_generation(
+            let (fitnesses, behaviors) = run_phase1_generation_joint(
                 &lead_rust_genomes,
-                true,
-                &lead_hof,
-                &follow_hof,
-                &lead_map_elites,
-                &follow_map_elites,
-                &follow_champion,
-                &config,
-                gen,
-                &mut rng,
-            )
-        };
-
-        let (follow_fitnesses, _follow_deltas, follow_behaviors) = if current_phase == 0 {
-            let accs = evaluate_phase0(&follow_rust_genomes, &follow_dataset, &config.evaluation.sweep_weights);
-            (accs.clone(), accs, Vec::new())
-        } else {
-            run_phase1_generation(
                 &follow_rust_genomes,
-                false,
                 &lead_hof,
                 &follow_hof,
                 &lead_map_elites,
                 &follow_map_elites,
-                &lead_champion,
                 &config,
                 gen,
                 &mut rng,
-            )
+            );
+            (fitnesses.clone(), fitnesses, behaviors.clone(), behaviors)
         };
 
         lead_pop.tell_fitnesses(&lead_fitnesses);
@@ -783,34 +1019,38 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             }
         }
 
-        let lead_eval_data = if current_phase == 0 {
-            Some((&lead_dataset, config.evaluation.sweep_weights.as_slice()))
-        } else {
-            None
-        };
-        let follow_eval_data = if current_phase == 0 {
-            Some((&follow_dataset, config.evaluation.sweep_weights.as_slice()))
-        } else {
-            None
-        };
+        if current_phase == 0 {
+            let lead_eval_data = Some((&lead_dataset, config.evaluation.sweep_weights.as_slice()));
+            let follow_eval_data = Some((&follow_dataset, config.evaluation.sweep_weights.as_slice()));
 
-        lead_pop.speciate_and_evolve(
-            current_phase,
-            config.curriculum.bulking_gens,
-            &lead_tabu,
-            lead_eval_data,
-            &mut rng,
-            &lead_registry,
-        );
+            lead_pop.speciate_and_evolve(
+                current_phase,
+                config.curriculum.bulking_gens,
+                &lead_tabu,
+                lead_eval_data,
+                &mut rng,
+                &lead_registry,
+            );
 
-        follow_pop.speciate_and_evolve(
-            current_phase,
-            config.curriculum.bulking_gens,
-            &follow_tabu,
-            follow_eval_data,
-            &mut rng,
-            &follow_registry,
-        );
+            follow_pop.speciate_and_evolve(
+                current_phase,
+                config.curriculum.bulking_gens,
+                &follow_tabu,
+                follow_eval_data,
+                &mut rng,
+                &follow_registry,
+            );
+        } else {
+            crate::population::speciate_and_evolve_joint(
+                &mut lead_pop,
+                &mut follow_pop,
+                &lead_tabu,
+                &follow_tabu,
+                &lead_registry,
+                &follow_registry,
+                &mut rng,
+            );
+        }
 
         // Checkpointing
         if (gen + 1) % 10 == 0 || gen == config.population.generations - 1 {

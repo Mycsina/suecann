@@ -30,8 +30,8 @@ def discover_runs(checkpoints_dir: str = "checkpoints") -> list[str]:
 
 
 def detect_format(df: pd.DataFrame) -> str:
-    """Detect whether CSV uses old single-WANN or new lead/follow format."""
-    if "lead_best" in df.columns:
+    """Detect whether CSV uses old single-WANN or new lead/follow dual-WANN format."""
+    if "lead_best" in df.columns or "lead_best_fitness" in df.columns:
         return "dual"
     return "legacy"
 
@@ -40,8 +40,82 @@ def load_run(run_name: str, checkpoints_dir: str = "checkpoints") -> tuple[pd.Da
     csv_path = Path(checkpoints_dir) / run_name / "training_stats.csv"
     if not csv_path.exists():
         return None, "unknown"
-    df = pd.read_csv(csv_path)
+
+    # Read the first line of the file to see if it is a header
+    with open(csv_path, 'r') as f:
+        first_line = f.readline().strip()
+    
+    if not first_line:
+        return None, "unknown"
+        
+    parts = first_line.split(',')
+    has_header = True
+    try:
+        float(parts[0])
+        has_header = False
+    except ValueError:
+        pass
+        
+    if has_header:
+        df = pd.read_csv(csv_path)
+    else:
+        df = pd.read_csv(csv_path, header=None)
+        n_cols = len(df.columns)
+        if n_cols == 11:
+            df.columns = [
+                'generation', 'phase', 'lead_best_fitness', 'lead_avg_fitness',
+                'follow_best_fitness', 'follow_avg_fitness', 'lead_n_species',
+                'follow_n_species', 'lead_n_connections_best', 'follow_n_connections_best',
+                'elapsed_sec'
+            ]
+        elif n_cols == 13:
+            df.columns = [
+                'generation', 'phase', 'lead_best', 'lead_avg', 'follow_best', 'follow_avg',
+                'best_delta_lead', 'best_delta_follow', 'n_species_lead', 'n_species_follow',
+                'n_conns_lead', 'n_conns_follow', 'elapsed_sec'
+            ]
+
+    # Standardize dual format column names
+    if "lead_best_fitness" in df.columns:
+        df["lead_best"] = df["lead_best_fitness"]
+        df["lead_avg"] = df["lead_avg_fitness"]
+        df["follow_best"] = df["follow_best_fitness"]
+        df["follow_avg"] = df["follow_avg_fitness"]
+        df["best_delta_lead"] = df["lead_best_fitness"]
+        df["best_delta_follow"] = df["follow_best_fitness"]
+        df["n_species_lead"] = df["lead_n_species"]
+        df["n_species_follow"] = df["follow_n_species"]
+        df["n_conns_lead"] = df["lead_n_connections_best"]
+        df["n_conns_follow"] = df["follow_n_connections_best"]
+
     fmt = detect_format(df)
+    
+    if fmt == "legacy" and "global_best_fitness" not in df.columns:
+        df.columns = [
+            'generation', 'phase', 'best_fitness', 'avg_fitness', 'median_fitness',
+            'best_delta', 'median_delta', 'global_best_fitness', 'n_species',
+            'n_connections_best', 'n_hidden_best', 'oracle_tax', 'elapsed_sec'
+        ]
+
+    # Coerce columns to numeric (excluding run/format if present)
+    for col in df.columns:
+        if col not in ["run", "format"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Drop rows where generation or phase is NaN
+    df = df.dropna(subset=["generation", "phase"])
+    df["generation"] = df["generation"].astype(int)
+    df["phase"] = df["phase"].astype(int)
+
+    # Filter out corrupted large generation indices (e.g. >= 10000)
+    df = df[df["generation"] < 10000]
+
+    # Drop duplicate generations keeping the last
+    df = df.drop_duplicates(subset=["generation"], keep="last")
+
+    # Sort by generation ascending
+    df = df.sort_values("generation").reset_index(drop=True)
+
     df["run"] = run_name
     df["format"] = fmt
     return df, fmt
@@ -90,7 +164,7 @@ def plot_comparison(runs: list[str], checkpoints_dir: str = "checkpoints"):
                     linewidth=1.0, alpha=0.8)
         # Mark phase transition
         phase1_start = subset[subset["phase"] == 1]["generation"].min()
-        if pd.notna(phase1_start):
+        if pd.notna(phase1_start) and phase1_start > 0:
             ax.axvline(x=phase1_start, color=run_colors[run],
                        linestyle="--", alpha=0.3, linewidth=0.8)
     ax.set_xlabel("Generation")

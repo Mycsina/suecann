@@ -56,6 +56,25 @@ Belief State (30 features) → WANN (Logical Gates) → Oracle Intent (4 outputs
 | 28 | `Side2_Ace_Played` | Bool | Ace of side-suit 2 already played |
 | 29 | `Side2_7_Played` | Bool | 7 of side-suit 2 already played |
 
+## Benchmark Results
+
+We evaluated the evolved WANN models in a round-robin tournament (200 duplicate matches / 400 games total per matchup).
+With the correct duplicate-match win-rate calculation (summing to 100%), the results are:
+
+| Bot | RandomBot | OldHeuristicBot | EliteHeuristicBot | WANN (Champion) | WANN (Optimized) |
+|---|---|---|---|---|---|
+| **RandomBot** | 50.0% | 10.8% | 6.8% | 7.8% | 13.0% |
+| **OldHeuristicBot** | 89.2% | 50.0% | 37.5% | 45.2% | 39.0% |
+| **EliteHeuristicBot** | 93.2% | 62.5% | 50.0% | 58.5% | 60.2% |
+| **WANN (Champion)** | 92.2% | 54.8% | 41.5% | 50.0% | 49.8% |
+| **WANN (Optimized)** | 87.0% | 61.0% | 39.8% | 50.2% | 50.0% |
+
+**Key Takeaways:**
+1. **WANN (Champion)** decisively beats **OldHeuristicBot** with a **54.8% win rate** (61.9 vs 58.1 average card points per match).
+2. **WANN (Optimized)** (with continuous weights optimized via DE) achieves a **61.0% win rate** against **OldHeuristicBot** (62.6 vs 57.4 average card points per match).
+3. Both WANN variants show strong competitive performance against **EliteHeuristicBot** (~40% win rate), outperforming **OldHeuristicBot** which only wins 37.5% of games against **EliteHeuristicBot**.
+4. WANN Champion and WANN Optimized are in near-perfect parity, with WANN Optimized winning **50.2%** of their head-to-head matches.
+
 ## Rust Crates
 
 Two Rust crates, no Python FFI, no `.so` build step.
@@ -92,20 +111,20 @@ cargo test --all
 ### Benchmarking
 
 ```bash
-./target/release/sueca_wann benchmark --deals 200 --genome checkpoints/2026-05-27-1/best_genome_final.json
+./target/release/sueca_wann benchmark --deals 200 --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json
 ```
 
 ### Comparing Runs
 
 ```bash
 uv run python scripts/compare_runs.py
-uv run python scripts/compare_runs.py --runs 2026-05-27-1
+uv run python scripts/compare_runs.py --runs 2026-06-03-2
 ```
 
 ### Extracting Rules
 
 ```bash
-./target/release/sueca_wann compile-rules --genome checkpoints/2026-05-27-1/best_genome_final.json
+./target/release/sueca_wann compile-rules --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json --output-dir checkpoints/2026-06-03-2
 ```
 
 Generates `compiled_rules.txt`, `topology_graph.dot`, and `topology_graph.png`.
@@ -147,7 +166,7 @@ The training state is statefully saved to a binary file `training_state.bin` usi
 
 ```
 checkpoints/
-  2026-05-27-1/
+  2026-06-03-2/
     training_stats.csv       # Training stats for both brains (lead/follow accuracy & enabled connections)
     training_state.bin       # Stateful binary containing encapsulated Lead and Follow BrainTrainingStates
     genomes/

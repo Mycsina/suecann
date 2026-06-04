@@ -40,13 +40,13 @@ Training creates dated run folders containing `training_stats.csv`, `training_st
 ## Running Benchmarks
 
 ```bash
-./target/release/sueca_wann benchmark --deals 200 --genome checkpoints/2026-05-27-1/best_genome_final.json
+./target/release/sueca_wann benchmark --deals 200 --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json
 ```
 
 ## Extracting Rules
 
 ```bash
-./target/release/sueca_wann compile-rules --genome checkpoints/2026-05-27-1/best_genome_final.json --output-dir checkpoints/2026-05-27-1
+./target/release/sueca_wann compile-rules --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json --output-dir checkpoints/2026-06-03-2
 ```
 
 Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topology_graph.png` (via Graphviz `dot`).
@@ -65,7 +65,7 @@ Generates class-balanced PIMC expert states for Phase 0 pretraining. Samples onl
 
 ```bash
 uv run python scripts/compare_runs.py
-uv run python scripts/compare_runs.py --runs 2026-05-27-1 2026-05-27-2
+uv run python scripts/compare_runs.py --runs 2026-06-03-2
 ```
 
 Saves `checkpoints/run_comparison.png` with 4 panels: fitness, delta vs HeuristicBot, species diversity, network complexity.

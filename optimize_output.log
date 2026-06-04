@@ -1,0 +1,63 @@
+Starting Differential Evolution weight optimization...
+  Genome: checkpoints/production/2026-06-03-2/genomes/champion_gen935.json
+  Deals: 200
+  Generations: 50
+  Seed: 42
+Lead Brain enabled connections: 163
+Follow Brain enabled connections: 79
+Total optimization dimension: 242
+Generated 200 duplicate evaluation deals.
+Precomputing HeuristicBot baseline scores...
+Evaluating initial population...
+Initial Best Fitness (Delta vs HeuristicBot): -0.3725
+Gen  1/50 | Best: -0.3387 | Avg: -0.6189
+Gen  2/50 | Best: -0.3387 | Avg: -0.5975
+Gen  3/50 | Best: -0.3387 | Avg: -0.5768
+Gen  4/50 | Best: -0.3387 | Avg: -0.5464
+Gen  5/50 | Best: -0.3225 | Avg: -0.4705
+Gen  6/50 | Best: -0.3225 | Avg: -0.4698
+Gen  7/50 | Best: -0.3225 | Avg: -0.4698
+Gen  8/50 | Best: -0.3137 | Avg: -0.4135
+Gen  9/50 | Best: -0.3137 | Avg: -0.3822
+Gen 10/50 | Best: -0.3137 | Avg: -0.3269
+Gen 11/50 | Best: -0.3137 | Avg: -0.3255
+Gen 12/50 | Best: -0.3137 | Avg: -0.3255
+Gen 13/50 | Best: -0.3137 | Avg: -0.3200
+Gen 14/50 | Best: -0.3137 | Avg: -0.3200
+Gen 15/50 | Best: -0.3137 | Avg: -0.3193
+Gen 16/50 | Best: -0.3137 | Avg: -0.3193
+Gen 17/50 | Best: -0.3137 | Avg: -0.3186
+Gen 18/50 | Best: -0.3137 | Avg: -0.3167
+Gen 19/50 | Best: -0.3137 | Avg: -0.3163
+Gen 20/50 | Best: -0.3137 | Avg: -0.3163
+Gen 21/50 | Best: -0.3137 | Avg: -0.3163
+Gen 22/50 | Best: -0.3137 | Avg: -0.3163
+Gen 23/50 | Best: -0.3137 | Avg: -0.3163
+Gen 24/50 | Best: -0.3137 | Avg: -0.3163
+Gen 25/50 | Best: -0.3137 | Avg: -0.3163
+Gen 26/50 | Best: -0.3137 | Avg: -0.3163
+Gen 27/50 | Best: -0.3137 | Avg: -0.3163
+Gen 28/50 | Best: -0.3137 | Avg: -0.3163
+Gen 29/50 | Best: -0.3137 | Avg: -0.3163
+Gen 30/50 | Best: -0.3137 | Avg: -0.3163
+Gen 31/50 | Best: -0.3137 | Avg: -0.3163
+Gen 32/50 | Best: -0.3137 | Avg: -0.3163
+Gen 33/50 | Best: -0.3137 | Avg: -0.3151
+Gen 34/50 | Best: -0.3137 | Avg: -0.3151
+Gen 35/50 | Best: -0.3137 | Avg: -0.3151
+Gen 36/50 | Best: -0.3137 | Avg: -0.3151
+Gen 37/50 | Best: -0.3137 | Avg: -0.3151
+Gen 38/50 | Best: -0.3137 | Avg: -0.3151
+Gen 39/50 | Best: -0.3137 | Avg: -0.3151
+Gen 40/50 | Best: -0.3137 | Avg: -0.3151
+Gen 41/50 | Best: -0.3137 | Avg: -0.3151
+Gen 42/50 | Best: -0.3137 | Avg: -0.3151
+Gen 43/50 | Best: -0.3137 | Avg: -0.3151
+Gen 44/50 | Best: -0.3137 | Avg: -0.3151
+Gen 45/50 | Best: -0.3137 | Avg: -0.3151
+Gen 46/50 | Best: -0.3137 | Avg: -0.3145
+Gen 47/50 | Best: -0.3137 | Avg: -0.3138
+Gen 48/50 | Best: -0.3137 | Avg: -0.3138
+Gen 49/50 | Best: -0.3137 | Avg: -0.3138
+Gen 50/50 | Best: -0.3137 | Avg: -0.3138
+Optimization complete! Best Fitness: -0.3137. Saved weights to checkpoints/production/2026-06-03-2/genomes/optimized_weights.json

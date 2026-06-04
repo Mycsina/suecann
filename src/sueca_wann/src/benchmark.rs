@@ -13,6 +13,8 @@ pub struct BotEntry {
     pub name: String,
     pub bot_type: i32,
     pub genome_path: Option<String>,
+    pub lead_weights: Option<Vec<f64>>,
+    pub follow_weights: Option<Vec<f64>>,
 }
 
 pub struct MatchupResult {
@@ -61,8 +63,10 @@ pub fn load_joint_genome(path: &str) -> (Genome, Genome) {
 pub fn run_matchup(
     bot_a_networks: Option<&(RustWannNetwork, RustWannNetwork)>,
     bot_a_type: i32,
+    bot_a_weights: Option<&(Vec<f64>, Vec<f64>)>,
     bot_b_networks: Option<&(RustWannNetwork, RustWannNetwork)>,
     bot_b_type: i32,
+    bot_b_weights: Option<&(Vec<f64>, Vec<f64>)>,
     deals: &[EvaluatorDeal],
     sweep_weights: &[f64],
     base_seed: u64,
@@ -94,41 +98,69 @@ pub fn run_matchup(
             let mut total_a = 0.0f64;
             let mut total_b = 0.0f64;
 
+            let a_bot_orig = if bot_a_type == 100 {
+                if let (Some((lead, follow)), Some((lead_w, follow_w))) = (bot_a_networks, bot_a_weights) {
+                    crate::evaluator::SimulatorBot::WannWeighted {
+                        lead_brain: lead,
+                        follow_brain: follow,
+                        lead_weights: lead_w,
+                        follow_weights: follow_w,
+                    }
+                } else {
+                    crate::evaluator::SimulatorBot::Random
+                }
+            } else {
+                let adjusted_type = if bot_a_type >= 10 {
+                    10
+                } else {
+                    bot_a_type
+                };
+                crate::evaluator::get_bot_from_type(
+                    adjusted_type,
+                    &all_lead_nets,
+                    &all_follow_nets,
+                    sweep_weights,
+                )
+            };
+
+            let b_bot_orig = if bot_b_type == 100 {
+                if let (Some((lead, follow)), Some((lead_w, follow_w))) = (bot_b_networks, bot_b_weights) {
+                    crate::evaluator::SimulatorBot::WannWeighted {
+                        lead_brain: lead,
+                        follow_brain: follow,
+                        lead_weights: lead_w,
+                        follow_weights: follow_w,
+                    }
+                } else {
+                    crate::evaluator::SimulatorBot::Random
+                }
+            } else {
+                let adjusted_type = if bot_b_type >= 10 {
+                    if bot_a_networks.is_some() {
+                        11
+                    } else {
+                        10
+                    }
+                } else {
+                    bot_b_type
+                };
+                crate::evaluator::get_bot_from_type(
+                    adjusted_type,
+                    &all_lead_nets,
+                    &all_follow_nets,
+                    sweep_weights,
+                )
+            };
+
             for rot in 0..2 {
                 let swapped = rot == 1;
                 let rotated_hands = crate::evaluator::rotate_hands(&deal.hands, rot * 2);
                 let game_seed = base_seed + deal.seed + (rot as u64) * 10000;
 
                 let (a_bot, b_bot) = if !swapped {
-                    (
-                        crate::evaluator::get_bot_from_type(
-                            bot_a_type,
-                            &all_lead_nets,
-                            &all_follow_nets,
-                            sweep_weights,
-                        ),
-                        crate::evaluator::get_bot_from_type(
-                            bot_b_type,
-                            &all_lead_nets,
-                            &all_follow_nets,
-                            sweep_weights,
-                        ),
-                    )
+                    (a_bot_orig.clone(), b_bot_orig.clone())
                 } else {
-                    (
-                        crate::evaluator::get_bot_from_type(
-                            bot_b_type,
-                            &all_lead_nets,
-                            &all_follow_nets,
-                            sweep_weights,
-                        ),
-                        crate::evaluator::get_bot_from_type(
-                            bot_a_type,
-                            &all_lead_nets,
-                            &all_follow_nets,
-                            sweep_weights,
-                        ),
-                    )
+                    (b_bot_orig.clone(), a_bot_orig.clone())
                 };
 
                 let bots: [crate::evaluator::SimulatorBot; 4] =
@@ -178,7 +210,7 @@ pub fn run_matchup(
         }
     }
 
-    let total_games = deals.len() * 2;
+    let total_games = deals.len();
     MatchupResult {
         wins_a,
         wins_b,
@@ -221,11 +253,24 @@ pub fn run_tournament(bots: &[BotEntry], config: &TournamentConfig) -> Tournamen
                 matchup_idx, total_matchups, bots[i].name, bots[j].name
             );
 
+            let bot_a_weights = if let (Some(lw), Some(fw)) = (&bots[i].lead_weights, &bots[i].follow_weights) {
+                Some((lw.clone(), fw.clone()))
+            } else {
+                None
+            };
+            let bot_b_weights = if let (Some(lw), Some(fw)) = (&bots[j].lead_weights, &bots[j].follow_weights) {
+                Some((lw.clone(), fw.clone()))
+            } else {
+                None
+            };
+
             let result = run_matchup(
                 networks[i].as_ref(),
                 bots[i].bot_type,
+                bot_a_weights.as_ref(),
                 networks[j].as_ref(),
                 bots[j].bot_type,
+                bot_b_weights.as_ref(),
                 &deals,
                 &config.sweep_weights,
                 config.base_seed,

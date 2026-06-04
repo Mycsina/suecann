@@ -1,14 +1,14 @@
-# Full-scale production config — 3-4 hour runtime
-# Updated 2026-05-31: uses db_w40_d3_n1e5.npz (100k PIMC expert states, 40 worlds, depth 3)
+# PGO profile collection config — exercises both Phase 0 and Phase 1 hot paths
+# Short run: 15 gens phase0 + 15 gens phase1 = 30 total
 
 [population]
-pop_size = 1000
-generations = 1200
+pop_size = 400
+generations = 30
 elitism = 3
-pareto_complexity_prob = 0.50
+pareto_complexity_prob = 0.80
 
 [evaluation]
-n_deals = 128
+n_deals = 48
 curriculum_gens = 300
 sweep_weights = [1.0]
 seed = 1337
@@ -31,9 +31,9 @@ p_change_agg = 0.15
 p_crossover = 0.40
 
 [curriculum]
-phase0_gens = 200
+phase0_gens = 15
 bulking_gens = 100
-phase0_dataset = "db_w40_d3_mar03.npz"
+phase0_dataset = "db_w40_d3_n1e5.npz"
 phase0_threshold = -0.10
 phase1_threshold = -0.05
 phase2_hof_min = 3
@@ -41,8 +41,8 @@ min_gens_per_phase = 20
 adaptive_window = 10
 
 [hall_of_fame]
-hof_size = 50
+hof_size = 30
 
 [output]
-checkpoint_dir = "checkpoints/production"
+checkpoint_dir = "checkpoints/pgo_profile"
 stats_file = "training_stats.csv"

@@ -326,6 +326,9 @@ impl Population {
         self.generation += 1;
     }
 
+
+
+
     fn breed_next_generation<R: Rng>(
         &self,
         current_phase: usize,
@@ -721,3 +724,331 @@ pub fn evaluate_single_phase0_sample(
 
     correct as f64 / n_states as f64
 }
+
+pub fn speciate_and_evolve_joint(
+    lead_pop: &mut Population,
+    follow_pop: &mut Population,
+    lead_tabu: &TabuVetoList,
+    follow_tabu: &TabuVetoList,
+    lead_registry: &Mutex<InnovationRegistry>,
+    follow_registry: &Mutex<InnovationRegistry>,
+    rng: &mut rand_pcg::Pcg64,
+) {
+    // 1. Run Speciation on lead_pop (as the master partition)
+    lead_pop.next_species_id = crate::species::speciate(
+        &lead_pop.genomes,
+        &mut lead_pop.species_list,
+        lead_pop.config.species.compatibility_threshold,
+        lead_pop.next_species_id,
+        lead_pop.generation,
+        lead_pop.config.species.c_excess,
+        lead_pop.config.species.c_disjoint,
+        lead_pop.config.species.c_mismatch,
+    );
+
+    // Copy species list to follow_pop to keep species/members partition aligned
+    follow_pop.species_list = lead_pop.species_list.clone();
+    follow_pop.next_species_id = lead_pop.next_species_id;
+
+    // 2. Update stagnation for the species (using the shared joint fitnesses)
+    let fitnesses = &lead_pop.fitnesses;
+    lead_pop.species_list.par_iter_mut().for_each(|sp| {
+        if sp.members.is_empty() {
+            sp.increment_stagnation();
+            return;
+        }
+        let best_f = sp
+            .members
+            .iter()
+            .map(|&idx| fitnesses[idx])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let improved = sp.update_best(best_f);
+        if !improved {
+            sp.increment_stagnation();
+        }
+    });
+
+    // Remove stagnated species unless it is the last active one
+    let active_count = lead_pop
+        .species_list
+        .iter()
+        .filter(|sp| !sp.members.is_empty())
+        .count();
+    if active_count > 1 {
+        let limit = lead_pop.config.species.stagnation_limit;
+        lead_pop.species_list
+            .retain(|sp| sp.members.is_empty() || sp.generations_no_improvement < limit);
+    }
+    follow_pop.species_list = lead_pop.species_list.clone();
+
+    // 3. Breed next generation jointly to preserve alignment
+    let (new_lead_genomes, new_follow_genomes) = breed_next_generation_joint(
+        lead_pop,
+        follow_pop,
+        lead_tabu,
+        follow_tabu,
+        lead_registry,
+        follow_registry,
+        rng,
+    );
+
+    lead_pop.genomes = new_lead_genomes;
+    lead_pop.fitnesses = vec![0.0; lead_pop.genomes.len()];
+    lead_pop.generation += 1;
+
+    follow_pop.genomes = new_follow_genomes;
+    follow_pop.fitnesses = vec![0.0; follow_pop.genomes.len()];
+    follow_pop.generation += 1;
+}
+
+pub fn breed_next_generation_joint(
+    lead_pop: &Population,
+    follow_pop: &Population,
+    lead_tabu: &TabuVetoList,
+    follow_tabu: &TabuVetoList,
+    lead_registry: &Mutex<InnovationRegistry>,
+    follow_registry: &Mutex<InnovationRegistry>,
+    rng: &mut rand_pcg::Pcg64,
+) -> (Vec<Genome>, Vec<Genome>) {
+    let mut active_species: Vec<&Species> = lead_pop
+        .species_list
+        .iter()
+        .filter(|sp| !sp.members.is_empty())
+        .collect();
+
+    if active_species.is_empty() {
+        return (
+            lead_pop.genomes.iter().map(|g| g.copy()).collect(),
+            follow_pop.genomes.iter().map(|g| g.copy()).collect(),
+        );
+    }
+
+    // Precompute best fitness per species to avoid re-scanning during sort
+    let mut best_by_id: std::collections::HashMap<usize, f64> =
+        std::collections::HashMap::new();
+    for sp in active_species.iter() {
+        let best = sp
+            .members
+            .iter()
+            .map(|&idx| lead_pop.fitnesses[idx])
+            .fold(f64::NEG_INFINITY, f64::max);
+        best_by_id.insert(sp.id, best);
+    }
+    active_species.sort_by(|a, b| {
+        let best_a = best_by_id.get(&a.id).copied().unwrap_or(f64::NEG_INFINITY);
+        let best_b = best_by_id.get(&b.id).copied().unwrap_or(f64::NEG_INFINITY);
+        best_b.partial_cmp(&best_a).unwrap()
+    });
+
+    // Compute joint complexity to rank the teams
+    let complexities_lead: Vec<f64> = lead_pop
+        .genomes
+        .par_iter()
+        .map(|g| g.calculate_complexity())
+        .collect();
+    let complexities_follow: Vec<f64> = follow_pop
+        .genomes
+        .par_iter()
+        .map(|g| g.calculate_complexity())
+        .collect();
+    let complexities: Vec<f64> = complexities_lead
+        .iter()
+        .zip(complexities_follow.iter())
+        .map(|(&l, &f)| l + f)
+        .collect();
+
+    let selection_fitness = if rng.gen_bool(lead_pop.config.population.pareto_complexity_prob) {
+        pareto_rank(&lead_pop.fitnesses, &complexities)
+    } else {
+        rank_values(&lead_pop.fitnesses)
+    };
+
+    // Compute offspring counts proportional to best member's selection fitness
+    let mut total_fitness = 0.0;
+    let mut species_best = Vec::new();
+    for sp in &active_species {
+        let best_f = sp
+            .members
+            .iter()
+            .map(|&idx| selection_fitness[idx])
+            .fold(0.0, f64::max);
+        let adj_f = best_f + 0.1; // offset
+        total_fitness += adj_f * sp.members.len() as f64;
+        species_best.push(adj_f);
+    }
+
+    let mut offspring_counts = HashMap::new();
+    let mut remaining = lead_pop.config.population.pop_size;
+    let min_size = lead_pop.config.species.min_species_size;
+
+    for (i, sp) in active_species.iter().enumerate() {
+        if i == active_species.len() - 1 {
+            offspring_counts.insert(sp.id, remaining);
+        } else {
+            let adj_f = species_best[i];
+            let share = (lead_pop.config.population.pop_size as f64
+                * (adj_f * sp.members.len() as f64)
+                / total_fitness) as usize;
+
+            let count = if remaining <= min_size {
+                0
+            } else {
+                let max_allowed = remaining - min_size;
+                if min_size > max_allowed {
+                    std::cmp::min(share, max_allowed)
+                } else {
+                    share.clamp(min_size, max_allowed)
+                }
+            };
+
+            offspring_counts.insert(sp.id, count);
+            remaining -= count;
+        }
+    }
+
+    let mut new_lead_genomes = Vec::with_capacity(lead_pop.config.population.pop_size);
+    let mut new_follow_genomes = Vec::with_capacity(follow_pop.config.population.pop_size);
+
+    for sp in &active_species {
+        let count = offspring_counts.get(&sp.id).copied().unwrap_or(0);
+        if count == 0 {
+            continue;
+        }
+
+        let members = &sp.members;
+        let member_raw_fitnesses: Vec<f64> =
+            members.iter().map(|&idx| selection_fitness[idx]).collect();
+        let member_ranks = rank_values(&member_raw_fitnesses);
+
+        // Sort members by rank descending
+        let mut ranked: Vec<(usize, f64)> = members
+            .iter()
+            .copied()
+            .zip(member_ranks.iter().copied())
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let ranked_indices: Vec<usize> = ranked.iter().map(|x| x.0).collect();
+        let ranked_ranks: Vec<f64> = ranked.iter().map(|x| x.1).collect();
+
+        // Elitism (keep aligned)
+        let elite_count = lead_pop
+            .config
+            .population
+            .elitism
+            .min(count)
+            .min(ranked_indices.len());
+        for idx in 0..elite_count {
+            new_lead_genomes.push(lead_pop.genomes[ranked_indices[idx]].copy());
+            new_follow_genomes.push(follow_pop.genomes[ranked_indices[idx]].copy());
+        }
+
+        // Offspring — parallelized
+        let breeding_count = count - elite_count;
+        if breeding_count == 0 {
+            continue;
+        }
+
+        let p_crossover = lead_pop.config.mutation.p_crossover;
+        let p_add_node = lead_pop.config.mutation.p_add_node;
+        let p_add_conn = lead_pop.config.mutation.p_add_conn;
+        let p_toggle_conn = lead_pop.config.mutation.p_toggle_conn;
+        let p_flip_sign = lead_pop.config.mutation.p_flip_sign;
+        let p_change_act = lead_pop.config.mutation.p_change_act;
+        let p_change_agg = lead_pop.config.mutation.p_change_agg;
+
+        let seeds: Vec<u64> = (0..breeding_count).map(|_| rng.gen::<u64>()).collect();
+
+        let offspring: Vec<(Genome, Genome)> = seeds
+            .into_par_iter()
+            .map_init(
+                || Pcg64::seed_from_u64(42),
+                |local_rng, seed| {
+                    *local_rng = Pcg64::seed_from_u64(seed);
+                    let (mut child_lead, mut child_follow) =
+                        if local_rng.gen_bool(p_crossover) && ranked_indices.len() >= 2 {
+                            let p1 =
+                                tournament_select(&ranked_indices, &ranked_ranks, 3, local_rng);
+                            let p2 =
+                                tournament_select(&ranked_indices, &ranked_ranks, 3, local_rng);
+                            let c_lead = crossover(
+                                &lead_pop.genomes[p1],
+                                &lead_pop.genomes[p2],
+                                lead_pop.fitnesses[p1],
+                                lead_pop.fitnesses[p2],
+                                local_rng,
+                            );
+                            let c_follow = crossover(
+                                &follow_pop.genomes[p1],
+                                &follow_pop.genomes[p2],
+                                follow_pop.fitnesses[p1],
+                                follow_pop.fitnesses[p2],
+                                local_rng,
+                            );
+                            (c_lead, c_follow)
+                        } else {
+                            let parent =
+                                tournament_select(&ranked_indices, &ranked_ranks, 3, local_rng);
+                            (lead_pop.genomes[parent].copy(), follow_pop.genomes[parent].copy())
+                        };
+
+                    apply_mutations(
+                        &mut child_lead,
+                        lead_registry,
+                        lead_tabu,
+                        local_rng,
+                        p_add_node,
+                        p_add_conn,
+                        p_toggle_conn,
+                        p_flip_sign,
+                        p_change_act,
+                        p_change_agg,
+                    );
+
+                    apply_mutations(
+                        &mut child_follow,
+                        follow_registry,
+                        follow_tabu,
+                        local_rng,
+                        p_add_node,
+                        p_add_conn,
+                        p_toggle_conn,
+                        p_flip_sign,
+                        p_change_act,
+                        p_change_agg,
+                    );
+
+                    (child_lead, child_follow)
+                },
+            )
+            .collect();
+
+        for (l, f) in offspring {
+            new_lead_genomes.push(l);
+            new_follow_genomes.push(f);
+        }
+    }
+
+    // Adjust to exact population size (keeping alignment)
+    let pop_size = lead_pop.config.population.pop_size;
+    if new_lead_genomes.len() > pop_size {
+        new_lead_genomes.truncate(pop_size);
+        new_follow_genomes.truncate(pop_size);
+    } else {
+        while new_lead_genomes.len() < pop_size {
+            let best_lead = new_lead_genomes
+                .first()
+                .map(|g| g.copy())
+                .unwrap_or_else(Genome::initial);
+            let best_follow = new_follow_genomes
+                .first()
+                .map(|g| g.copy())
+                .unwrap_or_else(Genome::initial);
+            new_lead_genomes.push(best_lead);
+            new_follow_genomes.push(best_follow);
+        }
+    }
+
+    (new_lead_genomes, new_follow_genomes)
+}
+

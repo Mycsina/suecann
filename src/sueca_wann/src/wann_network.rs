@@ -286,4 +286,117 @@ impl RustWannNetwork {
             scratchpad[nid] = activated.clamp(0.0, 1.0);
         }
     }
+
+    /// Zero-allocation forward pass with independent weights.
+    /// Evaluates the network using the provided input belief state and independent weights.
+    /// The scratchpad must be pre-allocated to self.num_nodes.
+    /// The output intents will rest in scratchpad[22..26] (or whatever output range).
+    pub fn forward_weighted(
+        &self,
+        inputs: &[f64; sueca_solver::constants::INPUT_COUNT],
+        weights: &[f64],
+        scratchpad: &mut [f64],
+    ) {
+        assert_eq!(weights.len(), self.incoming_srcs.len(), "Weights slice length mismatch");
+
+        // 1. Copy inputs into scratchpad[0..INPUT_COUNT] and set bias scratchpad[INPUT_COUNT] = 1.0
+        for i in 0..sueca_solver::constants::INPUT_COUNT {
+            scratchpad[i] = inputs[i].clamp(0.0, 1.0);
+        }
+        scratchpad[sueca_solver::constants::INPUT_COUNT] = 1.0;
+
+        // Reset the rest of the nodes (outputs and hiddens)
+        for i in sueca_solver::constants::OUTPUT_START..self.num_nodes {
+            scratchpad[i] = 0.0;
+        }
+
+        // 2. Evaluate all nodes in topological order
+        for &nid in &self.topological_order {
+            if nid <= sueca_solver::constants::BIAS_ID {
+                continue; // input or bias, already set
+            }
+
+            let start = self.node_ptrs[nid];
+            let end = self.node_ptrs[nid + 1];
+            if start == end {
+                scratchpad[nid] = 0.0;
+                continue;
+            }
+
+            let agg_fn = self.node_aggregations[nid];
+
+            let agg_val = match agg_fn {
+                0 => {
+                    // SUM
+                    let mut sum_val = 0.0;
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let val = if sign == -1 {
+                            1.0 - scratchpad[src]
+                        } else {
+                            scratchpad[src]
+                        };
+                        sum_val += val * weights[idx];
+                    }
+                    sum_val
+                }
+                1 => {
+                    // MIN (AND)
+                    let mut min_val = f64::INFINITY;
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let val = if sign == -1 {
+                            1.0 - scratchpad[src]
+                        } else {
+                            scratchpad[src]
+                        };
+                        let signal = val * weights[idx];
+                        if signal < min_val {
+                            min_val = signal;
+                        }
+                    }
+                    min_val
+                }
+                2 => {
+                    // MAX (OR)
+                    let mut max_val = f64::NEG_INFINITY;
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let val = if sign == -1 {
+                            1.0 - scratchpad[src]
+                        } else {
+                            scratchpad[src]
+                        };
+                        let signal = val * weights[idx];
+                        if signal > max_val {
+                            max_val = signal;
+                        }
+                    }
+                    max_val
+                }
+                _ => 0.0,
+            };
+
+            // Activate and clamp
+            let act_fn = self.node_activations[nid];
+            let activated = match act_fn {
+                0 => agg_val,                       // IDENTITY
+                1 => 1.0 - agg_val.clamp(0.0, 1.0), // NOT
+                2 => {
+                    // THRESHOLD
+                    if agg_val > 0.5 {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                _ => 0.0,
+            };
+
+            scratchpad[nid] = activated.clamp(0.0, 1.0);
+        }
+    }
 }

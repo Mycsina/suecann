@@ -20,14 +20,94 @@ plt.rcParams.update({
 
 
 def detect_format(df: pd.DataFrame) -> str:
-    if "lead_best" in df.columns:
+    if "lead_best" in df.columns or "lead_best_fitness" in df.columns:
         return "dual"
     return "legacy"
 
 
 def load_stats(csv_path: str) -> tuple[pd.DataFrame, int, int, str]:
-    df = pd.read_csv(csv_path)
+    # Read the first line of the file to see if it is a header
+    with open(csv_path, 'r') as f:
+        first_line = f.readline().strip()
+    
+    if not first_line:
+        raise ValueError(f"CSV file {csv_path} is empty")
+        
+    parts = first_line.split(',')
+    has_header = True
+    try:
+        float(parts[0])
+        # If we successfully parsed it as a float, then it's a number, so it has no header
+        has_header = False
+    except ValueError:
+        pass
+        
+    if has_header:
+        df = pd.read_csv(csv_path)
+    else:
+        # No header! Read without header and assign column names based on column count
+        df = pd.read_csv(csv_path, header=None)
+        n_cols = len(df.columns)
+        if n_cols == 11:
+            df.columns = [
+                'generation', 'phase', 'lead_best_fitness', 'lead_avg_fitness',
+                'follow_best_fitness', 'follow_avg_fitness', 'lead_n_species',
+                'follow_n_species', 'lead_n_connections_best', 'follow_n_connections_best',
+                'elapsed_sec'
+            ]
+        elif n_cols == 13:
+            # Older dual or legacy. Older dual starts with lead_best. Legacy starts with best_fitness.
+            # All older runs had headers, but if headers are missing:
+            # We assume it is older dual if we can, else default to older dual names
+            df.columns = [
+                'generation', 'phase', 'lead_best', 'lead_avg', 'follow_best', 'follow_avg',
+                'best_delta_lead', 'best_delta_follow', 'n_species_lead', 'n_species_follow',
+                'n_conns_lead', 'n_conns_follow', 'elapsed_sec'
+            ]
+
+    # Standardize dual format column names
+    if "lead_best_fitness" in df.columns:
+        df["lead_best"] = df["lead_best_fitness"]
+        df["lead_avg"] = df["lead_avg_fitness"]
+        df["follow_best"] = df["follow_best_fitness"]
+        df["follow_avg"] = df["follow_avg_fitness"]
+        df["best_delta_lead"] = df["lead_best_fitness"]
+        df["best_delta_follow"] = df["follow_best_fitness"]
+        df["n_species_lead"] = df["lead_n_species"]
+        df["n_species_follow"] = df["follow_n_species"]
+        df["n_conns_lead"] = df["lead_n_connections_best"]
+        df["n_conns_follow"] = df["follow_n_connections_best"]
+
     fmt = detect_format(df)
+    
+    # Standardize legacy column names (just in case they are missing headers)
+    if fmt == "legacy" and "global_best_fitness" not in df.columns:
+        # If it was legacy and had 13 columns with no header:
+        df.columns = [
+            'generation', 'phase', 'best_fitness', 'avg_fitness', 'median_fitness',
+            'best_delta', 'median_delta', 'global_best_fitness', 'n_species',
+            'n_connections_best', 'n_hidden_best', 'oracle_tax', 'elapsed_sec'
+        ]
+
+    # Coerce columns to numeric (excluding run/format if present)
+    for col in df.columns:
+        if col not in ["run", "format"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Drop rows where generation or phase is NaN
+    df = df.dropna(subset=["generation", "phase"])
+    df["generation"] = df["generation"].astype(int)
+    df["phase"] = df["phase"].astype(int)
+
+    # Filter out corrupted large generation indices (e.g. >= 10000)
+    df = df[df["generation"] < 10000]
+
+    # Drop duplicate generations keeping the last
+    df = df.drop_duplicates(subset=["generation"], keep="last")
+
+    # Sort by generation ascending
+    df = df.sort_values("generation").reset_index(drop=True)
+
     phase0_end = df[df["phase"] == 0]["generation"].max()
     phase1_start = phase0_end + 1 if pd.notna(phase0_end) else 0
     return df, phase0_end, phase1_start, fmt
@@ -42,7 +122,8 @@ def plot_fitness(df: pd.DataFrame, phase1_start: int, fmt: str, out_path: str):
         ax = axes[0, 0]
         ax.plot(df["generation"], df["lead_best"], color="#2ecc71", linewidth=1.0, alpha=0.8, label="Lead Best")
         ax.plot(df["generation"], df["follow_best"], color="#3498db", linewidth=1.0, alpha=0.8, label="Follow Best")
-        ax.axvline(phase1_start, color="#e74c3c", linestyle="--", alpha=0.5, label="Phase 0→1")
+        if phase1_start > 0:
+            ax.axvline(phase1_start, color="#e74c3c", linestyle="--", alpha=0.5, label="Phase 0→1")
         ax.set_xlabel("Generation")
         ax.set_ylabel("Best Fitness")
         ax.set_title("Lead / Follow Best Fitness Over Training")
@@ -52,7 +133,8 @@ def plot_fitness(df: pd.DataFrame, phase1_start: int, fmt: str, out_path: str):
         ax = axes[0, 1]
         ax.plot(df["generation"], df["lead_avg"], color="#2ecc71", linewidth=0.6, alpha=0.7, label="Lead Avg")
         ax.plot(df["generation"], df["follow_avg"], color="#3498db", linewidth=0.6, alpha=0.7, label="Follow Avg")
-        ax.axvline(phase1_start, color="#e74c3c", linestyle="--", alpha=0.5)
+        if phase1_start > 0:
+            ax.axvline(phase1_start, color="#e74c3c", linestyle="--", alpha=0.5)
         ax.set_xlabel("Generation")
         ax.set_ylabel("Average Fitness")
         ax.set_title("Per-Generation Average Fitness (Lead/Follow)")
@@ -88,7 +170,8 @@ def plot_fitness(df: pd.DataFrame, phase1_start: int, fmt: str, out_path: str):
         # Legacy format
         ax = axes[0, 0]
         ax.plot(df["generation"], df["global_best_fitness"], color="#2c3e50", linewidth=1.2)
-        ax.axvline(phase1_start, color="#e74c3c", linestyle="--", alpha=0.5, label="Phase 0→1")
+        if phase1_start > 0:
+            ax.axvline(phase1_start, color="#e74c3c", linestyle="--", alpha=0.5, label="Phase 0→1")
         ax.set_xlabel("Generation")
         ax.set_ylabel("Global Best Fitness")
         ax.set_title("Global Best Fitness Over Training")
@@ -98,7 +181,8 @@ def plot_fitness(df: pd.DataFrame, phase1_start: int, fmt: str, out_path: str):
         ax.plot(df["generation"], df["best_fitness"], color="#2ecc71", linewidth=0.8, alpha=0.7, label="Best (gen)")
         ax.plot(df["generation"], df["median_fitness"], color="#3498db", linewidth=0.8, alpha=0.7, label="Median")
         ax.plot(df["generation"], df["avg_fitness"], color="#e74c3c", linewidth=0.5, alpha=0.5, label="Mean")
-        ax.axvline(phase1_start, color="#e74c3c", linestyle="--", alpha=0.5)
+        if phase1_start > 0:
+            ax.axvline(phase1_start, color="#e74c3c", linestyle="--", alpha=0.5)
         ax.set_xlabel("Generation")
         ax.set_ylabel("Fitness")
         ax.set_title("Per-Generation Fitness Distribution")
@@ -141,7 +225,8 @@ def plot_complexity(df: pd.DataFrame, phase1_start: int, fmt: str, out_path: str
         ax = axes[0, 0]
         ax.plot(df["generation"], df["n_conns_lead"], color="#2ecc71", linewidth=1.0, label="Lead Conns")
         ax.plot(df["generation"], df["n_conns_follow"], color="#3498db", linewidth=1.0, label="Follow Conns")
-        ax.axvline(phase1_start, color="#95a5a6", linestyle="--", alpha=0.4)
+        if phase1_start > 0:
+            ax.axvline(phase1_start, color="#95a5a6", linestyle="--", alpha=0.4)
         ax.set_xlabel("Generation")
         ax.set_ylabel("Connections")
         ax.set_title("Network Size Growth (Connections)")
@@ -153,7 +238,8 @@ def plot_complexity(df: pd.DataFrame, phase1_start: int, fmt: str, out_path: str
         ax.fill_between(df["generation"], df["n_species_follow"], alpha=0.2, color="#3498db")
         ax.plot(df["generation"], df["n_species_lead"], color="#27ae60", linewidth=1.0, label="Lead Species")
         ax.plot(df["generation"], df["n_species_follow"], color="#2980b9", linewidth=1.0, label="Follow Species")
-        ax.axvline(phase1_start, color="#95a5a6", linestyle="--", alpha=0.4)
+        if phase1_start > 0:
+            ax.axvline(phase1_start, color="#95a5a6", linestyle="--", alpha=0.4)
         ax.set_xlabel("Generation")
         ax.set_ylabel("Species Count")
         ax.set_title("Species Diversity Over Time")
@@ -204,7 +290,8 @@ def plot_complexity(df: pd.DataFrame, phase1_start: int, fmt: str, out_path: str
         ax2 = ax.twinx()
         line1, = ax.plot(df["generation"], df["n_connections_best"], color="#3498db", linewidth=1.0, label="Connections")
         line2, = ax2.plot(df["generation"], df["n_hidden_best"], color="#e74c3c", linewidth=1.0, label="Hidden Nodes")
-        ax.axvline(phase1_start, color="#95a5a6", linestyle="--", alpha=0.4)
+        if phase1_start > 0:
+            ax.axvline(phase1_start, color="#95a5a6", linestyle="--", alpha=0.4)
         ax.set_xlabel("Generation")
         ax.set_ylabel("Connections", color="#3498db")
         ax2.set_ylabel("Hidden Nodes", color="#e74c3c")
@@ -214,7 +301,8 @@ def plot_complexity(df: pd.DataFrame, phase1_start: int, fmt: str, out_path: str
         ax = axes[0, 1]
         ax.fill_between(df["generation"], df["n_species"], alpha=0.3, color="#2ecc71")
         ax.plot(df["generation"], df["n_species"], color="#27ae60", linewidth=1.0)
-        ax.axvline(phase1_start, color="#95a5a6", linestyle="--", alpha=0.4)
+        if phase1_start > 0:
+            ax.axvline(phase1_start, color="#95a5a6", linestyle="--", alpha=0.4)
         ax.set_xlabel("Generation")
         ax.set_ylabel("Species Count")
         ax.set_title("Species Diversity Over Time")
@@ -256,9 +344,20 @@ def plot_phase_transition(df: pd.DataFrame, phase0_end: int, phase1_start: int, 
     fig, axes = plt.subplots(1, 2, figsize=(16, 5))
     fig.suptitle("Phase 0 → 1 Transition Analysis", fontsize=14, fontweight="bold")
 
+    if pd.isna(phase0_end):
+        for ax in axes:
+            ax.text(0.5, 0.5, "Phase 0 data not available\n(overwritten during resume)",
+                    ha="center", va="center", color="gray", fontsize=12)
+            ax.set_axis_off()
+        plt.tight_layout()
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Transition plots (placeholder) → {out_path}")
+        return
+
     window = 30
-    start = max(0, phase0_end - window)
-    end = min(len(df) - 1, phase1_start + window)
+    start = max(0, int(phase0_end) - window)
+    end = min(len(df) - 1, int(phase1_start) + window)
     transition = df.iloc[start:end + 1]
 
     if fmt == "dual":
