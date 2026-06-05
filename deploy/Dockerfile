@@ -11,7 +11,7 @@ RUN apk add --no-cache \
 
 # Install wasm-pack (prebuilt musl binary)
 RUN curl -L https://github.com/rustwasm/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz \
-    | tar xz -C /usr/local/bin
+    | tar xz --strip-components=1 -C /usr/local/bin
 
 # Install bun
 RUN curl -fsSL https://bun.sh/install | bash
