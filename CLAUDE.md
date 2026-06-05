@@ -20,6 +20,16 @@ The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the R
 - **Linting**: `cargo clippy --all`
 - **Python deps**: numpy, pandas, matplotlib, seaborn (visualization only)
 
+### WASM Pre-commit Hook
+
+A `.githooks/pre-commit` hook auto-rebuilds WASM and stages the output whenever Rust source files (`src/sueca_*`) are committed. One-time setup per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+After this, every commit that touches Rust source automatically runs `wasm-pack build --target web` and `git add`s the regenerated `frontend/src/wasm/` files. No manual WASM rebuild step needed before push.
+
 ## Documentation Maintenance
 
 - **Critical**: Whenever you make changes to the codebase that affect architecture, features, configuration, CLI, or module structure, you MUST update BOTH `README.md` and `CLAUDE.md` to reflect those changes. These two files are the project's source of truth and must stay in sync with the actual code.
