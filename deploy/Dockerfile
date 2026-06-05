@@ -10,8 +10,10 @@ RUN apk add --no-cache \
     npm \
     musl-dev
 
-# Install wasm-pack (via npm — handles platform detection)
-RUN npm install -g wasm-pack && wasm-pack --version
+# Install wasm-pack and wasm-bindgen-cli (via cargo for correct platform binary)
+RUN cargo install wasm-bindgen-cli --version 0.2.122 && \
+    npm install -g wasm-pack && \
+    wasm-pack --version
 
 # Install bun
 RUN curl -fsSL https://bun.sh/install | bash
