@@ -2,6 +2,7 @@
 FROM rust:1.88-alpine AS builder
 
 RUN apk add --no-cache \
+    bash \
     curl \
     unzip \
     binaryen \
