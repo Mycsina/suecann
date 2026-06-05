@@ -1,0 +1,15 @@
+{
+  "name": "sueca_wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "sueca_wasm_bg.wasm",
+    "sueca_wasm.js",
+    "sueca_wasm.d.ts"
+  ],
+  "main": "sueca_wasm.js",
+  "types": "sueca_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
