@@ -17,3 +17,6 @@ checkpoints/
 *.log
 GEMINI.md
 /pgo-data/
+
+# Exclude github files
+!/.github
