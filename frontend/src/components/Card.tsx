@@ -65,6 +65,7 @@ export const Card: React.FC<CardProps> = ({
   }
 
   return (
+    // eslint-disable-next-line react-doctor/no-static-element-interactions, react-doctor/click-events-have-key-events
     <div 
       className={`card-container ${disableClass} ${throwClass}`}
       onClick={handleCardClick}

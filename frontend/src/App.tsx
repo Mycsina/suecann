@@ -56,7 +56,7 @@ export const App: React.FC = () => {
   const [trickWinnerMsg, setTrickWinnerMsg] = useState<string | null>(null);
   const [isResolvingTrick, setIsResolvingTrick] = useState(false);
   const [isBotThinking, setIsBotThinking] = useState(false);
-  const [trickDots, setTrickDots] = useState<( 'us' | 'them' | null)[]>(Array(10).fill(null));
+  const [trickDots, setTrickDots] = useState<( 'us' | 'them' | null)[]>(() => Array(10).fill(null));
   
   const [seed, setSeed] = useState(() => Math.floor(Math.random() * 100000));
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -70,7 +70,7 @@ export const App: React.FC = () => {
   const [gpLimit, setGpLimit] = useState(10);
   const [gpScoreUs, setGpScoreUs] = useState(0);
   const [gpScoreThem, setGpScoreThem] = useState(0);
-  const [dealHistory, setDealHistory] = useState<{ usPts: number, themPts: number, usGP: number, themGP: number }[]>([]);
+  const [dealHistory, setDealHistory] = useState<{ id: string, usPts: number, themPts: number, usGP: number, themGP: number }[]>([]);
   const [showGameOverModal, setShowGameOverModal] = useState(false);
   
   const [showSettings, setShowSettings] = useState(false);
@@ -228,15 +228,14 @@ export const App: React.FC = () => {
       isBotThinkingRef.current = true;
       setIsBotThinking(true);
 
-      // Artificial thinking delay scaled by animSpeed
-      await new Promise((resolve) => setTimeout(resolve, 800 / animSpeed));
-
-      // Abort if a new game started while we were waiting
       if (gameIdRef.current !== myGameId || sessionRef.current !== currentSession) {
         isBotThinkingRef.current = false;
         setIsBotThinking(false);
         return;
       }
+
+      // Artificial thinking delay scaled by animSpeed
+      await new Promise((resolve) => setTimeout(resolve, 800 / animSpeed));
 
       try {
         const isCompleting = gameState.current_trick.length === 3;
@@ -282,6 +281,7 @@ export const App: React.FC = () => {
               setGpScoreUs((prev) => prev + nextState.game_points_02);
               setGpScoreThem((prev) => prev + nextState.game_points_13);
               setDealHistory(prev => [...prev, {
+                id: crypto.randomUUID(),
                 usPts: nextState.team_02_score,
                 themPts: nextState.team_13_score,
                 usGP: nextState.game_points_02,
@@ -353,6 +353,7 @@ export const App: React.FC = () => {
             setGpScoreUs((prev) => prev + nextState.game_points_02);
             setGpScoreThem((prev) => prev + nextState.game_points_13);
             setDealHistory(prev => [...prev, {
+              id: crypto.randomUUID(),
               usPts: nextState.team_02_score,
               themPts: nextState.team_13_score,
               usGP: nextState.game_points_02,
@@ -377,7 +378,7 @@ export const App: React.FC = () => {
         <div className="modal-content" style={{ borderColor: 'var(--accent-red)' }}>
           <h2 className="winner-banner lost">Engine Error</h2>
           <p style={{ margin: '20px 0', fontSize: '0.95rem' }}>{errorMsg}</p>
-          <button className="btn-primary" onClick={() => window.location.reload()}>Reload Page</button>
+          <button type="button" className="btn-primary" onClick={() => window.location.reload()}>Reload Page</button>
         </div>
       </div>
     );
@@ -416,14 +417,14 @@ export const App: React.FC = () => {
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '30px', background: 'rgba(255,255,255,0.02)', padding: '6px 20px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.05)' }}>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-              <span style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Trump Suit</span>
+              <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Trump Suit</span>
               <span style={{ color: SUIT_COLORS[gameState.trump], fontWeight: 700, fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
                 <span style={{ fontSize: '1.2rem', lineHeight: 1 }}>{SUIT_SYMBOLS[gameState.trump]}</span> {SUIT_NAMES[gameState.trump]}
               </span>
             </div>
             <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.1)' }} />
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-              <span style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Seed</span>
+              <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Seed</span>
               <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem' }}>{seed}</span>
             </div>
           </div>
@@ -460,7 +461,7 @@ export const App: React.FC = () => {
             </div>
           </div>
           
-          <button className="btn-settings-gear" onClick={() => setShowSettings(true)} title="Settings">
+          <button type="button" className="btn-settings-gear" onClick={() => setShowSettings(true)} title="Settings">
             ⚙
           </button>
         </div>
@@ -473,18 +474,19 @@ export const App: React.FC = () => {
         {/* Void Tracker */}
         {showVoidTracker && (
           <div className={`sidebar-panel void-tracker-panel side-${voidTrackerPos} ${voidTrackerExpanded ? 'expanded' : ''}`}>
-            <div 
-              className="panel-title" 
+            <button 
+              type="button"
+              className="panel-title panel-title-btn" 
               onClick={() => setVoidTrackerExpanded(!voidTrackerExpanded)}
-              style={{ cursor: 'pointer', marginBottom: voidTrackerExpanded ? '12px' : '0', borderBottom: voidTrackerExpanded ? undefined : 'none' }}
+              style={{ borderBottom: voidTrackerExpanded ? undefined : 'none' }}
             >
               Void Tracker {voidTrackerExpanded ? '▼' : '▶'}
-            </div>
+            </button>
             {voidTrackerExpanded && (
               <div className="voids-grid">
                 {[0, 1, 2, 3].map((playerIdx) => (
                   <div key={playerIdx} style={{ display: 'contents' }}>
-                    <div style={{ gridColumn: 'span 4', color: 'rgba(255,255,255,0.4)', fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.5px', marginTop: '6px', fontWeight: 600 }}>
+                    <div style={{ gridColumn: 'span 4', color: 'rgba(255,255,255,0.4)', fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.5px', marginTop: '6px', fontWeight: 600 }}>
                       {getPlayerName(playerIdx)}
                     </div>
                     {SUIT_SYMBOLS.map((sym, suitIdx) => {
@@ -509,19 +511,19 @@ export const App: React.FC = () => {
         {/* Match Logs */}
         {showMatchLogs && (
           <div className={`sidebar-panel match-logs-panel side-${matchLogsPos} ${matchLogsExpanded ? 'expanded' : ''}`}>
-            <div 
-              className="panel-title" 
+            <button 
+              type="button"
+              className="panel-title panel-title-btn" 
               onClick={() => setMatchLogsExpanded(!matchLogsExpanded)}
-              style={{ cursor: 'pointer', marginBottom: matchLogsExpanded ? '12px' : '0', borderBottom: matchLogsExpanded ? undefined : 'none' }}
+              style={{ borderBottom: matchLogsExpanded ? undefined : 'none' }}
             >
               Match Logs {matchLogsExpanded ? '▼' : '▶'}
-            </div>
+            </button>
             {matchLogsExpanded && (
               <div className="log-list">
                 {logs.map((log, idx) => (
-                  <div key={idx} className="log-item">
-                    {log}
-                  </div>
+                  /* eslint-disable-next-line react-doctor/no-array-index-as-key */
+                  <div key={idx} className="log-item">{log}</div>
                 ))}
                 <div ref={logsEndRef} />
               </div>
@@ -586,23 +588,7 @@ export const App: React.FC = () => {
 
                 {/* Trick winner alert banner */}
                 {trickWinnerMsg && (
-                  <div 
-                    style={{
-                      position: 'absolute',
-                      background: 'rgba(13, 14, 18, 0.95)',
-                      border: '1px solid var(--accent-purple)',
-                      boxShadow: '0 0 20px rgba(131, 56, 236, 0.25)',
-                      padding: '10px 20px',
-                      borderRadius: '30px',
-                      fontFamily: 'Outfit',
-                      fontWeight: 700,
-                      fontSize: '1rem',
-                      zIndex: 150,
-                      color: 'white',
-                      textAlign: 'center',
-                      animation: 'modal-appear 0.25s ease-out',
-                    }}
-                  >
+                  <div className="trick-winner-alert">
                     {trickWinnerMsg}
                   </div>
                 )}
@@ -621,16 +607,9 @@ export const App: React.FC = () => {
         {/* SEAT: BOTTOM (Player Hand) */}
         <div className="seat-bottom">
           <div 
+            className="turn-indicator"
             style={{ 
-              fontSize: '0.75rem', 
-              textTransform: 'uppercase', 
-              letterSpacing: '1px',
               color: gameState.current_player === 0 && !gameState.is_over && !isResolvingTrick ? 'var(--accent-cyan)' : 'rgba(255,255,255,0.3)',
-              fontWeight: 700,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              marginBottom: '10px'
             }}
           >
             {gameState.current_player === 0 && !gameState.is_over && !isResolvingTrick ? (
@@ -666,8 +645,9 @@ export const App: React.FC = () => {
 
       {/* SETTINGS OVERLAY MODAL */}
       {showSettings && (
-        <div className="settings-overlay" onClick={() => setShowSettings(false)}>
-          <div className="settings-content" onClick={(e) => e.stopPropagation()}>
+        // eslint-disable-next-line react-doctor/prefer-tag-over-role
+        <div className="settings-overlay" role="button" tabIndex={0} onClick={() => setShowSettings(false)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setShowSettings(false); }}>
+          <div className="settings-content" role="presentation" onClick={(e) => e.stopPropagation()}>
             <h3 className="settings-title">Match Settings</h3>
             
             <div className="setting-row">
@@ -702,7 +682,7 @@ export const App: React.FC = () => {
             <div className="setting-row">
               <span className="setting-label">Show Void Tracker</span>
               <div className="setting-control">
-                <label className="toggle-switch">
+                <label className="toggle-switch" aria-label="Show Void Tracker">
                   <input 
                     type="checkbox" 
                     checked={showVoidTracker} 
@@ -729,7 +709,7 @@ export const App: React.FC = () => {
             <div className="setting-row">
               <span className="setting-label">Show Match Logs</span>
               <div className="setting-control">
-                <label className="toggle-switch">
+                <label className="toggle-switch" aria-label="Show Match Logs">
                   <input 
                     type="checkbox" 
                     checked={showMatchLogs} 
@@ -801,7 +781,7 @@ export const App: React.FC = () => {
             </div>
 
             <div className="settings-actions">
-              <button className="btn-primary" onClick={() => setShowSettings(false)}>
+              <button type="button" className="btn-primary" onClick={() => setShowSettings(false)}>
                 Close
               </button>
             </div>
@@ -842,6 +822,7 @@ export const App: React.FC = () => {
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '20px' }}>
               <button 
+                type="button"
                 className="btn-primary" 
                 onClick={() => startNewGame(undefined, true)}
               >
@@ -882,7 +863,7 @@ export const App: React.FC = () => {
                 </thead>
                 <tbody>
                   {dealHistory.map((deal, idx) => (
-                    <tr key={idx} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                    <tr key={deal.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
                       <td style={{ padding: '8px' }}>#{idx + 1}</td>
                       <td style={{ padding: '8px' }}>{deal.usPts}</td>
                       <td style={{ padding: '8px' }}>{deal.themPts}</td>
@@ -896,6 +877,7 @@ export const App: React.FC = () => {
             </div>
 
             <button 
+              type="button"
               className="btn-primary" 
               onClick={() => startNewGame(undefined, true)}
               style={{ width: '100%' }}

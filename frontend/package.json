@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "doctor": "npx react-doctor@latest"
   },
   "dependencies": {
     "@rolldown/plugin-babel": "^0.2.3",
@@ -27,7 +28,21 @@
     "globals": "^17.6.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
-    "vite": "^8.0.12",
-    "wasm-pack": "^0.15.0"
+    "vite": "^8.0.12"
+  },
+  "reactDoctor": {
+    "rules": {
+      "react-hooks-js/set-state-in-effect": "off",
+      "react-doctor/no-giant-component": "off",
+      "react-doctor/prefer-useReducer": "off",
+      "react-doctor/rerender-state-only-in-handlers": "off",
+      "react-doctor/no-initialize-state": "off",
+      "react-doctor/exhaustive-deps": "off",
+      "react-doctor/no-derived-state": "off",
+      "react-doctor/no-event-handler": "off",
+      "react-doctor/no-chain-state-updates": "off",
+      "react-doctor/effect-needs-cleanup": "off",
+      "deslop/unused-file": "off"
+    }
   }
 }

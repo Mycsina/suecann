@@ -581,6 +581,22 @@ body {
   padding-bottom: 6px;
 }
 
+.panel-title-btn {
+  background: none;
+  border: none;
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+  font-family: inherit;
+  color: inherit;
+  font-size: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
 .voids-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -930,3 +946,29 @@ input:checked + .slider:before {
   font-weight: 500;
 }
 
+.trick-winner-alert {
+  position: absolute;
+  background: rgba(13, 14, 18, 0.95);
+  border: 1px solid var(--accent-purple);
+  box-shadow: 0 0 20px rgba(131, 56, 236, 0.25);
+  padding: 10px 20px;
+  border-radius: 30px;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 700;
+  font-size: 1rem;
+  z-index: 150;
+  color: white;
+  text-align: center;
+  animation: modal-appear 0.25s ease-out;
+}
+
+.turn-indicator {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
