@@ -1,0 +1,12 @@
+target/
+checkpoints/
+.venv/
+node_modules/
+.git/
+.github/
+**/target/
+**/node_modules/
+frontend/dist/
+pgo-data/
+*.profdata
+*.profraw

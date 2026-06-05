@@ -7,7 +7,8 @@ RUN apk add --no-cache \
     unzip \
     binaryen \
     nodejs \
-    npm
+    npm \
+    musl-dev
 
 # Install wasm-pack (via npm — handles platform detection)
 RUN npm install -g wasm-pack && wasm-pack --version
