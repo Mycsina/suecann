@@ -1,0 +1,18 @@
+services:
+  sueca-wann:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: sueca-wann
+    networks:
+      - traefik-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sueca.rule=Host(`sueca.mycsina.xyz`)"
+      - "traefik.http.routers.sueca.entrypoints=websecure"
+      - "traefik.http.routers.sueca.tls.certresolver=letsencrypt"
+    restart: unless-stopped
+
+networks:
+  traefik-network:
+    external: true

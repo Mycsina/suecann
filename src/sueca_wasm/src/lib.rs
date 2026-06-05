@@ -254,6 +254,17 @@ impl WannSuecaGameSession {
         if seat == 0 {
             return Err("Waiting for player move".to_string());
         }
+        if seat > 3 {
+            return Err(format!("Invalid current_player seat: {}", seat));
+        }
+
+        // Validate that the game state is consistent before proceeding
+        let legal_before = self.game.state.legal_moves();
+        if legal_before == 0 {
+            return Err(format!("Bot at seat {} has no legal moves — stuck game state (trick_len={}, hand_count={})",
+                seat, self.game.current_trick_len,
+                self.game.state.hands[seat as usize].count_ones()));
+        }
 
         let card = match self.bot_types[seat as usize] {
             1 => sueca_solver::heuristic::select_card_heuristic_old(&self.game, seat),
@@ -302,7 +313,6 @@ impl WannSuecaGameSession {
                 let chosen_intent = if best_count == 1 {
                     best_intents[0]
                 } else {
-                    // Pcg64 random range
                     use rand::Rng;
                     best_intents[self.rng.gen_range(0..best_count)]
                 };
@@ -310,7 +320,21 @@ impl WannSuecaGameSession {
                 resolve_intent(chosen_intent, &self.game, seat)
             }
         };
-        
+
+        // Validate the chosen card is actually legal
+        if (legal_before & (1u64 << card)) == 0 {
+            return Err(format!(
+                "Bot at seat {} selected illegal card {} (suit={}, rank={}). \
+                 Legal mask: 0x{:016X}, hand: 0x{:016X}, trick_len={}",
+                seat, card,
+                sueca_solver::engine::CARD_SUIT[card as usize],
+                sueca_solver::engine::CARD_RANK[card as usize],
+                legal_before,
+                self.game.state.hands[seat as usize],
+                self.game.current_trick_len
+            ));
+        }
+
         self.play_card_and_capture(card);
         Ok(card)
     }

@@ -58,8 +58,13 @@ export const App: React.FC = () => {
   const [isBotThinking, setIsBotThinking] = useState(false);
   const [trickDots, setTrickDots] = useState<( 'us' | 'them' | null)[]>(Array(10).fill(null));
   
-  const [seed, setSeed] = useState(42);
+  const [seed, setSeed] = useState(() => Math.floor(Math.random() * 100000));
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Refs for synchronous guard checks — prevents stale closures and concurrent bot turns
+  const isBotThinkingRef = useRef(false);
+  const sessionRef = useRef<WannSuecaGameSession | null>(null);
+  const gameIdRef = useRef(0); // incremented on each new game; async ops abort if mismatch
 
   // Match & settings states
   const [gpLimit, setGpLimit] = useState(10);
@@ -139,9 +144,13 @@ export const App: React.FC = () => {
   const startNewGame = (customSeed?: number, resetGP = false) => {
     if (!wasmReady) return;
     try {
-      const activeSeed = customSeed !== undefined ? customSeed : Math.floor(Math.random() * 10000);
+      // Abort any in-flight bot turn from a previous game
+      gameIdRef.current += 1;
+      isBotThinkingRef.current = false;
+
+      const activeSeed = customSeed !== undefined ? customSeed : Math.floor(Math.random() * 100000);
       setSeed(activeSeed);
-      
+
       const newSession = new WannSuecaGameSession(JSON.stringify(bestGenome), BigInt(activeSeed));
       newSession.set_bot_types(botTypes[0], botTypes[1], botTypes[2]);
       
@@ -178,10 +187,15 @@ export const App: React.FC = () => {
     }
   };
 
+  // Keep sessionRef in sync with session state
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
   // Autostart first game once WASM is ready
   useEffect(() => {
     if (wasmReady) {
-      startNewGame(42);
+      startNewGame();
     }
   }, [wasmReady]);
 
@@ -199,23 +213,36 @@ export const App: React.FC = () => {
 
   // Bot Turn Trigger Loop
   useEffect(() => {
-    if (!session || !gameState || gameState.is_over || isResolvingTrick || isBotThinking) return;
+    if (!session || !gameState || gameState.is_over || isResolvingTrick || isBotThinkingRef.current) return;
 
     const currentPlayer = gameState.current_player;
     if (currentPlayer === 0) return; // Player's turn, wait for input
 
+    // Synchronous guard: grab the session ref to avoid stale closure issues
+    const currentSession = sessionRef.current;
+    if (!currentSession) return;
+
     // Triggers bot turn
+    const myGameId = gameIdRef.current;
     const triggerBotPlay = async () => {
+      isBotThinkingRef.current = true;
       setIsBotThinking(true);
-      
+
       // Artificial thinking delay scaled by animSpeed
       await new Promise((resolve) => setTimeout(resolve, 800 / animSpeed));
 
+      // Abort if a new game started while we were waiting
+      if (gameIdRef.current !== myGameId || sessionRef.current !== currentSession) {
+        isBotThinkingRef.current = false;
+        setIsBotThinking(false);
+        return;
+      }
+
       try {
         const isCompleting = gameState.current_trick.length === 3;
-        const playedCard = session.play_bot_turn();
-        
-        const stateStr = session.get_state_json();
+        const playedCard = currentSession.play_bot_turn();
+
+        const stateStr = currentSession.get_state_json();
         const nextState = JSON.parse(stateStr) as WasmGameState;
 
         // Add to logs
@@ -225,17 +252,18 @@ export const App: React.FC = () => {
         if (isCompleting) {
           // This bot completed the trick
           const lastT = nextState.last_trick!;
+          // Update game state immediately so the played card leaves the hand
+          setGameState(nextState);
           setVisualTrick({
             cards: [...gameState.current_trick, playedCard],
             seats: [...gameState.current_trick_seats, currentPlayer],
           });
-          
+
           setIsResolvingTrick(true);
           setTrickWinnerMsg(`${getPlayerName(lastT.winner)} wins the trick (+${lastT.points} points)`);
-          
-          // Delay clearing the trick to allow player to see it, scaled by animSpeed
+
+          // Delay clearing the trick visuals, not the game state
           setTimeout(() => {
-            setGameState(nextState);
             setVisualTrick({ cards: [], seats: [] });
             setTrickDots((prev) => {
               const updated = [...prev];
@@ -245,10 +273,11 @@ export const App: React.FC = () => {
             setLogs((prev) => [...prev, `--- Trick won by ${getPlayerName(lastT.winner)} (${lastT.points} pts) ---`]);
             setTrickWinnerMsg(null);
             setIsResolvingTrick(false);
+            isBotThinkingRef.current = false;
             setIsBotThinking(false);
-            
+
             generateTrickOffsets();
-            
+
             if (nextState.is_over) {
               setGpScoreUs((prev) => prev + nextState.game_points_02);
               setGpScoreThem((prev) => prev + nextState.game_points_13);
@@ -264,11 +293,13 @@ export const App: React.FC = () => {
           // Standard play, not completing the trick
           setGameState(nextState);
           setVisualTrick({ cards: nextState.current_trick, seats: nextState.current_trick_seats });
+          isBotThinkingRef.current = false;
           setIsBotThinking(false);
         }
       } catch (err: any) {
         console.error(err);
         setErrorMsg(`Engine error during bot play: ${err.message || err}`);
+        isBotThinkingRef.current = false;
         setIsBotThinking(false);
       }
     };
@@ -294,17 +325,18 @@ export const App: React.FC = () => {
       if (isCompleting) {
         // Player completed the trick
         const lastT = nextState.last_trick!;
+        // Update game state immediately so the played card leaves the hand
+        setGameState(nextState);
         setVisualTrick({
           cards: [...gameState.current_trick, card],
           seats: [...gameState.current_trick_seats, 0],
         });
-        
+
         setIsResolvingTrick(true);
         setTrickWinnerMsg(`${getPlayerName(lastT.winner)} wins the trick (+${lastT.points} points)`);
-        
-        // Delay clearing scaled by animSpeed
+
+        // Delay clearing the trick visuals, not the game state
         setTimeout(() => {
-          setGameState(nextState);
           setVisualTrick({ cards: [], seats: [] });
           setTrickDots((prev) => {
             const updated = [...prev];
@@ -314,9 +346,9 @@ export const App: React.FC = () => {
           setLogs((prev) => [...prev, `--- Trick won by ${getPlayerName(lastT.winner)} (${lastT.points} pts) ---`]);
           setTrickWinnerMsg(null);
           setIsResolvingTrick(false);
-          
+
           generateTrickOffsets();
-          
+
           if (nextState.is_over) {
             setGpScoreUs((prev) => prev + nextState.game_points_02);
             setGpScoreThem((prev) => prev + nextState.game_points_13);
