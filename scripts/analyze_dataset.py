@@ -13,6 +13,8 @@ INTENT_NAMES = {
     3: "EQUITY_BUILDER",
 }
 
+EXPECTED_FEATURES = 33
+
 FEATURE_NAMES = [
     "Has_Led_Suit", "Has_Trump", "Led_Suit_Power", "Trump_Power",
     "Hand_Point_Density", "Am_I_Leading", "Am_I_Last_To_Play",
@@ -24,6 +26,7 @@ FEATURE_NAMES = [
     "Side0_Ace_Played", "Side0_7_Played", "Side1_Depletion",
     "Side1_Ace_Played", "Side1_7_Played", "Side2_Depletion",
     "Side2_Ace_Played", "Side2_7_Played",
+    "Points_Secured_Us", "Known_Void_Suits_Count", "Depleted_Suits_Count",
 ]
 
 BINARY_FEATURES = {
@@ -48,6 +51,15 @@ def analyze(ds: dict, name: str) -> dict:
     n_states, n_features = states.shape
 
     report = {}
+
+    # --- Feature count validation ---
+    if n_features != EXPECTED_FEATURES:
+        print(f"  ⚠ WARNING: Dataset has {n_features} features, expected {EXPECTED_FEATURES}.")
+        if n_features < EXPECTED_FEATURES:
+            print(f"    Missing {EXPECTED_FEATURES - n_features} features. Analysis will use available features only.")
+            print(f"    Missing features: {FEATURE_NAMES[n_features:]}")
+        else:
+            print(f"    Extra {n_features - EXPECTED_FEATURES} features beyond expected.")
 
     # --- Basic counts ---
     report["n_states"] = n_states

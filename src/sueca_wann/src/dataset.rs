@@ -16,10 +16,12 @@ pub struct ExpertDataset {
 pub fn load_expert_dataset<P: AsRef<Path>>(
     path: P,
 ) -> Result<ExpertDataset, Box<dyn std::error::Error>> {
+    let path_display = path.as_ref().display().to_string();
+
     if !path.as_ref().exists() {
         println!(
-            "  >>> Dataset file {:?} not found, using mock dataset",
-            path.as_ref()
+            "  >>> Dataset file {} not found, using mock dataset",
+            path_display
         );
         let num_states = 100;
         let states = vec![0.0; num_states * INPUT_COUNT];
@@ -33,7 +35,7 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
         });
     }
 
-    let file = File::open(path)?;
+    let file = File::open(&path_display)?;
     let reader = BufReader::new(file);
     let mut archive = ZipArchive::new(reader)?;
 
@@ -78,35 +80,22 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
 
     let num_states = legal_masks.len();
 
-    // Detect input dimension from the file: old datasets may have 21 features,
-    // current code expects INPUT_COUNT (30). Auto-pad with zeros if needed.
+    // Validate that the dataset has exactly the expected number of features.
+    // No zero-padding — stale datasets must be regenerated.
     let file_input_count = states.len() / num_states;
-    let states = if file_input_count < INPUT_COUNT {
-        println!(
-            "  >>> Dataset has {} features per state, padding to {} with zeros.",
-            file_input_count, INPUT_COUNT
-        );
-        let mut padded = Vec::with_capacity(num_states * INPUT_COUNT);
-        for i in 0..num_states {
-            let start = i * file_input_count;
-            let end = start + file_input_count;
-            padded.extend_from_slice(&states[start..end]);
-            padded.resize(padded.len() + (INPUT_COUNT - file_input_count), 0.0);
-        }
-        padded
-    } else if file_input_count > INPUT_COUNT {
-        panic!(
-            "Dataset has {} features per state but code expects {}. Regenerate the dataset.",
-            file_input_count, INPUT_COUNT
-        );
-    } else {
-        states
-    };
+    if file_input_count != INPUT_COUNT {
+        return Err(format!(
+            "Dataset '{}' has {} features per state, but code expects {}. \
+             Regenerate the dataset with: cargo run --release -- generate-dataset",
+            path_display, file_input_count, INPUT_COUNT
+        )
+        .into());
+    }
 
     assert_eq!(
         states.len(),
         num_states * INPUT_COUNT,
-        "States length mismatch after padding"
+        "States length mismatch"
     );
 
     Ok(ExpertDataset {

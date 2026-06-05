@@ -13,12 +13,17 @@ The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the R
 
 ## Tooling
 
-- **Rust workspace**: `src/sueca_solver` (pure game engine, rlib only),`src/sueca_wann` (training binary + CLI) and `src/sueca_wasm` (WASM + interactive frontend in `frontend` folder)
+- **Rust workspace**: `src/sueca_solver` (pure game engine, rlib only), `src/sueca_wann` (training binary + CLI) and `src/sueca_wasm` (WASM + interactive frontend in `frontend` folder)
 
 - **Build Training Binary**: `cargo build -p sueca_wann --release`
 - **Testing**: `cargo test --all`
 - **Linting**: `cargo clippy --all`
 - **Python deps**: numpy, pandas, matplotlib, seaborn (visualization only)
+
+## Documentation Maintenance
+
+- **Critical**: Whenever you make changes to the codebase that affect architecture, features, configuration, CLI, or module structure, you MUST update BOTH `README.md` and `CLAUDE.md` to reflect those changes. These two files are the project's source of truth and must stay in sync with the actual code.
+- After any non-trivial code change, re-verify claims in both files against the codebase and fix any discrepancies found.
 
 ## Running Training
 
@@ -35,7 +40,7 @@ cargo build -p sueca_wann --release
 ./target/release/sueca_wann train --config configs/default.toml --resume
 ```
 
-Training creates dated run folders containing `training_stats.csv`, `training_state.bin`, `best_genome_final.json`, `hof_final.json`.
+Training creates dated run folders containing `training_stats.csv`, `training_state.bin`, and a `genomes/` subdirectory with `best_genome_final.json`, `hof_final.json`.
 
 ## Running Benchmarks
 
@@ -61,6 +66,16 @@ Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topol
 
 Generates class-balanced PIMC expert states for Phase 0 pretraining. Samples only the current player's turn (not all 4 seats) to ensure legal-move / perspective alignment.
 
+## Optimizing Weights
+
+```bash
+./target/release/sueca_wann optimize-weights \
+  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --deals 200 --generations 50
+```
+
+Uses Differential Evolution (pop=50, F=0.5, CR=0.7) to optimize independent per-connection continuous weights within [-2.0, 2.0]. Saves `optimized_weights.json` in the genome's directory. The benchmark command auto-detects this file and adds a WANN (Optimized) entry.
+
 ## Comparing Training Runs
 
 ```bash
@@ -85,7 +100,7 @@ Saves `checkpoints/run_comparison.png` with 4 panels: fitness, delta vs Heuristi
 ## Architecture
 
 ```
-Belief State (30 floats) → WANN (logical gates) → Oracle Intent (4 outputs) → Legal Subsystem → Card
+Belief State (33 floats) → WANN (logical gates) → Oracle Intent (4 outputs) → Legal Subsystem → Card
 ```
 
 **Crate dependency**: `sueca_wann` → `sueca_solver`. The solver is a pure game engine (rlib only, no PyO3). The wann crate contains WANN inference, evaluator, NEAT evolution, and CLI.
@@ -93,7 +108,7 @@ Belief State (30 floats) → WANN (logical gates) → Oracle Intent (4 outputs) 
 **Key modules in `sueca_solver`** (pure game engine):
 - `engine.rs` — Bitboard game state, card logic, beats comparison
 - `simulator.rs` — SuecaSimulatorGame wrapper with void tracking
-- `belief.rs` — Belief state encoder (30 floats from game state)
+- `belief.rs` — Belief state encoder (33 floats from game state)
 - `heuristic.rs` — Card selection heuristics, intent-to-card resolver
 - `pimc.rs` — Perfect Information Monte Carlo solver with late-game minimax switch
 - `search.rs` — Alpha-beta search with Zobrist hashing and transposition table
@@ -101,7 +116,7 @@ Belief State (30 floats) → WANN (logical gates) → Oracle Intent (4 outputs) 
 - `constants.rs` — WANN layout dimension constants (INPUT_COUNT, OUTPUT_COUNT, etc.)
 
 **Key modules in `sueca_wann`**:
-- `main.rs` — CLI entry point (train / benchmark / compile-rules / generate-dataset subcommands)
+- `main.rs` — CLI entry point (train / benchmark / compile-rules / generate-dataset / optimize-weights subcommands)
 - `wann_network.rs` — CSR-format WANN inference with zero-allocation forward pass
 - `evaluator.rs` — Bot simulation, delta-fitness evaluation
 - `train.rs` — Training loop, Phase 0/1 evaluation, HOF transfer
@@ -111,14 +126,16 @@ Belief State (30 floats) → WANN (logical gates) → Oracle Intent (4 outputs) 
 - `mutations.rs` — NEAT mutation operators, innovation registry
 - `hall_of_fame.rs` — HOF management with sampling
 - `map_elites.rs` — MAP-Elites quality-diversity archive
+- `optimize.rs` — Differential Evolution weight optimization
 - `constants.rs` — Evolutionary hyperparameters, feature/intent name mappings
 - `benchmark.rs` — Tournament benchmarking
 - `compile_rules.rs` — Rule compiler, Graphviz DOT export, PNG rendering
 - `dataset_gen.rs` — PIMC expert dataset generation with ego-turn synchronization
-- `dataset.rs` — Expert dataset loading (NPZ reader with backward compat for old 21-input files)
+- `dataset.rs` — Expert dataset loading (NPZ reader; rejects datasets that don't match INPUT_COUNT=33)
+- `checkpoint.rs` — Training state serialization (Bincode)
 - `config.rs` — TOML configuration loading
 
-### Belief State (30 inputs, all in [0,1])
+### Belief State (33 inputs, all in [0,1])
 
 | # | Field | Type | Normalization |
 |---|-------|------|---------------|
@@ -152,6 +169,9 @@ Belief State (30 floats) → WANN (logical gates) → Oracle Intent (4 outputs) 
 | 27 | Side2_Depletion | Float | played cards of side-suit 2 / 10 |
 | 28 | Side2_Ace_Played | Bool | in previous tricks |
 | 29 | Side2_7_Played | Bool | in previous tricks |
+| 30 | Points_Secured_Us | Float | Our team's secured game points / 120.0 |
+| 31 | Known_Void_Suits_Count | Float | Number of suits where any player is known void / 4.0 |
+| 32 | Depleted_Suits_Count | Float | Number of fully-depleted suits / 4.0 |
 
 ### Oracle Intents (4 outputs)
 
@@ -168,7 +188,7 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 ### WANN Constraints
 
 - **Gene representation**: Connection genes `[5,N]` (innovation, src, dst, sign ∈ {+1,−1}, enabled). Node genes `[4,M]` (id, type, activation_fn, aggregation_fn).
-- **Initialization**: 30 input + 1 bias + 4 output nodes. All genomes start with these base nodes and receive random connections.
+- **Initialization**: 33 input + 1 bias + 4 output nodes. All genomes start with these base nodes and receive random connections.
 - **Sign-only weights**: Connections carry only a sign (+1 or −1), not a learned weight. A shared weight W is used for evaluation. sign=-1 inverts the signal (1.0 - x) before aggregation.
 - **Aggregation functions** (3 only): SUM=0, MIN(AND)=1, MAX(OR)=2. **No MEAN** — it causes float-precision issues at the THRESHOLD boundary.
 - **Activation functions** (3 only): IDENTITY=0, NOT=1, THRESHOLD=2. **No SIGMOID** — it breaks IF/THEN rule extraction.
@@ -196,9 +216,9 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 - **Duplicate deals**: Deals per generation × 4 seat rotations. Deals are **re-seeded each generation** (`seed=gen`) to prevent overfitting.
 - **Delta-fitness**: Each genome compared against HeuristicBot on the exact same deal/seat/opponents (Common Random Numbers). Eliminates deal-luck variance.
 - **Rank-based selection**: Raw fitness converted to normalized ranks before tournament selection for noise robustness.
-- **Multi-objective Pareto ranking**: 80% of the time, rank by (performance, simplicity) Pareto front with lexicographic tie-breaking; 20% by performance only. Prevents bloat while maintaining selection pressure.
-- **Hall of Fame**: Frozen champion archive (size 30). Sampled as partners/opponents during Phase 1.
-- **MAP-Elites**: 10×10 grid archiving behavioral specialists by intent preference and aggression. Sampled at 50% rate for opponent selection.
+- **Multi-objective Pareto ranking**: 50% of the time, rank by (performance, simplicity) Pareto front with lexicographic tie-breaking; 50% by performance only. Prevents bloat while maintaining selection pressure.
+- **Hall of Fame**: Frozen champion archive (size 50). Sampled as partners/opponents during Phase 1.
+- **MAP-Elites**: 10×10 grid archiving behavioral specialists by intent preference and aggression. Sampled as opponents with 50% probability when HOF/MAP-Elites is selected (vs OldHeuristicBot baseline).
 - **Mutations**: Add node, add connection, toggle connection, flip sign, change activation, change aggregation. No weight mutation.
 
 ## Code Conventions

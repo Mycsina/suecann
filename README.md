@@ -5,10 +5,10 @@ Evolves Weight-Agnostic Neural Networks (WANNs) to play Sueca, a Portuguese four
 ## Architecture
 
 ```
-Belief State (30 features) → WANN (Logical Gates) → Oracle Intent (4 outputs) → Heuristic Resolver → Card
+Belief State (33 features) → WANN (Logical Gates) → Oracle Intent (4 outputs) → Heuristic Resolver → Card
 ```
 
-**Belief State.** 30 normalized floats encoding hand composition, trick state, void tracking, game progress, and side-suit depletion.
+**Belief State.** 33 normalized floats encoding hand composition, trick state, void tracking, game progress, side-suit depletion, secured points, and void/depletion counts.
 
 **WANN.** Weight-agnostic network with sign-only connections (±1), logical aggregations (SUM, MIN, MAX), and discrete activations (IDENTITY, NOT, THRESHOLD). Topologies are evaluated across a weight sweep W ∈ {−2.0, −1.0, −0.5, 0.5, 1.0, 2.0}.
 
@@ -21,7 +21,7 @@ Belief State (30 features) → WANN (Logical Gates) → Oracle Intent (4 outputs
 
 **Heuristic Resolver.** Maps each intent to a legal card contextually. All four intents always resolve to a legal move, so illegal intents never occur during rollouts.
 
-### Belief State Layout (30 inputs, all in [0, 1])
+### Belief State Layout (33 inputs, all in [0, 1])
 
 | Index | Feature | Type | Description |
 |:---:|---|---|---|
@@ -55,6 +55,9 @@ Belief State (30 features) → WANN (Logical Gates) → Oracle Intent (4 outputs
 | 27 | `Side2_Depletion` | Float | Played cards of side-suit 2 / 10.0 |
 | 28 | `Side2_Ace_Played` | Bool | Ace of side-suit 2 already played |
 | 29 | `Side2_7_Played` | Bool | 7 of side-suit 2 already played |
+| 30 | `Points_Secured_Us` | Float | Our team's secured game points / 120.0 |
+| 31 | `Known_Void_Suits_Count` | Float | Number of suits where any player is known void / 4.0 |
+| 32 | `Depleted_Suits_Count` | Float | Number of fully-depleted suits / 4.0 |
 
 ## Benchmark Results
 
@@ -77,10 +80,11 @@ With the correct duplicate-match win-rate calculation (summing to 100%), the res
 
 ## Rust Crates
 
-Two Rust crates, no Python FFI, no `.so` build step.
+Three Rust crates, no Python FFI, no `.so` build step.
 
 - **`sueca_solver`** — Pure game engine (bitboard state, PIMC search with late-game minimax, belief encoding, heuristic intent resolver). rlib only.
 - **`sueca_wann`** — WANN inference, NEAT evolution loop, and CLI. Depends on `sueca_solver`.
+- **`sueca_wasm`** — WASM bindings for browser-based play. Compiled via wasm-pack, consumed by the React frontend.
 
 ```bash
 cargo build -p sueca_wann --release
@@ -131,23 +135,71 @@ Open `http://localhost:5173` in your browser to play Sueca vs WANN/heuristics.
 ### Benchmarking
 
 ```bash
-./target/release/sueca_wann benchmark --deals 200 --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json
+# Full tournament with custom weight sweep
+./target/release/sueca_wann benchmark \
+  --deals 200 \
+  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --weights -2.0,-1.0,-0.5,0.5,1.0,2.0 \
+  --seed 42
+
+# Auto-detect latest genome, use default weight sweep
+./target/release/sueca_wann benchmark --deals 200
 ```
+
+Optional flags: `--output-dir <dir>` to override the report output directory, `--seed <u64>` for reproducibility. The `--weights` flag accepts a comma-separated list of shared weight values for the WANN sweep.
 
 ### Comparing Runs
 
+Cross-run comparison with 4-panel visualization (fitness, delta vs HeuristicBot, species diversity, network complexity):
+
 ```bash
-uv run python scripts/compare_runs.py
-uv run python scripts/compare_runs.py --runs 2026-06-03-2
+uv run python scripts/compare_runs.py                    # all runs
+uv run python scripts/compare_runs.py --runs 2026-06-03-2  # specific run
+```
+
+Saves `checkpoints/run_comparison.png`.
+
+### Analyzing a Single Run
+
+Per-run training plots (fitness curves, species counts, network complexity over time):
+
+```bash
+uv run python scripts/plot_training.py \
+  --stats checkpoints/2026-06-03-2/training_stats.csv \
+  --out-dir checkpoints/2026-06-03-2
+```
+
+### Analyzing Expert Datasets
+
+```bash
+uv run python scripts/analyze_dataset.py expert_states.npz      # quick stats with plots
+uv run python scripts/dataset_analysis.py expert_states.npz      # comprehensive text report
+```
+
+### Batch Rule Compilation
+
+Compile rules for all genomes across all checkpoints:
+
+```bash
+uv run python scripts/compile_all.py
 ```
 
 ### Extracting Rules
 
 ```bash
-./target/release/sueca_wann compile-rules --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json --output-dir checkpoints/2026-06-03-2
+# Default weight (1.0)
+./target/release/sueca_wann compile-rules \
+  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --output-dir checkpoints/2026-06-03-2
+
+# Extract at a specific sweep weight (e.g. -1.0 for inhibitory rules)
+./target/release/sueca_wann compile-rules \
+  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --output-dir checkpoints/2026-06-03-2 \
+  --weight -1.0
 ```
 
-Generates `compiled_rules.txt`, `topology_graph.dot`, and `topology_graph.png`.
+Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topology_graph.png`.
 
 ### Generating Expert Datasets
 
@@ -156,6 +208,18 @@ Generates `compiled_rules.txt`, `topology_graph.dot`, and `topology_graph.png`.
   --n-worlds 80 --search-depth 4 --target-count 10000 \
   --output expert_states.npz
 ```
+
+### Optimizing Weights
+
+After evolving a topology, optimize independent continuous weights per connection using Differential Evolution:
+
+```bash
+./target/release/sueca_wann optimize-weights \
+  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --deals 200 --generations 50
+```
+
+This produces `optimized_weights.json` in the genome's directory. The benchmark command auto-detects this file and adds a "WANN (Optimized)" bot to the tournament.
 
 ## Training Pipeline
 
@@ -203,14 +267,27 @@ Key hyperparameters from `configs/default.toml`:
 | population | pop_size | 1000 | Population size |
 | population | generations | 1200 | Total generations |
 | population | elitism | 3 | Genomes copied verbatim per species |
+| population | pareto_complexity_prob | 0.50 | Probability of using Pareto (perf+simplicity) ranking |
 | evaluation | n_deals | 128 | Duplicate deals per generation |
+| evaluation | curriculum_gens | 300 | Gens of curriculum-guided evolution |
 | evaluation | sweep_weights | [1.0] | Weight sweep values |
+| evaluation | seed | 1337 | Base RNG seed |
 | species | compatibility_threshold | 1.4 | Speciation distance threshold |
 | species | stagnation_limit | 40 | Gens without improvement before removal |
+| species | c_excess | 1.0 | Excess gene coefficient |
+| species | c_disjoint | 1.0 | Disjoint gene coefficient |
+| species | c_mismatch | 0.5 | Weight mismatch coefficient |
+| species | min_species_size | 3 | Minimum genomes per species |
 | mutation | p_add_node | 0.20 | Add-node probability |
 | mutation | p_add_conn | 0.35 | Add-connection probability |
+| mutation | p_toggle_conn | 0.05 | Toggle-connection probability |
+| mutation | p_flip_sign | 0.10 | Flip-sign probability |
+| mutation | p_change_act | 0.25 | Change-activation probability |
+| mutation | p_change_agg | 0.15 | Change-aggregation probability |
 | mutation | p_crossover | 0.40 | Crossover probability |
 | curriculum | phase0_gens | 200 | Gens in supervised Phase 0 |
+| curriculum | bulking_gens | 100 | Gens of connection bulking in Phase 0 |
+| curriculum | phase0_dataset | db_w40_d3_mar03.npz | Expert dataset for Phase 0 |
 | hall_of_fame | hof_size | 50 | Max HOF entries |
 
 ## Source Layout
@@ -220,14 +297,14 @@ src/
   sueca_solver/src/         # Pure game engine (rlib)
     engine.rs               # Bitboard state, card logic, beats
     simulator.rs            # Game wrapper with void tracking
-    belief.rs               # Belief state encoder (30 floats)
+    belief.rs               # Belief state encoder (33 floats)
     heuristic.rs            # Card selection, intent resolver
     pimc.rs                 # PIMC solver, late-game minimax switch
     search.rs               # Alpha-beta, Zobrist hashing, TT
     rng.rs                  # Shared LCG RNG
     constants.rs            # WANN dimension constants
   sueca_wann/src/           # Training binary + CLI
-    main.rs                 # CLI (train, benchmark, compile-rules, generate-dataset)
+    main.rs                 # CLI (train, benchmark, compile-rules, generate-dataset, optimize-weights)
     train.rs                # Training loop, Phase 0/1 dispatch
     evaluator.rs            # Bot simulation, delta-fitness evaluation
     wann_network.rs         # CSR-format WANN inference
@@ -237,6 +314,7 @@ src/
     mutations.rs            # NEAT mutation operators, innovation registry
     hall_of_fame.rs         # HOF with sampling
     map_elites.rs           # MAP-Elites quality-diversity archive
+    optimize.rs             # Differential Evolution weight optimization
     config.rs               # TOML config deserialization
     checkpoint.rs           # Training state save/load
     compile_rules.rs        # Rule compiler, DOT export, PNG rendering
@@ -244,11 +322,21 @@ src/
     dataset_gen.rs          # PIMC expert dataset generation
     dataset.rs              # Expert dataset loading (NPZ)
     constants.rs            # Evolutionary hyperparameters, feature names
+  sueca_wasm/src/           # WASM bindings for browser play
+    lib.rs                  # WASM entry point, game loop for frontend
 configs/
   default.toml              # Production hyperparameters
   test.toml                 # Test run hyperparameters
+  pgo_bench.toml            # PGO benchmarking config
+  pgo_profile.toml          # PGO profiling config
+  profile_phase0.toml       # Phase 0 profiling config
+  profile_phase1.toml       # Phase 1 profiling config
 scripts/
   compare_runs.py           # Cross-run visualization
+  plot_training.py          # Single-run training plot
+  analyze_dataset.py        # Dataset statistics with plots
+  dataset_analysis.py       # Comprehensive dataset text report
+  compile_all.py            # Batch rule compilation
 ```
 
 ## Implemented Milestones & Advanced Search

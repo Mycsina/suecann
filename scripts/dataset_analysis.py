@@ -6,6 +6,8 @@ Usage: python scripts/dataset_analysis.py [dataset.npz]
 import sys
 import numpy as np
 
+EXPECTED_FEATURES = 33
+
 # input name → description
 INPUT_NAMES = [
     "Has_Led_Suit", "Has_Trump", "Led_Suit_Power", "Trump_Power",
@@ -18,6 +20,7 @@ INPUT_NAMES = [
     "Side0_Depletion", "Side0_Ace_Played", "Side0_7_Played",
     "Side1_Depletion", "Side1_Ace_Played", "Side1_7_Played",
     "Side2_Depletion", "Side2_Ace_Played", "Side2_7_Played",
+    "Points_Secured_Us", "Known_Void_Suits_Count", "Depleted_Suits_Count",
 ]
 
 INTENT_NAMES = ["MAX_FORCE", "MIN_FORCE", "EFFICIENT_WIN", "EQUITY_BUILDER"]
@@ -30,9 +33,18 @@ def analyze(dataset_path: str):
     masks = d["legal_masks"]
 
     n = len(intents)
+    n_features = states.shape[1]
     print(f"Dataset: {dataset_path}")
     print(f"Entries: {n:,}")
-    print(f"State dim: {states.shape[1]}")
+    print(f"State dim: {n_features}")
+
+    # Feature count validation
+    if n_features != EXPECTED_FEATURES:
+        print(f"  ⚠ WARNING: Dataset has {n_features} features, expected {EXPECTED_FEATURES}.")
+        if n_features < EXPECTED_FEATURES:
+            print(f"    Missing features: {INPUT_NAMES[n_features:]}")
+        else:
+            print(f"    Extra {n_features - EXPECTED_FEATURES} features beyond expected.")
     print()
 
     # --- 1. Intent distribution ---
