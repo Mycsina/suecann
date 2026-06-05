@@ -13,8 +13,8 @@ The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the R
 
 ## Tooling
 
-- **Rust workspace**: `src/sueca_solver` (pure game engine, rlib only) and `src/sueca_wann` (training binary + CLI)
-- **No PyO3 / FFI** — all game simulation, benchmarking, rule compilation, and dataset generation run natively in Rust
+- **Rust workspace**: `src/sueca_solver` (pure game engine, rlib only),`src/sueca_wann` (training binary + CLI) and `src/sueca_wasm` (WASM + interactive frontend in `frontend` folder)
+
 - **Build Training Binary**: `cargo build -p sueca_wann --release`
 - **Testing**: `cargo test --all`
 - **Linting**: `cargo clippy --all`

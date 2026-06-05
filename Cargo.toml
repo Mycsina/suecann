@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "src/sueca_solver",
-    "src/sueca_wann"
+    "src/sueca_wann",
+    "src/sueca_wasm"
 ]
 resolver = "2"
 

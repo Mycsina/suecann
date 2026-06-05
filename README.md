@@ -108,6 +108,26 @@ Creates `checkpoints/YYYY-MM-DD-N/` with training stats, checkpointed genomes, a
 cargo test --all
 ```
 
+### Web Play Interface
+
+To build and run the web play interface (React + WASM game loop):
+
+1. **Build WASM game engine:**
+   ```bash
+   cd src/sueca_wasm
+   RUSTFLAGS="" wasm-pack build --target web --out-dir ../../frontend/src/wasm
+   cd ../..
+   ```
+
+2. **Run dev server:**
+   ```bash
+   cd frontend
+   bun dev
+   ```
+
+Open `http://localhost:5173` in your browser to play Sueca vs WANN/heuristics.
+
+
 ### Benchmarking
 
 ```bash

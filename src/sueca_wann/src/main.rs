@@ -1,22 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 
-mod benchmark;
-mod checkpoint;
-mod compile_rules;
-mod config;
-mod constants;
-mod dataset;
-mod dataset_gen;
-mod evaluator;
-mod genome;
-mod hall_of_fame;
-mod map_elites;
-mod mutations;
-mod optimize;
-mod population;
-mod species;
-mod train;
-mod wann_network;
+use sueca_wann::{benchmark, checkpoint, compile_rules, config, constants, dataset, dataset_gen, evaluator, genome, hall_of_fame, map_elites, mutations, optimize, population, species, train, wann_network};
 
 use clap::{Parser, Subcommand};
 
@@ -195,7 +179,7 @@ fn run_benchmark(
     if opt_weights_path.exists() {
         println!("Detected optimized weights file: {}", opt_weights_path.display());
         if let Ok(file) = std::fs::File::open(&opt_weights_path) {
-            if let Ok(report) = serde_json::from_reader::<_, crate::optimize::OptimizedWeightsReport>(file) {
+            if let Ok(report) = serde_json::from_reader::<_, sueca_wann::optimize::OptimizedWeightsReport>(file) {
                 println!("Loaded optimized weights (best fitness: {:.4})", report.best_fitness);
                 opt_lead = Some(report.lead_weights);
                 opt_follow = Some(report.follow_weights);
