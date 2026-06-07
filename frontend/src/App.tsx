@@ -3,6 +3,7 @@ import init, { WannSuecaGameSession } from './wasm/sueca_wasm';
 import wasmUrl from './wasm/sueca_wasm_bg.wasm?url';
 import bestGenome from './best_genome_final.json';
 import Card from './components/Card';
+import NetworkInspectorPanel, { type NetworkEval } from './components/NetworkInspectorPanel';
 
 interface WasmLastTrick {
   cards: number[];
@@ -74,17 +75,26 @@ export const App: React.FC = () => {
   const [showGameOverModal, setShowGameOverModal] = useState(false);
   
   const [showSettings, setShowSettings] = useState(false);
-  const [showVoidTracker, setShowVoidTracker] = useState(true);
-  const [showMatchLogs, setShowMatchLogs] = useState(true);
-  const [voidTrackerPos, setVoidTrackerPos] = useState<'left' | 'right'>('left');
-  const [matchLogsPos, setMatchLogsPos] = useState<'left' | 'right'>('right');
+  const [showVoidTracker, setShowVoidTracker] = useState(false);
+  const [showMatchLogs, setShowMatchLogs] = useState(false);
   const [voidTrackerExpanded, setVoidTrackerExpanded] = useState(false);
   const [matchLogsExpanded, setMatchLogsExpanded] = useState(false);
+  // Drag state for sidebar panels — null means use CSS positioning
+  const [voidTrackerOffset, setVoidTrackerOffset] = useState<{ x: number; y: number } | null>(null);
+  const [matchLogsOffset, setMatchLogsOffset] = useState<{ x: number; y: number } | null>(null);
+  const [draggingSidebar, setDraggingSidebar] = useState<'void' | 'logs' | null>(null);
+  const sidebarDragRef = useRef({ startX: 0, startY: 0, origX: 0, origY: 0 });
+  const sidebarDragMoved = useRef(false);
   const [animSpeed, setAnimSpeed] = useState<number>(1);
   const [botTypes, setBotTypes] = useState<number[]>([0, 0, 0]); // Seat 1, 2, 3
   const [trickOffsets, setTrickOffsets] = useState<Record<number, { dx: number; dy: number; rot: number }>>({});
+  const [autoContinue, setAutoContinue] = useState(true);
+  const [inspectingSeat, setInspectingSeat] = useState<number | null>(null);
+  const [networkEval, setNetworkEval] = useState<NetworkEval | null>(null);
+  const [pendingContinue, setPendingContinue] = useState(false);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const pendingResolveRef = useRef<{ lastTrick: WasmLastTrick; isOver: boolean; gp02: number; gp13: number; trickNumber: number; team02Score: number; team13Score: number } | null>(null);
 
   const getPlayerName = (seat: number, currentBotTypes = botTypes) => {
     if (seat === 0) return 'You';
@@ -114,9 +124,96 @@ export const App: React.FC = () => {
     if (session) {
       session.set_bot_types(newTypes[0], newTypes[1], newTypes[2]);
     }
+    // Close inspector if the inspected seat is no longer WANN
+    const seat = index + 1; // index 0→seat 1, index 1→seat 2, index 2→seat 3
+    if (inspectingSeat === seat && value !== 0) {
+      setInspectingSeat(null);
+      setNetworkEval(null);
+    }
     const targetName = index === 1 ? 'Partner' : index === 0 ? 'Opponent L' : 'Opponent R';
     const botLabel = value === 0 ? 'WANN Brain' : value === 1 ? 'Initial Bot' : 'Hard Bot';
     setLogs((prev) => [...prev, `Configured ${targetName} to play as ${botLabel}.`]);
+  };
+
+  // Shared trick resolution — called when a trick completes (player or bot)
+  const resolveTrick = (
+    nextState: WasmGameState,
+    lastT: WasmLastTrick,
+  ): boolean => {
+    const shouldPause = !autoContinue || inspectingSeat !== null;
+
+    setGameState(nextState);
+    setVisualTrick({
+      cards: [...lastT.cards],
+      seats: [...lastT.seats],
+    });
+    setIsResolvingTrick(true);
+    setTrickWinnerMsg(`${getPlayerName(lastT.winner)} wins the trick (+${lastT.points} points)`);
+
+    pendingResolveRef.current = {
+      lastTrick: lastT,
+      isOver: nextState.is_over,
+      gp02: nextState.game_points_02,
+      gp13: nextState.game_points_13,
+      trickNumber: nextState.trick_number,
+      team02Score: nextState.team_02_score,
+      team13Score: nextState.team_13_score,
+    };
+
+    if (shouldPause) {
+      setPendingContinue(true);
+      return true;
+    }
+
+    // Auto-continue after delay
+    setTimeout(() => {
+      finalizeTrickResolution();
+    }, 1500 / animSpeed);
+    return false;
+  };
+
+  // Finalize trick resolution: clear visuals, update dots/logs/scores
+  const finalizeTrickResolution = () => {
+    const pending = pendingResolveRef.current;
+    if (!pending) return;
+
+    setVisualTrick({ cards: [], seats: [] });
+    setTrickDots((prev) => {
+      const updated = [...prev];
+      updated[pending.trickNumber - 1] = (pending.lastTrick.winner % 2 === 0) ? 'us' : 'them';
+      return updated;
+    });
+    setLogs((prev) => [...prev, `--- Trick won by ${getPlayerName(pending.lastTrick.winner)} (${pending.lastTrick.points} pts) ---`]);
+    setTrickWinnerMsg(null);
+    setIsResolvingTrick(false);
+    setPendingContinue(false);
+    isBotThinkingRef.current = false;
+    setIsBotThinking(false);
+
+    generateTrickOffsets();
+
+    if (pending.isOver) {
+      setGpScoreUs((prev) => prev + pending.gp02);
+      setGpScoreThem((prev) => prev + pending.gp13);
+      setDealHistory((prev) => [...prev, {
+        id: crypto.randomUUID(),
+        usPts: pending.team02Score,
+        themPts: pending.team13Score,
+        usGP: pending.gp02,
+        themGP: pending.gp13,
+      }]);
+    }
+
+    pendingResolveRef.current = null;
+  };
+
+  // Unified Continue handler: advances past trick resolution or between-card pauses
+  const handleContinue = () => {
+    if (isResolvingTrick) {
+      finalizeTrickResolution();
+    } else {
+      setPendingContinue(false);
+    }
   };
 
 
@@ -179,6 +276,10 @@ export const App: React.FC = () => {
       setTrickWinnerMsg(null);
       setIsResolvingTrick(false);
       setIsBotThinking(false);
+      setPendingContinue(false);
+      setInspectingSeat(null);
+      setNetworkEval(null);
+      pendingResolveRef.current = null;
       setTrickDots(Array(10).fill(null));
       setErrorMsg(null);
     } catch (err: any) {
@@ -199,9 +300,46 @@ export const App: React.FC = () => {
     }
   }, [wasmReady]);
 
+  // Sidebar panel drag effect
+  useEffect(() => {
+    if (!draggingSidebar) return;
+    sidebarDragMoved.current = false;
+    const onMove = (e: MouseEvent) => {
+      const dx = e.clientX - sidebarDragRef.current.startX;
+      const dy = e.clientY - sidebarDragRef.current.startY;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) sidebarDragMoved.current = true;
+      const offset = {
+        x: sidebarDragRef.current.origX + dx,
+        y: Math.max(0, sidebarDragRef.current.origY + dy),
+      };
+      if (draggingSidebar === 'void') setVoidTrackerOffset(offset);
+      else setMatchLogsOffset(offset);
+    };
+    const onUp = () => setDraggingSidebar(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, [draggingSidebar]);
+
+  // Poll WANN eval data when inspector is active.
+  // Depends on gameState (card plays, trick completion) AND isResolvingTrick
+  // (Continue click, trick cleanup) to refresh at every visible state transition.
+  useEffect(() => {
+    if (inspectingSeat === null || !session || !gameState || gameState.is_over) {
+      if (inspectingSeat === null) setNetworkEval(null);
+      return;
+    }
+    try {
+      const evalJson = session.get_realtime_bot_eval(inspectingSeat);
+      setNetworkEval(JSON.parse(evalJson) as NetworkEval);
+    } catch {
+      // Silently ignore — eval may fail during state transitions
+    }
+  }, [gameState, inspectingSeat, session, isResolvingTrick]);
+
   // Auto-transition to next deal or game over
   useEffect(() => {
-    if (gameState && gameState.is_over && !isResolvingTrick && !showGameOverModal) {
+    if (gameState && gameState.is_over && !isResolvingTrick && !pendingContinue && !showGameOverModal) {
       if (gpScoreUs >= gpLimit || gpScoreThem >= gpLimit) {
         setShowGameOverModal(true);
       } else {
@@ -209,11 +347,11 @@ export const App: React.FC = () => {
         startNewGame(undefined, false);
       }
     }
-  }, [gameState, isResolvingTrick, gpScoreUs, gpScoreThem, gpLimit, showGameOverModal]);
+  }, [gameState, isResolvingTrick, pendingContinue, gpScoreUs, gpScoreThem, gpLimit, showGameOverModal]);
 
   // Bot Turn Trigger Loop
   useEffect(() => {
-    if (!session || !gameState || gameState.is_over || isResolvingTrick || isBotThinkingRef.current) return;
+    if (!session || !gameState || gameState.is_over || isResolvingTrick || pendingContinue || isBotThinkingRef.current) return;
 
     const currentPlayer = gameState.current_player;
     if (currentPlayer === 0) return; // Player's turn, wait for input
@@ -251,50 +389,16 @@ export const App: React.FC = () => {
         if (isCompleting) {
           // This bot completed the trick
           const lastT = nextState.last_trick!;
-          // Update game state immediately so the played card leaves the hand
-          setGameState(nextState);
-          setVisualTrick({
-            cards: [...gameState.current_trick, playedCard],
-            seats: [...gameState.current_trick_seats, currentPlayer],
-          });
-
-          setIsResolvingTrick(true);
-          setTrickWinnerMsg(`${getPlayerName(lastT.winner)} wins the trick (+${lastT.points} points)`);
-
-          // Delay clearing the trick visuals, not the game state
-          setTimeout(() => {
-            setVisualTrick({ cards: [], seats: [] });
-            setTrickDots((prev) => {
-              const updated = [...prev];
-              updated[gameState.trick_number] = (lastT.winner % 2 === 0) ? 'us' : 'them';
-              return updated;
-            });
-            setLogs((prev) => [...prev, `--- Trick won by ${getPlayerName(lastT.winner)} (${lastT.points} pts) ---`]);
-            setTrickWinnerMsg(null);
-            setIsResolvingTrick(false);
-            isBotThinkingRef.current = false;
-            setIsBotThinking(false);
-
-            generateTrickOffsets();
-
-            if (nextState.is_over) {
-              setGpScoreUs((prev) => prev + nextState.game_points_02);
-              setGpScoreThem((prev) => prev + nextState.game_points_13);
-              setDealHistory(prev => [...prev, {
-                id: crypto.randomUUID(),
-                usPts: nextState.team_02_score,
-                themPts: nextState.team_13_score,
-                usGP: nextState.game_points_02,
-                themGP: nextState.game_points_13
-              }]);
-            }
-          }, 1500 / animSpeed);
+          resolveTrick(nextState, lastT);
+          // If resolveTrick returned true (paused), leave isBotThinkingRef true
+          // so the guard stays up until the user clicks Continue
         } else {
           // Standard play, not completing the trick
           setGameState(nextState);
           setVisualTrick({ cards: nextState.current_trick, seats: nextState.current_trick_seats });
           isBotThinkingRef.current = false;
           setIsBotThinking(false);
+          if (!autoContinue) setPendingContinue(true);
         }
       } catch (err: any) {
         console.error(err);
@@ -305,7 +409,7 @@ export const App: React.FC = () => {
     };
 
     triggerBotPlay();
-  }, [gameState?.current_player, gameState?.trick_number, isResolvingTrick, session, animSpeed, botTypes]);
+  }, [gameState?.current_player, gameState?.trick_number, isResolvingTrick, pendingContinue, session, animSpeed, botTypes]);
 
   // Handle Player Card Play
   const handlePlayerCardPlay = async (card: number) => {
@@ -325,46 +429,12 @@ export const App: React.FC = () => {
       if (isCompleting) {
         // Player completed the trick
         const lastT = nextState.last_trick!;
-        // Update game state immediately so the played card leaves the hand
-        setGameState(nextState);
-        setVisualTrick({
-          cards: [...gameState.current_trick, card],
-          seats: [...gameState.current_trick_seats, 0],
-        });
-
-        setIsResolvingTrick(true);
-        setTrickWinnerMsg(`${getPlayerName(lastT.winner)} wins the trick (+${lastT.points} points)`);
-
-        // Delay clearing the trick visuals, not the game state
-        setTimeout(() => {
-          setVisualTrick({ cards: [], seats: [] });
-          setTrickDots((prev) => {
-            const updated = [...prev];
-            updated[gameState.trick_number] = (lastT.winner % 2 === 0) ? 'us' : 'them';
-            return updated;
-          });
-          setLogs((prev) => [...prev, `--- Trick won by ${getPlayerName(lastT.winner)} (${lastT.points} pts) ---`]);
-          setTrickWinnerMsg(null);
-          setIsResolvingTrick(false);
-
-          generateTrickOffsets();
-
-          if (nextState.is_over) {
-            setGpScoreUs((prev) => prev + nextState.game_points_02);
-            setGpScoreThem((prev) => prev + nextState.game_points_13);
-            setDealHistory(prev => [...prev, {
-              id: crypto.randomUUID(),
-              usPts: nextState.team_02_score,
-              themPts: nextState.team_13_score,
-              usGP: nextState.game_points_02,
-              themGP: nextState.game_points_13
-            }]);
-          }
-        }, 1500 / animSpeed);
+        resolveTrick(nextState, lastT);
       } else {
         // Standard play
         setGameState(nextState);
         setVisualTrick({ cards: nextState.current_trick, seats: nextState.current_trick_seats });
+        if (!autoContinue) setPendingContinue(true);
       }
     } catch (err: any) {
       console.error(err);
@@ -427,6 +497,14 @@ export const App: React.FC = () => {
               <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Seed</span>
               <span style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem' }}>{seed}</span>
             </div>
+            {pendingContinue && (isResolvingTrick || gameState.current_player !== 0) && (
+              <>
+                <div style={{ width: '1px', height: '24px', background: 'rgba(255,255,255,0.1)' }} />
+                <button type="button" className="btn-continue-header" onClick={handleContinue}>
+                  Continue ▶
+                </button>
+              </>
+            )}
           </div>
           {/* Trick outcome dots */}
           <div className="trick-indicator-list" style={{ margin: '0' }}>
@@ -473,15 +551,44 @@ export const App: React.FC = () => {
         
         {/* Void Tracker */}
         {showVoidTracker && (
-          <div className={`sidebar-panel void-tracker-panel side-${voidTrackerPos} ${voidTrackerExpanded ? 'expanded' : ''}`}>
-            <button 
-              type="button"
-              className="panel-title panel-title-btn" 
-              onClick={() => setVoidTrackerExpanded(!voidTrackerExpanded)}
-              style={{ borderBottom: voidTrackerExpanded ? undefined : 'none' }}
+          <div
+            className={`sidebar-panel void-tracker-panel side-left ${voidTrackerExpanded ? 'expanded' : ''} ${draggingSidebar === 'void' ? 'dragging' : ''}`}
+            style={voidTrackerOffset ? { left: voidTrackerOffset.x, top: voidTrackerOffset.y, right: 'auto' } : undefined}
+          >
+            <div
+              className="panel-header"
+              onMouseDown={(e) => {
+                if ((e.target as HTMLElement).closest('button')) return;
+                const panel = e.currentTarget.parentElement!;
+                const panelRect = panel.getBoundingClientRect();
+                const parentRect = panel.offsetParent!.getBoundingClientRect();
+                sidebarDragRef.current = {
+                  startX: e.clientX, startY: e.clientY,
+                  origX: panelRect.left - parentRect.left,
+                  origY: panelRect.top - parentRect.top,
+                };
+                setDraggingSidebar('void');
+                e.preventDefault();
+              }}
             >
-              Void Tracker {voidTrackerExpanded ? '▼' : '▶'}
-            </button>
+              <span
+                className="panel-title-text"
+                onClick={() => {
+                  if (sidebarDragMoved.current) { sidebarDragMoved.current = false; return; }
+                  setVoidTrackerExpanded(!voidTrackerExpanded);
+                }}
+              >
+                Void Tracker
+              </span>
+              <button
+                type="button"
+                className="panel-minimize-btn"
+                onClick={() => setVoidTrackerExpanded(!voidTrackerExpanded)}
+                title={voidTrackerExpanded ? 'Collapse' : 'Expand'}
+              >
+                {voidTrackerExpanded ? '−' : '□'}
+              </button>
+            </div>
             {voidTrackerExpanded && (
               <div className="voids-grid">
                 {[0, 1, 2, 3].map((playerIdx) => (
@@ -492,8 +599,8 @@ export const App: React.FC = () => {
                     {SUIT_SYMBOLS.map((sym, suitIdx) => {
                       const isVoid = (gameState.voids[playerIdx] & (1 << suitIdx)) !== 0;
                       return (
-                        <div 
-                          key={suitIdx} 
+                        <div
+                          key={suitIdx}
                           className={`void-item ${isVoid ? 'void-active' : ''}`}
                           title={`${getPlayerName(playerIdx)} void in ${SUIT_NAMES[suitIdx]}`}
                         >
@@ -510,15 +617,44 @@ export const App: React.FC = () => {
 
         {/* Match Logs */}
         {showMatchLogs && (
-          <div className={`sidebar-panel match-logs-panel side-${matchLogsPos} ${matchLogsExpanded ? 'expanded' : ''}`}>
-            <button 
-              type="button"
-              className="panel-title panel-title-btn" 
-              onClick={() => setMatchLogsExpanded(!matchLogsExpanded)}
-              style={{ borderBottom: matchLogsExpanded ? undefined : 'none' }}
+          <div
+            className={`sidebar-panel match-logs-panel side-right ${matchLogsExpanded ? 'expanded' : ''} ${draggingSidebar === 'logs' ? 'dragging' : ''}`}
+            style={matchLogsOffset ? { left: matchLogsOffset.x, top: matchLogsOffset.y, right: 'auto' } : undefined}
+          >
+            <div
+              className="panel-header"
+              onMouseDown={(e) => {
+                if ((e.target as HTMLElement).closest('button')) return;
+                const panel = e.currentTarget.parentElement!;
+                const panelRect = panel.getBoundingClientRect();
+                const parentRect = panel.offsetParent!.getBoundingClientRect();
+                sidebarDragRef.current = {
+                  startX: e.clientX, startY: e.clientY,
+                  origX: panelRect.left - parentRect.left,
+                  origY: panelRect.top - parentRect.top,
+                };
+                setDraggingSidebar('logs');
+                e.preventDefault();
+              }}
             >
-              Match Logs {matchLogsExpanded ? '▼' : '▶'}
-            </button>
+              <span
+                className="panel-title-text"
+                onClick={() => {
+                  if (sidebarDragMoved.current) { sidebarDragMoved.current = false; return; }
+                  setMatchLogsExpanded(!matchLogsExpanded);
+                }}
+              >
+                Match Logs
+              </span>
+              <button
+                type="button"
+                className="panel-minimize-btn"
+                onClick={() => setMatchLogsExpanded(!matchLogsExpanded)}
+                title={matchLogsExpanded ? 'Collapse' : 'Expand'}
+              >
+                {matchLogsExpanded ? '−' : '□'}
+              </button>
+            </div>
             {matchLogsExpanded && (
               <div className="log-list">
                 {logs.map((log, idx) => (
@@ -533,18 +669,38 @@ export const App: React.FC = () => {
 
         {/* SEAT: TOP (Partner) */}
         <div className="seat-top">
-            <div className={`player-info-card ${gameState.current_player === 2 && !gameState.is_over ? 'active-turn' : ''}`}>
+            <div className={`player-info-card ${gameState.current_player === 2 && !gameState.is_over ? 'active-turn' : ''} ${inspectingSeat === 2 ? 'inspected' : ''}`}>
               <span className="player-role">Partner</span>
               <span className="player-name">{getPlayerName(2)}</span>
+              {botTypes[1] === 0 && (
+                <button
+                  type="button"
+                  className={`btn-inspect-brain ${inspectingSeat === 2 ? 'active' : ''}`}
+                  onClick={() => setInspectingSeat(inspectingSeat === 2 ? null : 2)}
+                  title={inspectingSeat === 2 ? 'Close inspector' : 'Inspect WANN brain'}
+                >
+                  🧠
+                </button>
+              )}
             </div>
           </div>
 
           <div className="center-row">
             {/* SEAT: LEFT (Opponent L) */}
             <div className="seat-left">
-              <div className={`player-info-card ${gameState.current_player === 1 && !gameState.is_over ? 'active-turn' : ''}`}>
+              <div className={`player-info-card ${gameState.current_player === 1 && !gameState.is_over ? 'active-turn' : ''} ${inspectingSeat === 1 ? 'inspected' : ''}`}>
                 <span className="player-role">Opponent L</span>
                 <span className="player-name">{getPlayerName(1)}</span>
+                {botTypes[0] === 0 && (
+                  <button
+                    type="button"
+                    className={`btn-inspect-brain ${inspectingSeat === 1 ? 'active' : ''}`}
+                    onClick={() => setInspectingSeat(inspectingSeat === 1 ? null : 1)}
+                    title={inspectingSeat === 1 ? 'Close inspector' : 'Inspect WANN brain'}
+                  >
+                    🧠
+                  </button>
+                )}
               </div>
             </div>
 
@@ -597,9 +753,19 @@ export const App: React.FC = () => {
 
             {/* SEAT: RIGHT (Opponent R) */}
             <div className="seat-right">
-              <div className={`player-info-card ${gameState.current_player === 3 && !gameState.is_over ? 'active-turn' : ''}`}>
+              <div className={`player-info-card ${gameState.current_player === 3 && !gameState.is_over ? 'active-turn' : ''} ${inspectingSeat === 3 ? 'inspected' : ''}`}>
                 <span className="player-role">Opponent R</span>
                 <span className="player-name">{getPlayerName(3)}</span>
+                {botTypes[2] === 0 && (
+                  <button
+                    type="button"
+                    className={`btn-inspect-brain ${inspectingSeat === 3 ? 'active' : ''}`}
+                    onClick={() => setInspectingSeat(inspectingSeat === 3 ? null : 3)}
+                    title={inspectingSeat === 3 ? 'Close inspector' : 'Inspect WANN brain'}
+                  >
+                    🧠
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -643,139 +809,121 @@ export const App: React.FC = () => {
         </div>
       </div>
 
+      {/* NETWORK INSPECTOR PANEL */}
+      {inspectingSeat !== null && (
+        <NetworkInspectorPanel
+          genome={(networkEval?.brain_type === 'follow') ? bestGenome.follow : bestGenome.lead}
+          evalData={networkEval}
+          playerName={getPlayerName(inspectingSeat)}
+          onClose={() => {
+            setInspectingSeat(null);
+            setNetworkEval(null);
+            // Pause persists — user must click Continue explicitly
+          }}
+        />
+      )}
+
       {/* SETTINGS OVERLAY MODAL */}
       {showSettings && (
         // eslint-disable-next-line react-doctor/prefer-tag-over-role
         <div className="settings-overlay" role="button" tabIndex={0} onClick={() => setShowSettings(false)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setShowSettings(false); }}>
           <div className="settings-content" role="presentation" onClick={(e) => e.stopPropagation()}>
             <h3 className="settings-title">Match Settings</h3>
-            
-            <div className="setting-row">
-              <span className="setting-label">Match GP Limit</span>
-              <div className="setting-control">
-                <select 
-                  value={gpLimit} 
-                  onChange={(e) => setGpLimit(parseInt(e.target.value))}
-                >
-                  <option value={2}>2 GP</option>
-                  <option value={4}>4 GP</option>
-                  <option value={10}>10 GP</option>
-                  <option value={20}>20 GP</option>
-                </select>
-              </div>
-            </div>
 
-            <div className="setting-row">
-              <span className="setting-label">Animation Speed</span>
-              <div className="setting-control">
-                <select 
-                  value={animSpeed} 
-                  onChange={(e) => setAnimSpeed(parseInt(e.target.value))}
-                >
-                  <option value={1}>1x (Normal)</option>
-                  <option value={2}>2x (Fast)</option>
-                  <option value={4}>4x (Insane)</option>
-                </select>
-              </div>
-            </div>
+            <div className="settings-grid">
+              {/* ── Left Column: General Settings ── */}
+              <div className="settings-col">
+                <h4 className="settings-section-title">General</h4>
 
-            <div className="setting-row">
-              <span className="setting-label">Show Void Tracker</span>
-              <div className="setting-control">
-                <label className="toggle-switch" aria-label="Show Void Tracker">
-                  <input 
-                    type="checkbox" 
-                    checked={showVoidTracker} 
-                    onChange={(e) => setShowVoidTracker(e.target.checked)}
-                  />
-                  <span className="slider"></span>
-                </label>
-              </div>
-            </div>
+                <div className="setting-row">
+                  <span className="setting-label">Match GP Limit</span>
+                  <div className="setting-control">
+                    <select value={gpLimit} onChange={(e) => setGpLimit(parseInt(e.target.value))}>
+                      <option value={2}>2 GP</option>
+                      <option value={4}>4 GP</option>
+                      <option value={10}>10 GP</option>
+                      <option value={20}>20 GP</option>
+                    </select>
+                  </div>
+                </div>
 
-            <div className="setting-row">
-              <span className="setting-label">Void Tracker Side</span>
-              <div className="setting-control">
-                <select 
-                  value={voidTrackerPos} 
-                  onChange={(e) => setVoidTrackerPos(e.target.value as 'left' | 'right')}
-                >
-                  <option value="left">Left</option>
-                  <option value="right">Right</option>
-                </select>
-              </div>
-            </div>
+                <div className="setting-row">
+                  <span className="setting-label">Animation Speed</span>
+                  <div className="setting-control">
+                    <select value={animSpeed} onChange={(e) => setAnimSpeed(parseInt(e.target.value))}>
+                      <option value={1}>1x (Normal)</option>
+                      <option value={2}>2x (Fast)</option>
+                      <option value={4}>4x (Insane)</option>
+                    </select>
+                  </div>
+                </div>
 
-            <div className="setting-row">
-              <span className="setting-label">Show Match Logs</span>
-              <div className="setting-control">
-                <label className="toggle-switch" aria-label="Show Match Logs">
-                  <input 
-                    type="checkbox" 
-                    checked={showMatchLogs} 
-                    onChange={(e) => setShowMatchLogs(e.target.checked)}
-                  />
-                  <span className="slider"></span>
-                </label>
-              </div>
-            </div>
+                <div className="setting-row">
+                  <span className="setting-label">Auto-continue Tricks</span>
+                  <div className="setting-control">
+                    <label className="toggle-switch" aria-label="Auto-continue Tricks">
+                      <input type="checkbox" checked={autoContinue} onChange={(e) => setAutoContinue(e.target.checked)} />
+                      <span className="slider"></span>
+                    </label>
+                  </div>
+                </div>
 
-            <div className="setting-row">
-              <span className="setting-label">Match Logs Side</span>
-              <div className="setting-control">
-                <select 
-                  value={matchLogsPos} 
-                  onChange={(e) => setMatchLogsPos(e.target.value as 'left' | 'right')}
-                >
-                  <option value="left">Left</option>
-                  <option value="right">Right</option>
-                </select>
-              </div>
-            </div>
+                <div className="setting-row">
+                  <span className="setting-label">Show Void Tracker</span>
+                  <div className="setting-control">
+                    <label className="toggle-switch" aria-label="Show Void Tracker">
+                      <input type="checkbox" checked={showVoidTracker} onChange={(e) => setShowVoidTracker(e.target.checked)} />
+                      <span className="slider"></span>
+                    </label>
+                  </div>
+                </div>
 
-            {/* Bot Configurations */}
-            <div style={{ borderTop: '1px solid rgba(255, 255, 255, 0.08)', marginTop: '15px', paddingTop: '15px' }}>
-              <h4 style={{ margin: '0 0 12px 0', fontSize: '0.9rem', color: 'var(--accent-cyan)' }}>Opponent & Partner Brains</h4>
-              
-              <div className="setting-row">
-                <span className="setting-label">Opponent L (Seat 1)</span>
-                <div className="setting-control">
-                  <select 
-                    value={botTypes[0]} 
-                    onChange={(e) => handleBotTypeChange(0, parseInt(e.target.value))}
-                  >
-                    <option value={0}>WANN Brain</option>
-                    <option value={1}>Initial Bot</option>
-                    <option value={2}>Hard Bot</option>
-                  </select>
+                <div className="setting-row">
+                  <span className="setting-label">Show Match Logs</span>
+                  <div className="setting-control">
+                    <label className="toggle-switch" aria-label="Show Match Logs">
+                      <input type="checkbox" checked={showMatchLogs} onChange={(e) => setShowMatchLogs(e.target.checked)} />
+                      <span className="slider"></span>
+                    </label>
+                  </div>
                 </div>
               </div>
 
-              <div className="setting-row">
-                <span className="setting-label">Partner (Seat 2)</span>
-                <div className="setting-control">
-                  <select 
-                    value={botTypes[1]} 
-                    onChange={(e) => handleBotTypeChange(1, parseInt(e.target.value))}
-                  >
-                    <option value={0}>WANN Brain</option>
-                    <option value={1}>Initial Bot</option>
-                    <option value={2}>Hard Bot</option>
-                  </select>
-                </div>
-              </div>
+              {/* ── Right Column: Bot Configurations ── */}
+              <div className="settings-col">
+                <h4 className="settings-section-title">Bot Brains</h4>
 
-              <div className="setting-row">
-                <span className="setting-label">Opponent R (Seat 3)</span>
-                <div className="setting-control">
-                  <select 
-                    value={botTypes[2]} 
-                    onChange={(e) => handleBotTypeChange(2, parseInt(e.target.value))}
-                  >
-                    <option value={0}>WANN Brain</option>
-                    <option value={1}>Initial Bot</option>
-                    <option value={2}>Hard Bot</option>
-                  </select>
+                <div className="setting-row">
+                  <span className="setting-label">Opponent L (Seat 1)</span>
+                  <div className="setting-control">
+                    <select value={botTypes[0]} onChange={(e) => handleBotTypeChange(0, parseInt(e.target.value))}>
+                      <option value={0}>WANN Brain</option>
+                      <option value={1}>Initial Bot</option>
+                      <option value={2}>Hard Bot</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="setting-row">
+                  <span className="setting-label">Partner (Seat 2)</span>
+                  <div className="setting-control">
+                    <select value={botTypes[1]} onChange={(e) => handleBotTypeChange(1, parseInt(e.target.value))}>
+                      <option value={0}>WANN Brain</option>
+                      <option value={1}>Initial Bot</option>
+                      <option value={2}>Hard Bot</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="setting-row">
+                  <span className="setting-label">Opponent R (Seat 3)</span>
+                  <div className="setting-control">
+                    <select value={botTypes[2]} onChange={(e) => handleBotTypeChange(2, parseInt(e.target.value))}>
+                      <option value={0}>WANN Brain</option>
+                      <option value={1}>Initial Bot</option>
+                      <option value={2}>Hard Bot</option>
+                    </select>
+                  </div>
                 </div>
               </div>
             </div>

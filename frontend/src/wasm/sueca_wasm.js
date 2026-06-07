@@ -19,6 +19,32 @@ export class WannSuecaGameSession {
         return ret;
     }
     /**
+     * Returns real-time WANN evaluation data for the inspector panel.
+     * Encodes belief state for the given seat, runs the appropriate brain
+     * (lead or follow), and returns beliefs, averaged outputs, and
+     * per-node activations as a JSON string.
+     * @param {number} seat_idx
+     * @returns {string}
+     */
+    get_realtime_bot_eval(seat_idx) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wannsuecagamesession_get_realtime_bot_eval(this.__wbg_ptr, seat_idx);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * @returns {string}
      */
     get_state_json() {

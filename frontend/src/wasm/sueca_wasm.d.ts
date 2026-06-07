@@ -5,6 +5,13 @@ export class WannSuecaGameSession {
     free(): void;
     [Symbol.dispose](): void;
     current_player(): number;
+    /**
+     * Returns real-time WANN evaluation data for the inspector panel.
+     * Encodes belief state for the given seat, runs the appropriate brain
+     * (lead or follow), and returns beliefs, averaged outputs, and
+     * per-node activations as a JSON string.
+     */
+    get_realtime_bot_eval(seat_idx: number): string;
     get_state_json(): string;
     is_game_over(): boolean;
     constructor(genome_json: string, seed: bigint);
@@ -19,6 +26,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wannsuecagamesession_free: (a: number, b: number) => void;
     readonly wannsuecagamesession_current_player: (a: number) => number;
+    readonly wannsuecagamesession_get_realtime_bot_eval: (a: number, b: number) => [number, number, number, number];
     readonly wannsuecagamesession_get_state_json: (a: number) => [number, number];
     readonly wannsuecagamesession_is_game_over: (a: number) => number;
     readonly wannsuecagamesession_new: (a: number, b: number, c: bigint) => [number, number, number];
@@ -26,10 +34,10 @@ export interface InitOutput {
     readonly wannsuecagamesession_play_player_card: (a: number, b: number) => [number, number];
     readonly wannsuecagamesession_set_bot_types: (a: number, b: number, c: number, d: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

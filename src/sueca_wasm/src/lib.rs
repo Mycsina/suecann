@@ -370,6 +370,68 @@ impl WannSuecaGameSession {
         }
     }
 
+    /// Returns real-time WANN evaluation data for the inspector panel.
+    /// Encodes belief state for the given seat, runs the appropriate brain
+    /// (lead or follow), and returns beliefs, averaged outputs, and
+    /// per-node activations as a JSON string.
+    pub fn get_realtime_bot_eval(&mut self, seat_idx: u8) -> Result<String, String> {
+        if seat_idx > 3 {
+            return Err(format!("Invalid seat index: {}", seat_idx));
+        }
+
+        // Encode belief state for the given seat
+        let belief = encode_belief_state(&self.game, seat_idx);
+
+        // Determine which brain to use.
+        // The belief encoder sets AmILeading=1.0 for ALL seats when the trick is
+        // empty (position 0), but only the actual current player is truly leading.
+        // For non-current seats we must check current_player directly so the
+        // inspector shows the correct brain type for every seat.
+        let is_leading = if self.game.current_trick_len == 0 {
+            seat_idx == self.game.state.current_player
+        } else {
+            (belief[sueca_wann::constants::BeliefFeature::AmILeading as usize] - 1.0).abs() < 1e-9
+        };
+        let network = if is_leading { &self.lead_brain } else { &self.follow_brain };
+        let brain_type = if is_leading { "lead" } else { "follow" };
+
+        // Accumulate averaged outputs across all sweep weights
+        let mut sum_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
+        for &w in &self.sweep_weights {
+            network.forward(&belief, w, &mut self.scratchpad);
+            for i in 0..sueca_solver::constants::OUTPUT_COUNT {
+                sum_outputs[i] +=
+                    self.scratchpad[sueca_solver::constants::OUTPUT_START + i];
+            }
+        }
+
+        let mut avg_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
+        for i in 0..sueca_solver::constants::OUTPUT_COUNT {
+            avg_outputs[i] = sum_outputs[i] / (self.sweep_weights.len() as f64);
+        }
+
+        // Run one more forward pass with weight=1.0 to capture per-node activations
+        network.forward(&belief, 1.0, &mut self.scratchpad);
+        let activations: Vec<f64> = self.scratchpad[0..network.num_nodes].to_vec();
+
+        #[derive(Serialize)]
+        struct RealtimeEval {
+            beliefs: Vec<f64>,
+            outputs: Vec<f64>,
+            activations: Vec<f64>,
+            brain_type: String,
+        }
+
+        let result = RealtimeEval {
+            beliefs: belief.to_vec(),
+            outputs: avg_outputs.to_vec(),
+            activations,
+            brain_type: brain_type.to_string(),
+        };
+
+        serde_json::to_string(&result).map_err(|e| format!("Serialization error: {}", e))
+    }
+
     pub fn is_game_over(&self) -> bool {
         self.game.state.is_terminal()
     }
