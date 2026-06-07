@@ -986,7 +986,7 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 2.4rem;
+  font-size: 1.8rem;
   cursor: pointer;
   transition: all 0.2s;
 }
