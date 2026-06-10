@@ -159,33 +159,49 @@ pub fn speciate(
         sp.members.clear();
     }
 
-    let mut unassigned: Vec<usize> = (0..genomes.len()).collect();
+    // First-fit speciation: each genome is tested against species serially
+    // until one accepts it. This replaces the previous best-fit approach
+    // (which checked ALL species for ALL genomes in parallel) with a
+    // genome-parallel, species-serial strategy. Most genomes find a home
+    // within the first few species, so average cost is O(P · Sp_checked · E)
+    // instead of O(P · Sp · E).
+    //
+    // We use a Mutex<Vec<usize>> for unassigned so we can remove elements
+    // in-place. The species list is processed serially per species but
+    // distance computation for unassigned genomes is parallel within each
+    // species.
 
-    // Assign to existing species — compute distances in parallel
+    let mut to_test: Vec<usize> = (0..genomes.len()).collect();
+
+    // Step 1: Assign to existing species (first-fit with parallel distance)
     for sp in species_list.iter_mut() {
-        if unassigned.is_empty() {
+        if to_test.is_empty() {
             break;
         }
 
-        // Parallel distance computation for all unassigned genomes
         let rep = &sp.representative;
-        let results: Vec<(usize, f64)> = unassigned
+        let results: Vec<(usize, f64)> = to_test
             .par_iter()
             .map(|&idx| (idx, compatibility_distance(rep, &genomes[idx], c1, c2, c3)))
             .collect();
 
-        let mut still_unassigned = Vec::new();
-        for (idx, dist) in results {
-            if dist < threshold {
-                sp.members.push(idx);
-            } else {
-                still_unassigned.push(idx);
-            }
-        }
-        unassigned = still_unassigned;
+        // Rebuild to_test: keep only unassigned genomes for next species
+        to_test = results
+            .into_iter()
+            .filter_map(|(idx, dist)| {
+                if dist < threshold {
+                    sp.members.push(idx);
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
+            .collect();
     }
 
-    // Create new species for remaining genomes
+    let mut unassigned = to_test;
+
+    // Step 2: Create new species for remaining genomes (same as before)
     while !unassigned.is_empty() {
         let idx = unassigned[0];
         let mut new_sp = Species::new(next_species_id, genomes[idx].copy(), created_at_gen);
@@ -219,6 +235,57 @@ pub fn speciate(
     }
 
     next_species_id
+}
+
+/// Merge excess species when the active count exceeds `max_species`.
+/// Smallest species are merged into their closest larger neighbour
+/// (by representative compatibility distance). This prevents species
+/// proliferation from bloating O(Sp · E) speciation costs.
+pub fn enforce_species_cap(
+    species_list: &mut Vec<Species>,
+    max_species: usize,
+    c1: f64,
+    c2: f64,
+    c3: f64,
+) {
+    let active_count = species_list.iter().filter(|sp| !sp.members.is_empty()).count();
+    if active_count <= max_species {
+        return;
+    }
+
+    // Sort species by member count ascending (smallest first to merge)
+    species_list.sort_by_key(|sp| sp.members.len());
+
+    while species_list.len() > max_species {
+        // Take the smallest species
+        let smallest = species_list.remove(0);
+        if smallest.members.is_empty() {
+            continue;
+        }
+
+        // Find the closest remaining species by representative distance
+        let mut best_idx = 0;
+        let mut best_dist = f64::INFINITY;
+        for (i, sp) in species_list.iter().enumerate() {
+            let dist = compatibility_distance(
+                &smallest.representative,
+                &sp.representative,
+                c1, c2, c3,
+            );
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = i;
+            }
+        }
+
+        // Merge members into the closest species
+        species_list[best_idx].members.extend(&smallest.members);
+        // Keep the better representative (higher best_fitness)
+        if smallest.best_fitness > species_list[best_idx].best_fitness {
+            species_list[best_idx].representative = smallest.representative;
+            species_list[best_idx].best_fitness = smallest.best_fitness;
+        }
+    }
 }
 
 #[cfg(test)]

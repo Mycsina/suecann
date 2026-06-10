@@ -74,11 +74,8 @@ pub fn run_matchup(
     use std::sync::Mutex;
 
     let num_threads = rayon::current_num_threads();
-    let scratchpads: Vec<Mutex<Vec<f64>>> = (0..num_threads)
-        .map(|_| Mutex::new(vec![0.0f64; 4096]))
-        .collect();
 
-    // Build combined lead and follow network lists for bot type resolution
+    // Build combined network lists for bot type resolution
     let mut all_lead_nets = Vec::new();
     let mut all_follow_nets = Vec::new();
     if let Some((lead, follow)) = bot_a_networks {
@@ -89,6 +86,18 @@ pub fn run_matchup(
         all_lead_nets.push(lead.clone());
         all_follow_nets.push(follow.clone());
     }
+
+    // Allocate scratchpad large enough for weight-batched forward pass
+    let max_nodes = all_lead_nets
+        .iter()
+        .chain(all_follow_nets.iter())
+        .map(|n| n.num_nodes)
+        .max()
+        .unwrap_or(256);
+    let scratchpad_size = (max_nodes * sweep_weights.len()).max(4096);
+    let scratchpads: Vec<Mutex<Vec<f64>>> = (0..num_threads)
+        .map(|_| Mutex::new(vec![0.0f64; scratchpad_size]))
+        .collect();
 
     let results: Vec<(f64, f64)> = deals
         .par_iter()

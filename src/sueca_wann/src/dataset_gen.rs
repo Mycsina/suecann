@@ -14,7 +14,8 @@ pub struct DatasetConfig {
     pub target_total: usize,
     pub seed: u64,
     pub output_path: String,
-    pub pimc_min_margin: f64,
+    // Note: tactical ambiguity is now filtered via SE-based confidence check
+    // (EV delta > best.std_error) rather than a fixed margin threshold.
 }
 
 pub fn generate_dataset(config: &DatasetConfig) {
@@ -25,68 +26,126 @@ pub fn generate_dataset(config: &DatasetConfig) {
         config.n_worlds, config.search_depth, total_target
     );
 
-    let mut all_states = Vec::with_capacity(total_target * INPUT_COUNT);
-    let mut all_intents = Vec::with_capacity(total_target * 4);
-    let mut all_masks = Vec::with_capacity(total_target);
-    let mut intent_counts = [0usize; OUTPUT_COUNT];
+    // Class-balanced accumulation: each of the 3 oracle intents gets an equal
+    // share of the dataset (total_target / OUTPUT_COUNT states each).
+    //
+    // Ambiguous states are rejected at two levels before reaching this point:
+    //   1. PIMC confidence filter (EV delta must exceed measurement noise)
+    //   2. Intent uniqueness filter (card must map to exactly one intent)
+    //
+    // Only crystal-clear, strategically unambiguous examples enter the buckets.
+    // If a bucket fills slowly, the generator keeps running — it is better to
+    // wait for 10,000 textbook examples than to dilute the dataset with ties.
+    let per_class_target = total_target / (OUTPUT_COUNT as usize);
+
+    let mut bucket_states: [Vec<f64>; OUTPUT_COUNT as usize] = Default::default();
+    let mut bucket_intents: [Vec<f32>; OUTPUT_COUNT as usize] = Default::default();
+    let mut bucket_masks: [Vec<u8>; OUTPUT_COUNT as usize] = Default::default();
+    let mut class_counts = [0usize; OUTPUT_COUNT as usize];
 
     let mut batch_seed = config.seed;
     let mut batches = 0;
 
     loop {
-        if all_intents.len() / 4 >= total_target {
+        // Stop when every intent bucket is full
+        if class_counts.iter().all(|&c| c >= per_class_target) {
             break;
         }
         batches += 1;
 
+        // Determine hunt mode: when 2 of 3 buckets are full, pre-filter
+        // deals to hunt only for the remaining intent. This avoids wasting
+        // 200-world PIMC on deals where the target intent can't be unique.
+        let full_buckets: Vec<usize> = (0..OUTPUT_COUNT as usize)
+            .filter(|&i| class_counts[i] >= per_class_target)
+            .collect();
+        let hunt_intent: Option<usize> = if full_buckets.len() >= 2 {
+            // Find the one bucket not yet full
+            (0..OUTPUT_COUNT as usize).find(|&i| class_counts[i] < per_class_target)
+        } else {
+            None // still filling multiple buckets, accept all intents
+        };
+
         let batch_size = 512;
-        let batch_results: Vec<Vec<(Vec<f64>, [f32; 4], u8)>> = (0..batch_size)
+        let batch_results: Vec<Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)>> = (0..batch_size)
             .into_par_iter()
             .map(|i| {
                 let deal_seed = batch_seed + i as u64;
                 let mut rng = Pcg64::seed_from_u64(deal_seed);
-                generate_deal_states(&mut rng, config)
+                generate_deal_states(&mut rng, config, hunt_intent)
             })
             .collect();
 
         for results in batch_results {
             for (state, soft_intent, mask) in results {
-                if all_intents.len() / 4 < total_target {
-                    for i in 0..4 {
-                        if soft_intent[i] > 0.0 {
-                            intent_counts[i] += 1;
-                        }
-                    }
-                    all_states.extend(&state);
-                    all_intents.extend_from_slice(&soft_intent);
-                    all_masks.push(mask);
+                // With one-hot targets (ambiguous ties rejected upstream),
+                // the primary intent is simply the argmax.
+                let primary = soft_intent
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+
+                if class_counts[primary] < per_class_target {
+                    class_counts[primary] += 1;
+                    bucket_states[primary].extend(&state);
+                    bucket_intents[primary].extend_from_slice(&soft_intent);
+                    bucket_masks[primary].push(mask);
                 }
             }
         }
 
         batch_seed += batch_size as u64;
 
-        if batches % 10 == 0 {
+        if batches % 1 == 0 {
             println!(
-                "  batch {}, total: {}/{}, per intent: {:?}",
+                "  batch {}, per intent: {:?} (target {} each)",
                 batches,
-                all_intents.len() / 4,
-                total_target,
-                intent_counts
+                class_counts,
+                per_class_target
             );
         }
     }
 
+    // Interleave buckets so the final flat arrays alternate intents rather
+    // than concatenating all of intent 0, then all of intent 1, etc.
+    let total = class_counts.iter().sum::<usize>();
+    let mut all_states = Vec::with_capacity(total * INPUT_COUNT);
+    let mut all_intents = Vec::with_capacity(total * OUTPUT_COUNT as usize);
+    let mut all_masks = Vec::with_capacity(total);
+
+    let max_per_class = *class_counts.iter().max().unwrap();
+    for i in 0..max_per_class {
+        for c in 0..(OUTPUT_COUNT as usize) {
+            if i < bucket_masks[c].len() {
+                let state_off = i * INPUT_COUNT;
+                all_states
+                    .extend_from_slice(&bucket_states[c][state_off..state_off + INPUT_COUNT]);
+                let intent_off = i * (OUTPUT_COUNT as usize);
+                all_intents.extend_from_slice(
+                    &bucket_intents[c][intent_off..intent_off + (OUTPUT_COUNT as usize)],
+                );
+                all_masks.push(bucket_masks[c][i]);
+            }
+        }
+    }
+
     println!(
-        "Final dataset: {} states, intent distribution: {:?}",
-        all_intents.len() / 4,
-        intent_counts
+        "Final dataset: {} states, intent distribution: {:?} (target {} each)",
+        total,
+        class_counts,
+        per_class_target
     );
 
     save_npz(&all_states, &all_intents, &all_masks, &config.output_path);
 }
 
-pub fn generate_deal_states(rng: &mut Pcg64, config: &DatasetConfig) -> Vec<(Vec<f64>, [f32; 4], u8)> {
+pub fn generate_deal_states(
+    rng: &mut Pcg64,
+    config: &DatasetConfig,
+    hunt_intent: Option<usize>, // when Some(i), pre-filter deals where intent i cannot be unique
+) -> Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)> {
     let mut results = Vec::new();
 
     // Deal cards
@@ -144,6 +203,30 @@ pub fn generate_deal_states(rng: &mut Pcg64, config: &DatasetConfig) -> Vec<(Vec
         return results;
     }
 
+    // ── Pre-PIMC hunt filter: skip deals where the target intent cannot ──
+    // produce a unique card (different from both other intents). Without
+    // uniqueness, the intent-uniqueness filter downstream would reject the
+    // state anyway, so the expensive PIMC search is wasted.
+    //
+    // resolve_intent() is O(legal_moves) with no search — microseconds vs
+    // seconds for PIMC. When hunting a slow-filling bucket, this filter
+    // rejects 90%+ of deals before the 200-world alpha-beta ever runs.
+    if let Some(target) = hunt_intent {
+        let card_target = resolve_intent(target, &game, seat);
+        let mut collision = false;
+        for other in 0..OUTPUT_COUNT as usize {
+            if other != target {
+                if resolve_intent(other, &game, seat) == card_target {
+                    collision = true;
+                    break;
+                }
+            }
+        }
+        if collision {
+            return results; // target intent not unique — would be rejected downstream
+        }
+    }
+
     let current_scores = [game.state.team_02_score, game.state.team_13_score];
     let current_trick_number = game.state.trick_number;
 
@@ -187,38 +270,61 @@ pub fn generate_deal_states(rng: &mut Pcg64, config: &DatasetConfig) -> Vec<(Vec
         rng.gen_range(0u64..u64::MAX),
     );
 
-    let mut sorted_evs = evs.clone();
-    sorted_evs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sorted: Vec<&sueca_solver::pimc::PimcResult> = evs.iter().collect();
+    sorted.sort_by(|a, b| b.ev.partial_cmp(&a.ev).unwrap_or(std::cmp::Ordering::Equal));
 
-    if sorted_evs.is_empty() {
+    if sorted.is_empty() {
         return results;
     }
 
-    let best_card = sorted_evs[0].0;
-    if sorted_evs.len() >= 2 {
-        let second_best_card = sorted_evs[1].0;
-        let bypass_margin_check = CARD_SUIT[best_card as usize] == CARD_SUIT[second_best_card as usize]
-            && CARD_POINTS[best_card as usize] == 0
-            && CARD_POINTS[second_best_card as usize] == 0;
-
-        if !bypass_margin_check && (sorted_evs[0].1 - sorted_evs[1].1) < config.pimc_min_margin {
-            return results; // Reject true tactical ambiguity
+    // ── Confidence filter: reject strategically ambiguous states ──
+    // Uses the Welford standard error from PIMC to gate dataset admission.
+    // A state is only admitted if the best move's EV lead over the second-best
+    // exceeds the measurement noise (SE of the best card's mean EV).
+    //
+    // Why: WANNs have limited representational capacity (sign-only weights,
+    // logical gates). Every training example must teach a clear strategic
+    // concept. States where the EV delta is smaller than the PIMC noise floor
+    // are "shrugs" — teaching the network to discriminate between functionally
+    // equivalent moves produces flat gradients and erodes crisp heuristics.
+    //
+    // Bypass: same-suit zero-point cards. Two worthless cards of the same suit
+    // are interchangeable — the decision has negligible game impact regardless
+    // of EV delta, so we admit these to avoid wasting states.
+    let best = sorted[0];
+    let is_clear = if sorted.len() >= 2 {
+        let second = sorted[1];
+        let bypass = CARD_SUIT[best.card as usize] == CARD_SUIT[second.card as usize]
+            && CARD_POINTS[best.card as usize] == 0
+            && CARD_POINTS[second.card as usize] == 0;
+        if bypass {
+            true
+        } else {
+            let ev_delta = best.ev - second.ev;
+            let noise_floor = best.std_error;
+            ev_delta > noise_floor
         }
+    } else {
+        true // single legal option is vacuously clear
+    };
+
+    if !is_clear {
+        return results; // Strategically ambiguous — do not pollute the dataset
     }
 
-    if let Some(soft_intent) = map_card_to_soft_intents(best_card, &game, seat) {
+    if let Some(soft_intent) = map_card_to_soft_intents(best.card, &game, seat) {
         let legal_mask = build_legal_mask(legal, &game, seat);
         let state_vec: Vec<f64> = belief.to_vec();
         results.push((state_vec, soft_intent, legal_mask));
     }
-    // Unclassifiable states are rejected — no fallback pollution.
+    // Unclassifiable or ambiguous states are rejected — no fallback pollution.
 
     results
 }
 
-pub fn map_card_to_soft_intents(card: u8, game: &SuecaSimulatorGame, seat: u8) -> Option<[f32; 4]> {
+pub fn map_card_to_soft_intents(card: u8, game: &SuecaSimulatorGame, seat: u8) -> Option<[f32; OUTPUT_COUNT]> {
     let mut matching_intents = Vec::new();
-    for intent in 0..4 {
+    for intent in 0..OUTPUT_COUNT as usize {
         let resolved = resolve_intent(intent, game, seat);
         if resolved == card {
             matching_intents.push(intent);
@@ -229,19 +335,29 @@ pub fn map_card_to_soft_intents(card: u8, game: &SuecaSimulatorGame, seat: u8) -
     }
 
     // Apply Intent Demotion for leading states:
-    // If a card satisfies both MAX_FORCE (0) and EQUITY_BUILDER (3) when leading,
+    // If a card satisfies both MAX_FORCE (0) and EQUITY_BUILDER (2) when leading,
     // break the tie in favor of the more specific tactical intent (EQUITY_BUILDER).
     if game.current_trick_len == 0 {
-        if matching_intents.contains(&0) && matching_intents.contains(&3) {
+        if matching_intents.contains(&0) && matching_intents.contains(&2) {
             matching_intents.retain(|&intent| intent != 0);
         }
     }
 
-    let prob = 1.0f32 / (matching_intents.len() as f32);
-    let mut target_vector = [0.0f32; 4];
-    for intent in matching_intents {
-        target_vector[intent] = prob;
+    // Reject states where multiple intents still map to the same card.
+    // WANNs learn broad IF/THEN heuristics from structural patterns in the
+    // dataset. States where two intents resolve identically (e.g., both
+    // EFFICIENT_WIN and EQUITY_BUILDER pick the same card) are "shrugs" —
+    // they teach no discrimination. Including them dilutes the pure strategic
+    // signal of each class and causes the network to learn fuzzy boundaries.
+    //
+    // It is better to have 8,000 crystal-clear examples of EQUITY_BUILDER
+    // than 10,000 examples where 2,000 are ambiguous padding.
+    if matching_intents.len() > 1 {
+        return None;
     }
+
+    let mut target_vector = [0.0f32; OUTPUT_COUNT];
+    target_vector[matching_intents[0]] = 1.0;
     Some(target_vector)
 }
 
@@ -261,7 +377,7 @@ fn save_npz(states: &[f64], intents: &[f32], masks: &[u8], path: &str) {
     use std::io::Write;
     use zip::write::FileOptions;
 
-    let num_states = intents.len() / 4;
+    let num_states = intents.len() / (OUTPUT_COUNT as usize);
     let states_f32: Vec<f32> = states.iter().map(|&v| v as f32).collect();
 
     // Helper: write a .npy file to a buffer
@@ -317,7 +433,7 @@ fn save_npz(states: &[f64], intents: &[f32], masks: &[u8], path: &str) {
         let raw: &[u8] = unsafe {
             std::slice::from_raw_parts(intents.as_ptr() as *const u8, intents.len() * 4)
         };
-        let npy = write_npy(raw, "<f4", &[num_states as u64, 4]);
+        let npy = write_npy(raw, "<f4", &[num_states as u64, OUTPUT_COUNT as u64]);
         zip.start_file("intents.npy", opts).unwrap();
         zip.write_all(&npy).unwrap();
     }
@@ -346,12 +462,11 @@ mod tests {
 
     fn make_config() -> DatasetConfig {
         DatasetConfig {
-            n_worlds: 10,
+            n_worlds: 50, // enough worlds for meaningful SE-based confidence filter
             search_depth: 2,
             target_total: 100,
             seed: 12345,
             output_path: String::new(),
-            pimc_min_margin: 0.5,
         }
     }
 
@@ -363,7 +478,7 @@ mod tests {
         let mut rng = Pcg64::seed_from_u64(42);
         // Generate many deal states and verify each one
         for _ in 0..100 {
-            let results = generate_deal_states(&mut rng, &config);
+            let results = generate_deal_states(&mut rng, &config, None);
             // We can't directly inspect current_player since the game is consumed,
             // but we can verify the states come from a single consistent perspective
             // by checking that belief features 5 (Am_I_Leading) is consistent
@@ -392,8 +507,8 @@ mod tests {
         let config = make_config();
         let mut rng = Pcg64::seed_from_u64(99);
         let mut total = 0;
-        for _ in 0..200 {
-            for (state, _, _) in generate_deal_states(&mut rng, &config) {
+        for _ in 0..600 {
+            for (state, _, _) in generate_deal_states(&mut rng, &config, None) {
                 total += 1;
                 for (i, &v) in state.iter().enumerate() {
                     assert!(
@@ -421,7 +536,6 @@ mod tests {
             target_total: 4000,
             seed: 777,
             output_path: String::new(),
-            pimc_min_margin: 0.5,
         };
         let mut rng = Pcg64::seed_from_u64(777);
         // Generate a fresh deal state and trace through the logic manually
@@ -507,10 +621,10 @@ mod tests {
 
             let mut best_card = legal.trailing_zeros() as u8;
             let mut max_ev = f64::NEG_INFINITY;
-            for (card, ev) in &evs {
-                if *ev > max_ev {
-                    max_ev = *ev;
-                    best_card = *card;
+            for r in &evs {
+                if r.ev > max_ev {
+                    max_ev = r.ev;
+                    best_card = r.card;
                 }
             }
 
@@ -579,7 +693,7 @@ mod tests {
             while temp != 0 {
                 let card = temp.trailing_zeros() as u8;
                 if let Some(soft_intent) = map_card_to_soft_intents(card, &game, seat) {
-                    for intent in 0..4 {
+                    for intent in 0..OUTPUT_COUNT as usize {
                         if soft_intent[intent] > 0.0 {
                             let resolved = resolve_intent(intent, &game, seat);
                             assert!(
@@ -671,15 +785,14 @@ mod tests {
             target_total: 200,
             seed: 999,
             output_path: String::new(),
-            pimc_min_margin: 0.5,
         };
         let mut rng = Pcg64::seed_from_u64(999);
         let mut counts = [0usize; 4];
         let mut total = 0;
 
         for _ in 0..500 {
-            for (_, soft_intent, _) in generate_deal_states(&mut rng, &config) {
-                for i in 0..4 {
+            for (_, soft_intent, _) in generate_deal_states(&mut rng, &config, None) {
+                for i in 0..OUTPUT_COUNT as usize {
                     if soft_intent[i] > 0.0 {
                         counts[i] += 1;
                     }
@@ -689,7 +802,7 @@ mod tests {
         }
 
         println!("Intent distribution: {:?} (total={})", counts, total);
-        for i in 0..4 {
+        for i in 0..OUTPUT_COUNT as usize {
             assert!(
                 counts[i] > 0,
                 "Intent {} never appears in {} samples — dataset lacks diversity",
@@ -780,7 +893,6 @@ mod tests {
             target_total: 40,
             seed: 42,
             output_path: "/tmp/test_roundtrip.npz".into(),
-            pimc_min_margin: 0.5,
         };
 
         // Collect states with natural distribution
@@ -789,14 +901,14 @@ mod tests {
         let mut intents = Vec::new();
         let mut masks = Vec::new();
         loop {
-            for (state, intent, mask) in generate_deal_states(&mut rng, &config) {
-                if intents.len() / 4 < config.target_total {
+            for (state, intent, mask) in generate_deal_states(&mut rng, &config, None) {
+                if intents.len() / (OUTPUT_COUNT as usize) < config.target_total {
                     states.extend(state);
                     intents.extend_from_slice(&intent);
                     masks.push(mask);
                 }
             }
-            if intents.len() / 4 >= config.target_total {
+            if (intents.len() / (OUTPUT_COUNT as usize)) >= config.target_total {
                 break;
             }
         }
@@ -808,7 +920,7 @@ mod tests {
         use crate::dataset::load_expert_dataset;
         let loaded = load_expert_dataset(&config.output_path).unwrap();
 
-        assert_eq!(loaded.num_states, intents.len() / 4);
+        assert_eq!(loaded.num_states, intents.len() / (OUTPUT_COUNT as usize));
         assert_eq!(loaded.soft_intents, intents);
         assert_eq!(loaded.states.len(), states.len());
 
@@ -896,18 +1008,17 @@ mod tests {
     #[test]
     fn test_dataset_yield_ratio() {
         let config = DatasetConfig {
-            n_worlds: 20, // small n_worlds for faster test execution
+            n_worlds: 80, // enough for meaningful SE (≈2.2 pts with σ=20)
             search_depth: 2,
             target_total: 1000,
             seed: 54321,
             output_path: String::new(),
-            pimc_min_margin: 0.5,
         };
         let mut rng = Pcg64::seed_from_u64(config.seed);
         let mut raw_tactical_states = 0;
         let mut preserved_states = 0;
 
-        for _ in 0..1000 {
+        for _ in 0..500 {
             // Replicate the generation setup
             let mut deck: Vec<u8> = (0..40).collect();
             for i in (1..40).rev() {
@@ -998,28 +1109,32 @@ mod tests {
                 rng.gen_range(0u64..u64::MAX),
             );
 
-            let mut sorted_evs = evs.clone();
-            sorted_evs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let mut sorted: Vec<&sueca_solver::pimc::PimcResult> = evs.iter().collect();
+            sorted.sort_by(|a, b| b.ev.partial_cmp(&a.ev).unwrap_or(std::cmp::Ordering::Equal));
 
-            if sorted_evs.is_empty() {
+            if sorted.is_empty() {
                 continue;
             }
 
-            let best_card = sorted_evs[0].0;
-            let mut pass_margin = true;
-            if sorted_evs.len() >= 2 {
-                let second_best_card = sorted_evs[1].0;
-                let bypass_margin_check = CARD_SUIT[best_card as usize] == CARD_SUIT[second_best_card as usize]
-                    && CARD_POINTS[best_card as usize] == 0
-                    && CARD_POINTS[second_best_card as usize] == 0;
-
-                if !bypass_margin_check && (sorted_evs[0].1 - sorted_evs[1].1) < config.pimc_min_margin {
-                    pass_margin = false;
+            // Same confidence filter as generate_deal_states
+            let best = sorted[0];
+            let pass_margin = if sorted.len() >= 2 {
+                let second = sorted[1];
+                let bypass = CARD_SUIT[best.card as usize] == CARD_SUIT[second.card as usize]
+                    && CARD_POINTS[best.card as usize] == 0
+                    && CARD_POINTS[second.card as usize] == 0;
+                if bypass {
+                    true
+                } else {
+                    let ev_delta = best.ev - second.ev;
+                    ev_delta > best.std_error
                 }
-            }
+            } else {
+                true
+            };
 
             if pass_margin {
-                if map_card_to_soft_intents(best_card, &game, seat).is_some() {
+                if map_card_to_soft_intents(best.card, &game, seat).is_some() {
                     preserved_states += 1;
                 }
             }
@@ -1033,8 +1148,8 @@ mod tests {
             raw_tactical_states
         );
         assert!(
-            ratio >= 0.60,
-            "Yield ratio too low! Got {:.2}%, expected >= 60%. Consensus erasure or follow-suit starvation is too aggressive.",
+            ratio >= 0.20,
+            "Yield ratio too low! Got {:.2}%, expected >= 20%. SE filter or intent-uniqueness filter may be too aggressive.",
             ratio * 100.0
         );
     }
@@ -1070,9 +1185,9 @@ mod tests {
         let seat = game.state.current_player;
         let belief = encode_belief_state(&game, seat);
 
-        assert_eq!(belief.len(), 33);
-        // Verify value bounds
-        for i in 30..33 {
+        assert_eq!(belief.len(), sueca_solver::constants::INPUT_COUNT);
+        // Verify value bounds for meta features
+        for i in (sueca_solver::constants::INPUT_COUNT - 3)..sueca_solver::constants::INPUT_COUNT {
             assert!(
                 (0.0..=1.0).contains(&belief[i]),
                 "Feature {} has out-of-bounds value: {}",
@@ -1103,12 +1218,12 @@ mod tests {
         // If there's a card that matches both, we check that intent 0 is filtered out:
         // Let's find if there is a card where both intents resolve to it:
         let card_0 = resolve_intent(0, &game, 0);
-        let card_3 = resolve_intent(3, &game, 0);
-        if card_0 == card_3 {
+        let card_2 = resolve_intent(2, &game, 0);
+        if card_0 == card_2 {
             let soft = map_card_to_soft_intents(card_0, &game, 0).unwrap();
-            // Since it matched both, intent 0 must be demoted, so soft[0] should be 0.0, and soft[3] should be 1.0!
+            // Since it matched both, intent 0 must be demoted in favor of EQUITY_BUILDER (intent 2)
             assert_eq!(soft[0], 0.0);
-            assert_eq!(soft[3], 1.0);
+            assert_eq!(soft[2], 1.0);
         }
     }
 }

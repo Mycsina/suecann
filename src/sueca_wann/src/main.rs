@@ -54,8 +54,6 @@ enum Command {
         seed: u64,
         #[arg(long, default_value = "expert_states.npz")]
         output: String,
-        #[arg(long, default_value = "0.5")]
-        pimc_min_margin: f64,
     },
     /// Optimize independent continuous weights using Differential Evolution
     OptimizeWeights {
@@ -103,7 +101,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_count,
             seed,
             output,
-            pimc_min_margin,
         } => {
             let config = dataset_gen::DatasetConfig {
                 n_worlds,
@@ -111,7 +108,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target_total: target_count,
                 seed,
                 output_path: output,
-                pimc_min_margin,
             };
             dataset_gen::generate_dataset(&config);
         }

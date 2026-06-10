@@ -2,6 +2,7 @@ use crate::genome::{
     ActivationFn, AggregationFn, ConnGene, Genome, NodeGene, NodeType, FIRST_HIDDEN_ID,
 };
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
@@ -48,6 +49,23 @@ impl TabuVetoList {
         let mut q = self.dynamic_queue.lock().unwrap();
         q.clear();
     }
+
+    /// Export all vetoed (src, dst) pairs for serialization.
+    /// Clones the VecDeque under the lock — callable from any thread.
+    pub fn dump_pairs(&self) -> Vec<(usize, usize)> {
+        let q = self.dynamic_queue.lock().unwrap();
+        q.iter().copied().collect()
+    }
+
+    /// Restore vetoed pairs from a previously saved snapshot.
+    /// Clears the queue and replaces it with the given pairs.
+    pub fn load_pairs(&self, pairs: &[(usize, usize)]) {
+        let mut q = self.dynamic_queue.lock().unwrap();
+        q.clear();
+        for &pair in pairs {
+            q.push_back(pair);
+        }
+    }
 }
 
 pub struct InnovationRegistry {
@@ -73,6 +91,31 @@ impl InnovationRegistry {
             inno
         }
     }
+
+    /// Export the full registry state for serialization.
+    pub fn dump_state(&self) -> InnovationRegistryState {
+        InnovationRegistryState {
+            pairs: self.conns.iter().map(|(&k, &v)| (k, v)).collect(),
+            next_innovation: self.next_innovation,
+        }
+    }
+
+    /// Reconstruct a registry from a previously saved snapshot.
+    pub fn from_state(state: InnovationRegistryState) -> Self {
+        let conns: HashMap<(usize, usize), usize> = state.pairs.into_iter().collect();
+        Self {
+            next_innovation: state.next_innovation,
+            conns,
+        }
+    }
+}
+
+/// Serializable snapshot of the InnovationRegistry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InnovationRegistryState {
+    /// Flat list of ((src, dst), innovation_number) mappings.
+    pub pairs: Vec<((usize, usize), usize)>,
+    pub next_innovation: usize,
 }
 
 fn pick_random_connection<R: Rng>(genome: &Genome, rng: &mut R) -> Option<ConnGene> {
@@ -319,6 +362,20 @@ pub fn mutate_change_aggregation<R: Rng>(genome: &mut Genome, rng: &mut R) -> bo
     }
 }
 
+/// Classification of mutations applied in a single call to `apply_mutations`.
+/// Used to decide whether PFS-NEAT validation is needed (structural changes
+/// can be catastrophic; parameter tweaks are inherently incremental).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationOutcome {
+    /// No mutation was applied.
+    None,
+    /// At least one structural mutation was applied (add_node or add_conn).
+    Structural,
+    /// Only non-structural mutations were applied (toggle, flip_sign,
+    /// change_activation, change_aggregation).
+    NonStructural,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_mutations<R: Rng>(
     genome: &mut Genome,
@@ -331,27 +388,36 @@ pub fn apply_mutations<R: Rng>(
     p_flip_sign: f64,
     p_change_act: f64,
     p_change_agg: f64,
-) -> usize {
-    let mut n = 0;
+) -> MutationOutcome {
+    let mut structural = false;
+    let mut non_structural = false;
+
     if rng.gen_bool(p_add_node) && mutate_add_node(genome, registry, tabu_list, rng) {
-        n += 1;
+        structural = true;
     }
     if rng.gen_bool(p_add_conn) && mutate_add_connection(genome, registry, tabu_list, rng) {
-        n += 1;
+        structural = true;
     }
     if rng.gen_bool(p_toggle_conn) && mutate_toggle_connection(genome, rng) {
-        n += 1;
+        non_structural = true;
     }
     if rng.gen_bool(p_flip_sign) && mutate_flip_sign(genome, rng) {
-        n += 1;
+        non_structural = true;
     }
     if rng.gen_bool(p_change_act) && mutate_change_activation(genome, rng) {
-        n += 1;
+        non_structural = true;
     }
     if rng.gen_bool(p_change_agg) && mutate_change_aggregation(genome, rng) {
-        n += 1;
+        non_structural = true;
     }
-    n
+
+    if structural {
+        MutationOutcome::Structural
+    } else if non_structural {
+        MutationOutcome::NonStructural
+    } else {
+        MutationOutcome::None
+    }
 }
 
 #[cfg(test)]

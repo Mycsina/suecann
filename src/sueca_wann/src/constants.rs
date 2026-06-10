@@ -31,8 +31,8 @@ pub const DE_WEIGHT_MAX: f64 = 2.0;
 pub enum BeliefFeature {
     HasLedSuit = 0,
     HasTrump = 1,
-    LedSuitPower = 2,
-    TrumpPower = 3,
+    LedSuitCount = 2,
+    TrumpCount = 3,
     HandPointDensity = 4,
     AmILeading = 5,
     AmILastToPlay = 6,
@@ -46,30 +46,32 @@ pub enum BeliefFeature {
     LedSuitAcePlayed = 14,
     LedSuit7Played = 15,
     TrumpAcePlayed = 16,
-    GamePtsRemaining = 17,
-    TrickNumber = 18,
-    TrumpsRemaining = 19,
-    ScoreDelta = 20,
-    Side0Depletion = 21,
-    Side0AcePlayed = 22,
-    Side07Played = 23,
-    Side1Depletion = 24,
-    Side1AcePlayed = 25,
-    Side17Played = 26,
-    Side2Depletion = 27,
-    Side2AcePlayed = 28,
-    Side27Played = 29,
-    PointsSecured = 30,
-    KnownVoidSuitsCount = 31,
-    DepletedSuitsCount = 32,
+    HoldsBossLed = 17,
+    HoldsBossTrump = 18,
+    CanBeatWinner = 19,
+    MinWinningCost = 20,
+    MinSacrificeCost = 21,
+    GamePtsRemaining = 22,
+    TrickNumber = 23,
+    TrumpsRemaining = 24,
+    ScoreDelta = 25,
+    MyVoidCount = 26,
+    LongestSideSuit = 27,
+    ShortestSideSuit = 28,
+    Side0Depletion = 29,
+    Side1Depletion = 30,
+    Side2Depletion = 31,
+    PointsSecured = 32,
+    KnownVoidSuitsCount = 33,
+    DepletedSuitsCount = 34,
 }
 
-// Sueca feature names (indexed by belief-state dimension, 0..33).
-pub const FEATURE_NAMES: [&str; 33] = [
+// Sueca feature names (indexed by belief-state dimension, 0..35).
+pub const FEATURE_NAMES: [&str; 35] = [
     "Has_Led_Suit",
     "Has_Trump",
-    "Led_Suit_Power",
-    "Trump_Power",
+    "Led_Suit_Count",
+    "Trump_Count",
     "Hand_Point_Density",
     "Am_I_Leading",
     "Am_I_Last_To_Play",
@@ -83,26 +85,29 @@ pub const FEATURE_NAMES: [&str; 33] = [
     "Led_Suit_Ace_Played",
     "Led_Suit_7_Played",
     "Trump_Ace_Played",
+    "Holds_Boss_Led",
+    "Holds_Boss_Trump",
+    "Can_Beat_Winner",
+    "Min_Winning_Cost",
+    "Min_Sacrifice_Cost",
     "Game_Pts_Remaining",
     "Trick_Number",
     "Trumps_Remaining",
     "Score_Delta",
+    "My_Void_Count",
+    "Longest_Side_Suit",
+    "Shortest_Side_Suit",
     "Side0_Depletion",
-    "Side0_Ace_Played",
-    "Side0_7_Played",
     "Side1_Depletion",
-    "Side1_Ace_Played",
-    "Side1_7_Played",
     "Side2_Depletion",
-    "Side2_Ace_Played",
-    "Side2_7_Played",
     "Points_Secured_Us",
     "Known_Void_Suits_Count",
     "Depleted_Suits_Count",
 ];
 
-// Oracle intent names (indexed by output neuron, 0..4).
-pub const OUTPUT_NAMES: [&str; 4] = ["MAX_FORCE", "MIN_FORCE", "EFFICIENT_WIN", "EQUITY_BUILDER"];
+// Oracle intent names (indexed by output neuron, 0..3).
+// MIN_FORCE removed — EFFICIENT_WIN subsumes its useful behavior.
+pub const OUTPUT_NAMES: [&str; 3] = ["MAX_FORCE", "EFFICIENT_WIN", "EQUITY_BUILDER"];
 
 // Number of worlds to use for the heuristic potential evaluation rollouts.
 pub const POTENTIAL_EVAL_WORLDS: usize = 5;

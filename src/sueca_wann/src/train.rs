@@ -5,12 +5,14 @@ use crate::genome::{JsonGenome, JsonGenomeJoint, FIRST_HIDDEN_ID, INPUT_COUNT, O
 use crate::hall_of_fame::{HallOfFame, JsonHallOfFame, JsonHallOfFameJoint};
 use crate::mutations::{InnovationRegistry, TabuVetoList};
 use crate::population::Population;
+use crate::runtime_data;
 
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -73,39 +75,40 @@ pub fn evaluate_phase0(
         })
         .collect();
 
+            // note: using weight-batched forward — single CSR traversal for all sweep weights
     genomes
         .into_par_iter()
         .map(|candidate| {
-            let mut scratchpad = vec![0.0f64; candidate.num_nodes];
+            let n_weights = sweep_weights.len();
+            let mut scratchpad = vec![0.0f64; candidate.num_nodes * n_weights];
             let mut correct = 0.0;
 
             for (idx, inputs) in states.iter().enumerate() {
+                candidate.forward_batched(inputs, sweep_weights, &mut scratchpad);
+
+                // Sum outputs across all weights (MEAN = sum / n_weights, but argmax
+                // is scale-invariant, so we skip the divide)
                 let mut total_outputs = [0.0f64; OUTPUT_COUNT];
-                for &w in sweep_weights {
-                    candidate.forward(inputs, w, &mut scratchpad);
-                    total_outputs[0] += scratchpad[OUTPUT_START];
-                    total_outputs[1] += scratchpad[OUTPUT_START + 1];
-                    total_outputs[2] += scratchpad[OUTPUT_START + 2];
-                    total_outputs[3] += scratchpad[OUTPUT_START + 3];
+                for w in 0..n_weights {
+                    total_outputs[0] += scratchpad[(OUTPUT_START + 0) * n_weights + w];
+                    total_outputs[1] += scratchpad[(OUTPUT_START + 1) * n_weights + w];
+                    total_outputs[2] += scratchpad[(OUTPUT_START + 2) * n_weights + w];
                 }
 
-                // Unrolled argmax
+                // Unrolled argmax (3 intents)
                 let v0 = total_outputs[0];
                 let v1 = total_outputs[1];
                 let v2 = total_outputs[2];
-                let v3 = total_outputs[3];
 
-                let best_intent = if v0 >= v1 && v0 >= v2 && v0 >= v3 {
+                let best_intent = if v0 >= v1 && v0 >= v2 {
                     0
-                } else if v1 >= v2 && v1 >= v3 {
+                } else if v1 >= v2 {
                     1
-                } else if v2 >= v3 {
-                    2
                 } else {
-                    3
+                    2
                 };
 
-                correct += dataset.soft_intents[idx * 4 + best_intent] as f64;
+                correct += dataset.soft_intents[idx * OUTPUT_COUNT as usize + best_intent] as f64;
             }
 
             correct / n_states as f64
@@ -164,7 +167,7 @@ pub fn evaluate_phase1(
             ];
 
             let mut dummy_behavior = crate::evaluator::WannBehavior::default();
-            let mut scratchpad = vec![0.0f64; max_nodes];
+            let mut scratchpad = vec![0.0f64; max_nodes * sweep_weights.len()];
             let result_baseline = crate::evaluator::play_game_sim(
                 rotated_hands,
                 deal.trump,
@@ -181,7 +184,7 @@ pub fn evaluate_phase1(
     let results: Vec<(f64, crate::evaluator::WannBehavior)> = genomes
         .into_par_iter()
         .map(|candidate| {
-            let mut scratchpad = vec![0.0f64; max_nodes];
+            let mut scratchpad = vec![0.0f64; max_nodes * sweep_weights.len()];
             let (candidate_lead, candidate_follow) = if is_lead {
                 (candidate, reference_brain)
             } else {
@@ -264,7 +267,7 @@ pub fn evaluate_phase1_joint(
             ];
 
             let mut dummy_behavior = crate::evaluator::WannBehavior::default();
-            let mut scratchpad = vec![0.0f64; max_nodes];
+            let mut scratchpad = vec![0.0f64; max_nodes * sweep_weights.len()];
             let result_baseline = crate::evaluator::play_game_sim(
                 rotated_hands,
                 deal.trump,
@@ -284,7 +287,7 @@ pub fn evaluate_phase1_joint(
     let results: Vec<(f64, crate::evaluator::WannBehavior)> = (0..population_size)
         .into_par_iter()
         .map(|idx| {
-            let mut scratchpad = vec![0.0f64; max_nodes];
+            let mut scratchpad = vec![0.0f64; max_nodes * sweep_weights.len()];
             let candidate_lead = &lead_genomes[idx];
             let candidate_follow = &follow_genomes[idx];
             crate::evaluator::evaluate_genome_delta(
@@ -545,7 +548,7 @@ fn split_dataset(dataset: &ExpertDataset) -> (ExpertDataset, ExpertDataset) {
         let is_leading = (dataset.states[state_offset + crate::constants::BeliefFeature::AmILeading as usize] - 1.0).abs() < 1e-9;
         
         let state_slice = &dataset.states[state_offset..state_offset + INPUT_COUNT];
-        let intent_slice = &dataset.soft_intents[idx * 4..idx * 4 + 4];
+        let intent_slice = &dataset.soft_intents[idx * OUTPUT_COUNT as usize..idx * OUTPUT_COUNT as usize + OUTPUT_COUNT as usize];
         let legal_mask = dataset.legal_masks[idx];
 
         if is_leading {
@@ -633,13 +636,13 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
     let mut lead_pop: Population;
     let mut lead_hof: HallOfFame;
     let mut lead_map_elites: crate::map_elites::MapElitesArchive;
-    let lead_registry: Mutex<InnovationRegistry>;
+    let mut lead_registry: Mutex<InnovationRegistry>;
     let lead_tabu = TabuVetoList::new(1000);
 
     let mut follow_pop: Population;
     let mut follow_hof: HallOfFame;
     let mut follow_map_elites: crate::map_elites::MapElitesArchive;
-    let follow_registry: Mutex<InnovationRegistry>;
+    let mut follow_registry: Mutex<InnovationRegistry>;
     let follow_tabu = TabuVetoList::new(1000);
 
     let mut start_gen = 0;
@@ -697,6 +700,41 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
         follow_map_elites = crate::map_elites::MapElitesArchive::new();
     }
 
+    // Restore runtime data if available (tabu lists, innovation registry mappings)
+    let data_dir = Path::new(&run_dir).join("data");
+    if let Ok(runtime) = runtime_data::load_runtime_data(&data_dir) {
+        if let Some(ref pairs) = runtime.lead_tabu {
+            lead_tabu.load_pairs(pairs);
+            println!(
+                "  >>> Restored lead tabu list: {} vetoed connections",
+                pairs.len()
+            );
+        }
+        if let Some(ref pairs) = runtime.follow_tabu {
+            follow_tabu.load_pairs(pairs);
+            println!(
+                "  >>> Restored follow tabu list: {} vetoed connections",
+                pairs.len()
+            );
+        }
+        if let Some(state) = runtime.lead_innov {
+            let n_pairs = state.pairs.len();
+            lead_registry = Mutex::new(InnovationRegistry::from_state(state));
+            println!(
+                "  >>> Restored lead innovation registry: {} mappings",
+                n_pairs
+            );
+        }
+        if let Some(state) = runtime.follow_innov {
+            let n_pairs = state.pairs.len();
+            follow_registry = Mutex::new(InnovationRegistry::from_state(state));
+            println!(
+                "  >>> Restored follow innovation registry: {} mappings",
+                n_pairs
+            );
+        }
+    }
+
     // Load dataset for Phase 0
     let dataset = load_expert_dataset(&config.curriculum.phase0_dataset)?;
     let (lead_dataset, follow_dataset) = split_dataset(&dataset);
@@ -739,9 +777,10 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
     println!("{}", "-".repeat(95));
 
     for gen in start_gen..config.population.generations {
-        let t0 = Instant::now();
+        let t_gen = Instant::now();
 
-        // Phase selection
+        // ── Phase selection ─────────────────────────────────────────────
+        let t_phase_start = Instant::now();
         let new_phase = if gen < config.curriculum.phase0_gens {
             0
         } else {
@@ -771,63 +810,57 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                 lead_pop.fitnesses = vec![0.0; lead_pop.genomes.len()];
                 follow_pop.fitnesses = vec![0.0; follow_pop.genomes.len()];
 
-                // 2. Pre-populate HOF using top unique Phase 0 genomes
+                // 2. Pre-populate HOF using top unique Phase 0 genomes.
+                //    Uses innovation fingerprint hashing (O(pop·E) total) instead
+                //    of pairwise compatibility_distance (O(pop²·E)) for uniqueness.
                 println!("  >>> Pre-populating Phase 1 HOF with top unique Phase 0 genomes...");
                 lead_hof.clear();
                 follow_hof.clear();
 
                 let mut unique_lead = Vec::new();
-                let c1 = config.species.c_excess;
-                let c2 = config.species.c_disjoint;
-                let c3 = config.species.c_mismatch;
-
-                // Since they are sorted, we can search from top to bottom
+                let mut seen_fps: HashSet<u64> = HashSet::new();
                 for idx in 0..lead_pop.genomes.len() {
-                    let candidate = &lead_pop.genomes[idx];
-                    let is_unique = unique_lead.iter().all(|g| {
-                        crate::species::compatibility_distance(candidate, g, c1, c2, c3) > 0.05
-                    });
-                    if is_unique {
-                        unique_lead.push(candidate.copy());
+                    let fp = lead_pop.genomes[idx].innovation_fingerprint();
+                    if seen_fps.insert(fp) {
+                        unique_lead.push(lead_pop.genomes[idx].copy());
                         if unique_lead.len() >= 5 {
                             break;
                         }
                     }
                 }
-                for idx in 0..lead_pop.genomes.len() {
-                    if unique_lead.len() >= 5 {
-                        break;
-                    }
-                    let already_added = unique_lead.iter().any(|g| {
-                        crate::species::compatibility_distance(&lead_pop.genomes[idx], g, c1, c2, c3) < 1e-9
-                    });
-                    if !already_added {
-                        unique_lead.push(lead_pop.genomes[idx].copy());
+                // If we didn't get 5 unique from the top, continue scanning
+                if unique_lead.len() < 5 {
+                    for idx in 0..lead_pop.genomes.len() {
+                        let fp = lead_pop.genomes[idx].innovation_fingerprint();
+                        if seen_fps.insert(fp) {
+                            unique_lead.push(lead_pop.genomes[idx].copy());
+                            if unique_lead.len() >= 5 {
+                                break;
+                            }
+                        }
                     }
                 }
 
                 let mut unique_follow = Vec::new();
+                seen_fps.clear();
                 for idx in 0..follow_pop.genomes.len() {
-                    let candidate = &follow_pop.genomes[idx];
-                    let is_unique = unique_follow.iter().all(|g| {
-                        crate::species::compatibility_distance(candidate, g, c1, c2, c3) > 0.05
-                    });
-                    if is_unique {
-                        unique_follow.push(candidate.copy());
+                    let fp = follow_pop.genomes[idx].innovation_fingerprint();
+                    if seen_fps.insert(fp) {
+                        unique_follow.push(follow_pop.genomes[idx].copy());
                         if unique_follow.len() >= 5 {
                             break;
                         }
                     }
                 }
-                for idx in 0..follow_pop.genomes.len() {
-                    if unique_follow.len() >= 5 {
-                        break;
-                    }
-                    let already_added = unique_follow.iter().any(|g| {
-                        crate::species::compatibility_distance(&follow_pop.genomes[idx], g, c1, c2, c3) < 1e-9
-                    });
-                    if !already_added {
-                        unique_follow.push(follow_pop.genomes[idx].copy());
+                if unique_follow.len() < 5 {
+                    for idx in 0..follow_pop.genomes.len() {
+                        let fp = follow_pop.genomes[idx].innovation_fingerprint();
+                        if seen_fps.insert(fp) {
+                            unique_follow.push(follow_pop.genomes[idx].copy());
+                            if unique_follow.len() >= 5 {
+                                break;
+                            }
+                        }
                     }
                 }
 
@@ -878,12 +911,18 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                 follow_pop.generations_since_improvement = 0;
             }
         }
+        let t_phase = t_phase_start.elapsed();
 
+        // ── Genome → Network conversion (parallel) ──────────────────────
+        let t_convert_start = Instant::now();
         let lead_rust_genomes: Vec<crate::wann_network::RustWannNetwork> =
             lead_pop.genomes.par_iter().map(|g| g.to_rust_wann()).collect();
         let follow_rust_genomes: Vec<crate::wann_network::RustWannNetwork> =
             follow_pop.genomes.par_iter().map(|g| g.to_rust_wann()).collect();
+        let t_convert = t_convert_start.elapsed();
 
+        // ── Fitness evaluation ──────────────────────────────────────────
+        let t_eval_start = Instant::now();
         let (lead_fitnesses, follow_fitnesses, lead_behaviors, follow_behaviors) = if current_phase == 0 {
             let lead_accs = evaluate_phase0(&lead_rust_genomes, &lead_dataset, &config.evaluation.sweep_weights);
             let follow_accs = evaluate_phase0(&follow_rust_genomes, &follow_dataset, &config.evaluation.sweep_weights);
@@ -902,7 +941,10 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             );
             (fitnesses.clone(), fitnesses, behaviors.clone(), behaviors)
         };
+        let t_eval = t_eval_start.elapsed();
 
+        // ── Stats: tell_fitnesses, MAP-Elites, best candidate, HOF ─────
+        let t_stats_start = Instant::now();
         lead_pop.tell_fitnesses(&lead_fitnesses);
         follow_pop.tell_fitnesses(&follow_fitnesses);
 
@@ -953,7 +995,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
         lead_hof.add(&lead_pop.genomes[lead_best_idx], lead_best_fit, gen);
         follow_hof.add(&follow_pop.genomes[follow_best_idx], follow_best_fit, gen);
 
-        let elapsed = t0.elapsed().as_secs_f64();
+        // Snapshot display values BEFORE breeding (breeding replaces the population)
         let lead_species = lead_pop
             .species_list
             .iter()
@@ -964,39 +1006,12 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             .iter()
             .filter(|s| !s.members.is_empty())
             .count();
+        let lead_best_conns = lead_pop.genomes[lead_best_idx].num_enabled();
+        let follow_best_conns = follow_pop.genomes[follow_best_idx].num_enabled();
+        let t_stats = t_stats_start.elapsed();
 
-        writeln!(
-            csv_file,
-            "{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.2}",
-            gen,
-            current_phase,
-            lead_best_fit,
-            lead_avg_fit,
-            follow_best_fit,
-            follow_avg_fit,
-            lead_species,
-            follow_species,
-            lead_pop.genomes[lead_best_idx].num_enabled(),
-            follow_pop.genomes[follow_best_idx].num_enabled(),
-            elapsed
-        )?;
-        csv_file.flush()?;
-
-        println!(
-            "{:4} {:2} {:8.4} {:8.4} {:8.4} {:8.4} {:6} {:6} {:6} {:6} {:7.1}s",
-            gen,
-            current_phase,
-            lead_best_fit,
-            lead_avg_fit,
-            follow_best_fit,
-            follow_avg_fit,
-            lead_species,
-            follow_species,
-            lead_pop.genomes[lead_best_idx].num_enabled(),
-            follow_pop.genomes[follow_best_idx].num_enabled(),
-            elapsed
-        );
-
+        // ── Reseeding (stagnation recovery, rare) ───────────────────────
+        let t_reseed_start = Instant::now();
         // Breed next generation
         if current_phase == 1 && lead_pop.generations_since_improvement > 20 {
             if let Some(gb_clone) = lead_pop.global_best_genome.as_ref().map(|g| g.copy()) {
@@ -1018,7 +1033,10 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                 follow_pop.generations_since_improvement = 0;
             }
         }
+        let t_reseed = t_reseed_start.elapsed();
 
+        // ── Speciation + Breeding ───────────────────────────────────────
+        let t_breed_start = Instant::now();
         if current_phase == 0 {
             let lead_eval_data = Some((&lead_dataset, config.evaluation.sweep_weights.as_slice()));
             let follow_eval_data = Some((&follow_dataset, config.evaluation.sweep_weights.as_slice()));
@@ -1051,8 +1069,10 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                 &mut rng,
             );
         }
+        let t_breed = t_breed_start.elapsed();
 
-        // Checkpointing
+        // ── Checkpointing (every 10 gens + final) ───────────────────────
+        let t_ckpt_start = Instant::now();
         if (gen + 1) % 10 == 0 || gen == config.population.generations - 1 {
             // Save HOF (Joint)
             let hof_path = Path::new(&config.output.checkpoint_dir)
@@ -1121,7 +1141,81 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                 },
             };
             state.save_to_file(&state_checkpoint_path)?;
+
+            // --- Runtime data snapshot (non-blocking background write) ---
+            let data_dir = Path::new(&run_dir).join("data");
+            let snapshot = runtime_data::RuntimeDataSnapshot {
+                lead_tabu: lead_tabu.dump_pairs(),
+                follow_tabu: follow_tabu.dump_pairs(),
+                lead_innov: lead_registry.lock().unwrap().dump_state(),
+                follow_innov: follow_registry.lock().unwrap().dump_state(),
+                lead_species: runtime_data::extract_species_summary(&lead_pop.species_list),
+                follow_species: runtime_data::extract_species_summary(&follow_pop.species_list),
+                lead_map_elites: lead_map_elites.dump_grid(),
+                follow_map_elites: follow_map_elites.dump_grid(),
+                lead_population: runtime_data::extract_population_snapshot(
+                    &lead_pop,
+                    &lead_pop.species_list,
+                ),
+                follow_population: runtime_data::extract_population_snapshot(
+                    &follow_pop,
+                    &follow_pop.species_list,
+                ),
+            };
+            std::thread::spawn(move || {
+                if let Err(e) = runtime_data::save_runtime_data(data_dir, &snapshot) {
+                    eprintln!("Warning: failed to save runtime data: {e}");
+                }
+            });
         }
+
+        let t_ckpt = t_ckpt_start.elapsed();
+
+        // --- End-of-generation timing and reporting (captures ALL work) ---
+        let t_total = t_gen.elapsed().as_secs_f64();
+
+        writeln!(
+            csv_file,
+            "{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.2}",
+            gen,
+            current_phase,
+            lead_best_fit,
+            lead_avg_fit,
+            follow_best_fit,
+            follow_avg_fit,
+            lead_species,
+            follow_species,
+            lead_best_conns,
+            follow_best_conns,
+            t_total
+        )?;
+        csv_file.flush()?;
+
+        // ── Console output: fitness table + per-phase profiling ─────────
+        println!(
+            "{:4} {:2} {:8.4} {:8.4} {:8.4} {:8.4} {:6} {:6} {:6} {:6} {:7.1}s",
+            gen,
+            current_phase,
+            lead_best_fit,
+            lead_avg_fit,
+            follow_best_fit,
+            follow_avg_fit,
+            lead_species,
+            follow_species,
+            lead_best_conns,
+            follow_best_conns,
+            t_total
+        );
+        println!(
+            "     phase:{:7.2}s convert:{:7.2}s eval:{:7.2}s stats:{:7.2}s reseed:{:7.2}s breed:{:7.2}s ckpt:{:7.2}s  [O(eval)=P·D·R·|W|·E, O(breed)=P·S·E+P·K·E]",
+            t_phase.as_secs_f64(),
+            t_convert.as_secs_f64(),
+            t_eval.as_secs_f64(),
+            t_stats.as_secs_f64(),
+            t_reseed.as_secs_f64(),
+            t_breed.as_secs_f64(),
+            t_ckpt.as_secs_f64(),
+        );
     }
 
     // Save final files

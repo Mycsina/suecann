@@ -9,7 +9,6 @@ pareto_complexity_prob = 0.80
 
 [evaluation]
 n_deals = 48
-curriculum_gens = 300
 sweep_weights = [1.0]
 seed = 1337
 
@@ -34,9 +33,6 @@ p_crossover = 0.40
 phase0_gens = 0
 bulking_gens = 100
 phase0_dataset = "db_w40_d3_n1e5.npz"
-phase0_threshold = -0.10
-phase1_threshold = -0.05
-phase2_hof_min = 3
 min_gens_per_phase = 20
 adaptive_window = 10
 

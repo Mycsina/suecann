@@ -13,13 +13,16 @@ pub struct PopulationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvaluationConfig {
     pub n_deals: usize,
-    pub curriculum_gens: usize,
     pub sweep_weights: Vec<f64>,
     pub seed: u64,
 }
 
 fn default_min_species_size() -> usize {
     3
+}
+
+fn default_max_species() -> usize {
+    20
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +34,12 @@ pub struct SpeciesConfig {
     pub c_mismatch: f64,
     #[serde(default = "default_min_species_size")]
     pub min_species_size: usize,
+    /// Hard cap on number of active species. When exceeded, the smallest
+    /// species are merged into their closest larger neighbour after
+    /// speciation completes. Prevents species proliferation from bloating
+    /// O(P · Sp · E) compatibility checks.
+    #[serde(default = "default_max_species")]
+    pub max_species: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,15 +53,6 @@ pub struct MutationConfig {
     pub p_crossover: f64,
 }
 
-fn default_phase0_threshold() -> f64 {
-    -0.10
-}
-fn default_phase1_threshold() -> f64 {
-    -0.05
-}
-fn default_phase2_hof_min() -> usize {
-    3
-}
 fn default_min_gens_per_phase() -> usize {
     20
 }
@@ -62,23 +62,25 @@ fn default_adaptive_window() -> usize {
 fn default_phase0_dataset() -> String {
     "expert_states_w50_d2.npz".to_string()
 }
+fn default_pfs_sample_size() -> usize {
+    100
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurriculumConfig {
     pub phase0_gens: usize,
     pub bulking_gens: usize,
-    #[serde(default = "default_phase0_threshold")]
-    pub phase0_threshold: f64,
-    #[serde(default = "default_phase1_threshold")]
-    pub phase1_threshold: f64,
-    #[serde(default = "default_phase2_hof_min")]
-    pub phase2_hof_min: usize,
     #[serde(default = "default_min_gens_per_phase")]
     pub min_gens_per_phase: usize,
     #[serde(default = "default_adaptive_window")]
     pub adaptive_window: usize,
     #[serde(default = "default_phase0_dataset")]
     pub phase0_dataset: String,
+    /// Number of expert states sampled for PFS-NEAT mutation validation.
+    /// Reduced from the original 1000 — 100 catches catastrophic mutations
+    /// while cutting validation cost by 10×.
+    #[serde(default = "default_pfs_sample_size")]
+    pub pfs_sample_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

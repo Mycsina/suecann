@@ -9,7 +9,7 @@ use sueca_solver::simulator::SuecaSimulatorGame;
 
 #[derive(Debug, Clone, Default)]
 pub struct WannBehavior {
-    pub intent_counts: [usize; 4],
+    pub intent_counts: [usize; 3],
     pub total_lead_points: usize,
     pub count_leads: usize,
     pub total_actions: usize,
@@ -73,18 +73,23 @@ impl<'a> SimulatorBot<'a> {
                         follow_brain
                     };
 
-                // Weight sweep output averaging
+                // Weight-batched forward: single CSR traversal for all sweep weights
+                let n_weights = weights.len();
+                network.forward_batched(&belief, weights, scratchpad);
+
                 let mut sum_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
-                for &w in *weights {
-                    network.forward(&belief, w, scratchpad);
-                    for i in 0..sueca_solver::constants::OUTPUT_COUNT {
-                        sum_outputs[i] += scratchpad[sueca_solver::constants::OUTPUT_START + i];
-                    }
+                for w in 0..n_weights {
+                    sum_outputs[0] +=
+                        scratchpad[(sueca_solver::constants::OUTPUT_START + 0) * n_weights + w];
+                    sum_outputs[1] +=
+                        scratchpad[(sueca_solver::constants::OUTPUT_START + 1) * n_weights + w];
+                    sum_outputs[2] +=
+                        scratchpad[(sueca_solver::constants::OUTPUT_START + 2) * n_weights + w];
                 }
 
                 let mut mean_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
                 for i in 0..sueca_solver::constants::OUTPUT_COUNT {
-                    mean_outputs[i] = sum_outputs[i] / (weights.len() as f64);
+                    mean_outputs[i] = sum_outputs[i] / (n_weights as f64);
                 }
 
                 let adjusted_outputs = mean_outputs;
@@ -114,7 +119,7 @@ impl<'a> SimulatorBot<'a> {
                 let card = resolve_intent(chosen_intent, game, seat);
 
                 if let Some(ref mut beh) = behavior {
-                    if chosen_intent < 4 {
+                    if chosen_intent < sueca_solver::constants::OUTPUT_COUNT {
                         beh.intent_counts[chosen_intent] += 1;
                     }
                     if game.current_trick_len == 0 {
@@ -150,7 +155,6 @@ impl<'a> SimulatorBot<'a> {
                     scratchpad[sueca_solver::constants::OUTPUT_START],
                     scratchpad[sueca_solver::constants::OUTPUT_START + 1],
                     scratchpad[sueca_solver::constants::OUTPUT_START + 2],
-                    scratchpad[sueca_solver::constants::OUTPUT_START + 3],
                 ];
 
                 let mut max_val = adjusted_outputs[0];
@@ -178,7 +182,7 @@ impl<'a> SimulatorBot<'a> {
                 let card = resolve_intent(chosen_intent, game, seat);
 
                 if let Some(ref mut beh) = behavior {
-                    if chosen_intent < 4 {
+                    if chosen_intent < sueca_solver::constants::OUTPUT_COUNT {
                         beh.intent_counts[chosen_intent] += 1;
                     }
                     if game.current_trick_len == 0 {
@@ -240,10 +244,10 @@ impl<'a> SimulatorBot<'a> {
 
                 let mut best_card = legal.trailing_zeros() as u8;
                 let mut max_ev = f64::NEG_INFINITY;
-                for (card, ev) in evs {
-                    if ev > max_ev {
-                        max_ev = ev;
-                        best_card = card;
+                for r in evs {
+                    if r.ev > max_ev {
+                        max_ev = r.ev;
+                        best_card = r.card;
                     }
                 }
                 best_card
@@ -423,7 +427,7 @@ pub fn evaluate_genome_delta(
                 &mut game_behavior,
             );
 
-            for i in 0..4 {
+            for i in 0..3 {
                 accum_behavior.intent_counts[i] += game_behavior.intent_counts[i];
             }
             accum_behavior.total_lead_points += game_behavior.total_lead_points;
@@ -524,7 +528,6 @@ mod tests {
             },
             evaluation: crate::config::EvaluationConfig {
                 n_deals: 2,
-                curriculum_gens: 2,
                 sweep_weights: vec![1.0],
                 seed: 1337,
             },
@@ -535,6 +538,7 @@ mod tests {
                 c_disjoint: 1.0,
                 c_mismatch: 0.5,
                 min_species_size: 1,
+                max_species: 20,
             },
             mutation: crate::config::MutationConfig {
                 p_add_node: 0.20,
@@ -548,12 +552,10 @@ mod tests {
             curriculum: crate::config::CurriculumConfig {
                 phase0_gens: 1,
                 bulking_gens: 1,
-                phase0_threshold: -0.10,
-                phase1_threshold: -0.05,
-                phase2_hof_min: 1,
                 min_gens_per_phase: 1,
                 adaptive_window: 10,
                 phase0_dataset: "expert_states_w20_d2.npz".to_string(),
+                pfs_sample_size: 100,
             },
             hall_of_fame: crate::config::HallOfFameConfig {
                 hof_size: 5,

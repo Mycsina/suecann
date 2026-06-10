@@ -124,8 +124,16 @@ pub fn sample_world(
     )
 }
 
+/// Result of PIMC evaluation for a single legal move.
+#[derive(Debug, Clone, Copy)]
+pub struct PimcResult {
+    pub card: u8,
+    pub ev: f64,
+    pub std_error: f64, // standard error of the mean EV (σ/√n)
+}
+
 /// Evaluates the Expected Value (EV) of each legal move using PIMC.
-/// Returns the list of moves and their computed EV scores.
+/// Returns per-move EV scores with standard errors from Welford variance tracking.
 /// Thread-safe and parallelized using Rayon.
 #[allow(clippy::too_many_arguments)]
 pub fn solve_pimc(
@@ -145,7 +153,7 @@ pub fn solve_pimc(
     n_worlds: usize,
     search_depth: u8,
     seed: u64,
-) -> Vec<(u8, f64)> {
+) -> Vec<PimcResult> {
     // 1. Determine legal moves for the player
     let mut legal_moves = [0u8; 10];
     let mut legal_count = 0;
@@ -165,7 +173,11 @@ pub fn solve_pimc(
         return Vec::new();
     }
     if legal_count == 1 {
-        return vec![(legal_moves[0], 0.0)];
+        return vec![PimcResult {
+            card: legal_moves[0],
+            ev: 0.0,
+            std_error: 0.0,
+        }];
     }
 
     // Pre-calculate target hand sizes for the remaining players.
@@ -185,16 +197,80 @@ pub fn solve_pimc(
     }
     let unknown_slice = &unknown_cards[..num_unknowns];
 
-    // 3. Parallel world evaluation using Rayon.
-    //    Each world derives a deterministic seed via splitmix64 mixing from
-    //    the world index — no per-call heap allocation.
-    type Accum = ([f64; 40], [u32; 40]);
+    // 3. Batch-process worlds with early termination using Welford variance tracking.
+    //    Worlds are processed in batches of BATCH_SIZE. After each batch, per-move
+    //    EV means and standard errors are computed via Welford's online algorithm.
+    //    If the best move's EV margin over the second-best exceeds CONFIDENCE_Z × SE_diff,
+    //    remaining worlds are skipped — the decision is statistically clear.
+    const BATCH_SIZE: usize = 50;
+    const MIN_WORLDS_FOR_EARLY_EXIT: usize = 50;
+    const CONFIDENCE_Z: f64 = 2.0; // ~95% confidence
 
-    let (sum_evs, counts) = (0..n_worlds)
-        .into_par_iter()
-        .fold(
-            || ([0.0f64; 40], [0u32; 40]),
-            |mut acc: Accum, world_idx| {
+    // Per-move Welford statistics: online mean + M2 for variance estimation.
+    // Parallel merge via Chan et al. formula — numerically stable across batches.
+    #[derive(Clone, Copy, Default)]
+    struct MoveWelford {
+        count: u32,
+        mean: f64,
+        m2: f64, // sum of squared differences from the mean
+    }
+
+    impl MoveWelford {
+        fn update(&mut self, value: f64) {
+            self.count += 1;
+            let delta = value - self.mean;
+            self.mean += delta / self.count as f64;
+            let delta2 = value - self.mean;
+            self.m2 += delta * delta2;
+        }
+
+        fn merge_parallel(&mut self, other: &MoveWelford) {
+            if other.count == 0 {
+                return;
+            }
+            if self.count == 0 {
+                *self = *other;
+                return;
+            }
+            let total = self.count + other.count;
+            let delta = other.mean - self.mean;
+            self.mean = (self.count as f64 * self.mean + other.count as f64 * other.mean)
+                / total as f64;
+            self.m2 += other.m2
+                + delta * delta * (self.count as f64 * other.count as f64) / total as f64;
+            self.count = total;
+        }
+
+        fn variance(&self) -> f64 {
+            if self.count < 2 {
+                0.0
+            } else {
+                self.m2 / (self.count - 1) as f64
+            }
+        }
+
+        fn std_error(&self) -> f64 {
+            if self.count == 0 {
+                f64::INFINITY
+            } else {
+                (self.variance() / self.count as f64).sqrt()
+            }
+        }
+    }
+
+    // Running Welford statistics across all batches (indexed by card id 0..40)
+    let mut running = [MoveWelford::default(); 40];
+
+    let mut batch_start = 0;
+    while batch_start < n_worlds {
+        let batch_end = (batch_start + BATCH_SIZE).min(n_worlds);
+
+        // Process this batch in parallel — each world returns its own per-move Welford stats
+        let batch_results: Vec<[MoveWelford; 40]> = (batch_start..batch_end)
+            .into_par_iter()
+            .map(|world_idx| {
+                let mut welfords = [MoveWelford::default(); 40];
+
                 let mut local_hands = [0u64; 4];
                 let mut local_seed =
                     seed.wrapping_add((world_idx as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15));
@@ -217,7 +293,7 @@ pub fn solve_pimc(
                 }
 
                 if !success {
-                    return acc;
+                    return welfords;
                 }
 
                 // Pre-compute invariants once per world (GameState is Copy)
@@ -241,7 +317,6 @@ pub fn solve_pimc(
 
                     for i in 0..legal_count {
                         let m = legal_moves[i];
-                        // Stack copy of pre-populated state (GameState derives Copy)
                         let mut sim_game = base_game;
                         let mut trick_points = base_trick_points;
 
@@ -260,38 +335,77 @@ pub fn solve_pimc(
                             &mut tt,
                             &mut trick_points,
                         );
-                        acc.0[m as usize] += val as f64;
-                        acc.1[m as usize] += 1;
+                        welfords[m as usize].update(val as f64);
                     }
                 });
-                acc
-            },
-        )
-        .reduce(
-            || ([0.0f64; 40], [0u32; 40]),
-            |a, b| {
-                let mut merged = a;
-                for i in 0..40 {
-                    merged.0[i] += b.0[i];
-                    merged.1[i] += b.1[i];
-                }
-                merged
-            },
-        );
 
-    let mut final_evs = Vec::with_capacity(legal_count);
-    for i in 0..legal_count {
-        let m = legal_moves[i];
-        let count = counts[m as usize];
-        let ev = if count > 0 {
-            sum_evs[m as usize] / (count as f64)
-        } else {
-            0.0
-        };
-        final_evs.push((m, ev));
+                welfords
+            })
+            .collect();
+
+        // Merge batch results into running statistics (parallel Welford merge)
+        for batch_w in &batch_results {
+            for card in 0..40 {
+                if batch_w[card].count > 0 {
+                    running[card].merge_parallel(&batch_w[card]);
+                }
+            }
+        }
+
+        // Early termination check
+        if batch_end >= MIN_WORLDS_FOR_EARLY_EXIT {
+            // Two-pass: find best and second-best legal moves by mean EV
+            let mut best_card = legal_moves[0];
+            let mut best_mean = running[best_card as usize].mean;
+            for i in 1..legal_count {
+                let m = legal_moves[i];
+                let mean = running[m as usize].mean;
+                if mean > best_mean {
+                    best_mean = mean;
+                    best_card = m;
+                }
+            }
+
+            let mut second_card = legal_moves[0];
+            let mut second_mean = f64::NEG_INFINITY;
+            for i in 0..legal_count {
+                let m = legal_moves[i];
+                if m != best_card {
+                    let mean = running[m as usize].mean;
+                    if mean > second_mean {
+                        second_mean = mean;
+                        second_card = m;
+                    }
+                }
+            }
+
+            if second_mean > f64::NEG_INFINITY {
+                let se_best = running[best_card as usize].std_error();
+                let se_second = running[second_card as usize].std_error();
+                let se_diff = (se_best.powi(2) + se_second.powi(2)).sqrt();
+
+                if (best_mean - second_mean) > CONFIDENCE_Z * se_diff {
+                    break; // Statistically significant — skip remaining worlds
+                }
+            }
+        }
+
+        batch_start = batch_end;
     }
 
-    final_evs
+    // Build final results from running Welford statistics
+    let mut results = Vec::with_capacity(legal_count);
+    for i in 0..legal_count {
+        let m = legal_moves[i];
+        let stats = &running[m as usize];
+        results.push(PimcResult {
+            card: m,
+            ev: if stats.count > 0 { stats.mean } else { 0.0 },
+            std_error: stats.std_error(),
+        });
+    }
+
+    results
 }
 
 #[cfg(test)]
@@ -429,7 +543,7 @@ mod tests {
         // Hearts Ace and 7 are legal moves because Hearts led
         let heart_moves: Vec<u8> = evs
             .iter()
-            .map(|&(m, _)| m)
+            .map(|r| r.card)
             .filter(|&m| crate::engine::CARD_SUIT[m as usize] == 0)
             .collect();
         assert!(heart_moves.contains(&9));
@@ -492,13 +606,13 @@ mod tests {
         );
 
         assert_eq!(evs1.len(), evs2.len());
-        for ((m1, ev1), (m2, ev2)) in evs1.iter().zip(evs2.iter()) {
-            assert_eq!(m1, m2, "Move mismatch at same seed");
+        for (r1, r2) in evs1.iter().zip(evs2.iter()) {
+            assert_eq!(r1.card, r2.card, "Move mismatch at same seed");
             assert!(
-                (ev1 - ev2).abs() < 1e-9,
+                (r1.ev - r2.ev).abs() < 1e-9,
                 "EV mismatch at same seed: {} vs {}",
-                ev1,
-                ev2
+                r1.ev,
+                r2.ev
             );
         }
     }
@@ -562,8 +676,8 @@ mod tests {
         assert!(!evs_b.is_empty());
         // With 50 worlds and different seeds, EVs should differ for at least one move
         let mut any_different = false;
-        for ((_, ev_a), (_, ev_b)) in evs_a.iter().zip(evs_b.iter()) {
-            if (ev_a - ev_b).abs() > 1e-9 {
+        for (r_a, r_b) in evs_a.iter().zip(evs_b.iter()) {
+            if (r_a.ev - r_b.ev).abs() > 1e-9 {
                 any_different = true;
                 break;
             }
@@ -608,11 +722,11 @@ mod tests {
         // Every legal move must appear exactly once in the output
         assert!(!evs.is_empty());
         let mut seen = std::collections::HashSet::new();
-        for (m, _) in &evs {
+        for r in &evs {
             assert!(
-                seen.insert(*m),
+                seen.insert(r.card),
                 "Move {} appears multiple times — base state was mutated between iterations",
-                m
+                r.card
             );
         }
         // All legal hearts cards should be present (player 0 has all 10 hearts)

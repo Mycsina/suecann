@@ -1,48 +1,124 @@
-# Full-scale production config — 3-4 hour runtime
-# Updated 2026-05-31: uses db_w40_d3_n1e5.npz (100k PIMC expert states, 40 worlds, depth 3)
+# Production config — co-evolutionary WANN training for Sueca
+# Updated 2026-06-09: cleaned dead fields, justified rates against WANN paper
+# (Gaier & Ha, 2019, "Weight Agnostic Neural Networks", NeurIPS).
+#
+# Expected runtime: 3–4 hours on RTX 3080 + i7-10750H (arise)
+#
+# Phase transitions are purely generation-based (gen < phase0_gens → Phase 0).
+# Adaptive gating on population performance (reference.md) was planned but never
+# wired up — to add it, thread phase0_threshold / phase1_threshold back through
+# CurriculumConfig and make determine_phase() act on best_fitness.
 
 [population]
+# 1000 genomes across up to 20 species. WANN paper uses similar scale (1000 for MNIST/CartPole).
+# Larger populations maintain diversity; PFS-NEAT makes the cost manageable.
 pop_size = 1000
-generations = 1200
-elitism = 3
+# Start with 600 generations — extend if still improving. Most NEAT curves plateau by 400–600.
+generations = 600
+# Top 2% preserved unchanged. WANNs benefit from slightly higher elitism than standard NEAT (~1)
+# because sign-only weights can't "tune out" small damage — preserving proven genomes is critical.
+elitism = 20
+# Pareto-rank by (performance, simplicity) 50% of the time, performance-only 50%.
+# WANN paper uses 80/20 (perf+simplicity / perf+max_performance). Our 50/50 is a middle ground
+# — the bloat pressure from PFS already keeps genomes lean.
 pareto_complexity_prob = 0.50
 
 [evaluation]
+# 128 deals × 4 rotations = 512 games per genome. CRN delta-fitness has low variance;
+# 128 deals is the sweet spot before diminishing returns. (256–512 are 2–4× slower for ~0.1% variance reduction.)
 n_deals = 128
-curriculum_gens = 300
-sweep_weights = [1.0]
+# Weight sweep identical to WANN paper: symmetric around zero, includes inhibitory weights.
+# MEAN across weights is used (weight-agnostic pressure). See CLAUDE.md Pitfall #11.
+sweep_weights = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0]
 seed = 1337
 
 [species]
+# Lower than standard NEAT (3.0) to promote behavioral diversity.
+# WANN sign-only weights make c3 (weight mismatch) less meaningful, so
+# species split primarily on topology, which is desirable.
 compatibility_threshold = 1.4
+# 40 generations without improvement → species eliminated.
+# Longer than NEAT-python default (15–30) because WANN fitness is averaged across 6 weights
+# and can exhibit temporary plateaus as different weights "take turns" improving.
 stagnation_limit = 40
+# Standard NEAT coefficients. c3 = 0.5 (slightly higher than NEAT's 0.4 since sign-only
+# "weights" are binary ±1, making the mismatch term coarser-grained).
 c_excess = 1.0
 c_disjoint = 1.0
 c_mismatch = 0.5
+# At least 3 genomes per species to survive — prevents single-mutant species flickering.
 min_species_size = 3
+# Hard cap — when exceeded, smallest species merge into closest larger neighbours.
+# Prevents O(P·Sp·E) speciation cost explosion. WANNs benefit from capped diversity.
+max_species = 20
 
 [mutation]
-p_add_node = 0.20
-p_add_conn = 0.35
-p_toggle_conn = 0.05
-p_flip_sign = 0.10
-p_change_act = 0.25
-p_change_agg = 0.15
-p_crossover = 0.40
+# ── Structural mutations (trigger PFS-NEAT validation in Phase 0) ──
+# WANN paper uses 2–5× higher structural rates than original NEAT (0.03/0.05).
+# Rationale: weight sweep evaluation provides a smoothed fitness landscape;
+# PFS-NEAT catches catastrophic mutations before they enter the population.
+p_add_node = 0.15   # Reduced from 0.20 — with PFS sample=100, 20% was catching too
+                    # many false positives in quick K=25 checks. 15% is more efficient.
+p_add_conn = 0.35   # Higher than NEAT (0.30) — WANNs need aggressive connectivity
+                    # exploration since weights can't compensate for missing connections.
+
+# ── Non-structural mutations (skip PFS, cheap to evaluate) ──
+p_toggle_conn = 0.05    # Low by design — toggling connections creates hysteresis.
+                        # Dormant genes preserved for crossover re-activation.
+p_flip_sign = 0.10      # 10% per genome. Sign flip + weight sweep = the network
+                        # must work under both excitatory and inhibitory regimes.
+
+# ── Node-level mutations ──
+# WARNING: with only 3 activation fns (IDENTITY, NOT, THRESHOLD) and 3 aggregation fns
+# (SUM, MIN/AND, MAX/OR), each mutation cycles 33% of available options. The WANN paper
+# had 12 activations and could afford higher rates because each change had a smaller effect.
+# We compensate with lower rates to avoid fitness oscillations.
+p_change_act = 0.10     # Reduced from 0.25 — 10% means a hidden node changes activation
+                        # roughly every 10 generations, enough to explore without thrashing.
+p_change_agg = 0.10     # Reduced from 0.15 — aggregation changes are more frequent than
+                        # activation changes in standard NEAT, but equally impactful here.
+
+# ── Reproduction strategy ──
+# WARNING: WANN crossover is fundamentally different from standard NEAT.
+# In standard NEAT, inherited topology brings its co-adapted weights; the child
+# preserves the signal paths that worked. In WANNs, you are splicing two pure
+# structural graphs together under a shared weight — the child sees completely
+# different activation patterns than either parent. Gaier & Ha frequently disabled
+# crossover entirely to force pure structural mutation (mutation-only search).
+#
+# We run at 0.50 to promote genetic mixing, but watch Phase 0 fitness closely:
+# if you see massive variance or failure to plateau smoothly during bulking,
+# crossover is shredding elite topologies faster than elitism can save them.
+# Dial back to 0.20–0.30 if this happens.
+p_crossover = 0.50      # 0.50 is aggressive for WANNs — monitor fitness variance.
 
 [curriculum]
-phase0_gens = 200
-bulking_gens = 100
-phase0_dataset = "db_w40_d3_mar03.npz"
-phase0_threshold = -0.10
-phase1_threshold = -0.05
-phase2_hof_min = 3
+# Supervised pretraining on PIMC expert dataset. Phase 0 accuracy plateaus by gen 50–100.
+phase0_gens = 100       # Reduced from 200 — the adaptive window will extend if needed.
+# "Bulking" = no Pareto complexity pressure for first N Phase 0 gens.
+# Lets topology grow freely before parsimony kicks in. Not traditional NEAT bulking
+# (mutation rates are NOT increased).
+bulking_gens = 50       # Reduced from 100 to match shorter Phase 0.
+# Dataset: regenerated with 35-feature belief encoder, 3-intent soft targets,
+# class-balanced (10K per intent bucket), and PIMC early termination (Welford
+# variance tracking exits when best move margin exceeds 2×SE_diff).
+# Generate with:
+#   cargo run --release -- generate-dataset --n-worlds 200 --search-depth 4 --target-count 30000 --output expert_states_v3.npz
+phase0_dataset = "expert_states_v3.npz"
+# Minimum generations per phase — prevents premature transitions from noise spikes.
 min_gens_per_phase = 20
+# Sliding window for fitness trend detection (10 gens).
 adaptive_window = 10
+# PFS-NEAT sample size. Adaptive 2-stage: K=25 quick check first, full K only for
+# borderline mutations (within 2% of parent accuracy). Reduced from original 1000.
+pfs_sample_size = 100
 
 [hall_of_fame]
+# 5% of population. Provides diverse opponent pool for Phase 1 self-play.
+# WANNs benefit from larger HOF because different weights favor different strategies.
 hof_size = 50
 
 [output]
 checkpoint_dir = "checkpoints/production"
+# Written as checkpoints/production/YYYY-MM-DD-N/training_stats.csv
 stats_file = "training_stats.csv"

@@ -7,7 +7,6 @@ pareto_complexity_prob = 0.80
 
 [evaluation]
 n_deals = 2
-curriculum_gens = 2
 sweep_weights = [1.0]
 seed = 1337
 
@@ -32,9 +31,6 @@ p_crossover = 0.40
 phase0_gens = 1
 bulking_gens = 1
 phase0_dataset = "expert_states_w20_d2.npz"
-phase0_threshold = -0.10
-phase1_threshold = -0.05
-phase2_hof_min = 1
 min_gens_per_phase = 1
 adaptive_window = 10
 
@@ -42,5 +38,5 @@ adaptive_window = 10
 hof_size = 5
 
 [output]
-checkpoint_dir = "checkpoints/test_run"
-stats_file = "checkpoints/test_run/training_stats.csv"
+checkpoint_dir = "checkpoints/test"
+stats_file = "training_stats.csv"

@@ -50,7 +50,7 @@ cargo build -p sueca_wann --release
 ./target/release/sueca_wann train --config configs/default.toml --resume
 ```
 
-Training creates dated run folders containing `training_stats.csv`, `training_state.bin`, and a `genomes/` subdirectory with `best_genome_final.json`, `hof_final.json`.
+Training creates dated run folders containing `training_stats.csv`, `training_state.bin`, a `data/` subdirectory (human-readable runtime snapshots — tabu lists, innovation registries, species summaries, MAP-Elites grid, population snapshots), and a `genomes/` subdirectory with `best_genome_final.json`, `hof_final.json`.
 
 ## Running Benchmarks
 
@@ -75,6 +75,16 @@ Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topol
 ```
 
 Generates class-balanced PIMC expert states for Phase 0 pretraining. Samples only the current player's turn (not all 4 seats) to ensure legal-move / perspective alignment.
+Outputs 35-feature belief states with 3-intent soft targets (MAX_FORCE, EFFICIENT_WIN, EQUITY_BUILDER).
+
+### Migrating Legacy Datasets
+
+Old datasets with 33-feature states and 4 intents must be regenerated (the feature indices changed).
+For intent-only migration (4→3), use:
+
+```bash
+python scripts/migrate_intents.py db_w40_d3_mar03.npz --output db_w40_d3_mar03_v2.npz
+```
 
 ## Optimizing Weights
 
@@ -110,7 +120,7 @@ Saves `checkpoints/run_comparison.png` with 4 panels: fitness, delta vs Heuristi
 ## Architecture
 
 ```
-Belief State (33 floats) → WANN (logical gates) → Oracle Intent (4 outputs) → Legal Subsystem → Card
+Belief State (35 floats) → WANN (logical gates) → Oracle Intent (3 outputs) → Legal Subsystem → Card
 ```
 
 **Crate dependency**: `sueca_wann` → `sueca_solver`. The solver is a pure game engine (rlib only, no PyO3). The wann crate contains WANN inference, evaluator, NEAT evolution, and CLI.
@@ -133,10 +143,11 @@ Belief State (33 floats) → WANN (logical gates) → Oracle Intent (4 outputs) 
 - `genome.rs` — Genome representation, topological sort, CSR conversion
 - `population.rs` — Population management, crossover, Pareto ranking, parallel breeding
 - `species.rs` — Compatibility distance, speciation
-- `mutations.rs` — NEAT mutation operators, innovation registry
+- `mutations.rs` — NEAT mutation operators, innovation registry, tabu veto list, PFS-NEAT mutation classification
 - `hall_of_fame.rs` — HOF management with sampling
-- `map_elites.rs` — MAP-Elites quality-diversity archive
+- `map_elites.rs` — MAP-Elites quality-diversity archive with grid export
 - `optimize.rs` — Differential Evolution weight optimization
+- `runtime_data.rs` — Runtime state snapshots for checkpoint inspection and resume fidelity
 - `constants.rs` — Evolutionary hyperparameters, feature/intent name mappings
 - `benchmark.rs` — Tournament benchmarking
 - `compile_rules.rs` — Rule compiler, Graphviz DOT export, PNG rendering
@@ -145,60 +156,69 @@ Belief State (33 floats) → WANN (logical gates) → Oracle Intent (4 outputs) 
 - `checkpoint.rs` — Training state serialization (Bincode)
 - `config.rs` — TOML configuration loading
 
-### Belief State (33 inputs, all in [0,1])
+### Belief State (35 inputs, all in [0,1])
 
-| # | Field | Type | Normalization |
-|---|-------|------|---------------|
-| 0 | Has_Led_Suit | Bool | |
-| 1 | Has_Trump | Bool | |
-| 2 | Led_Suit_Power | Float | max rank in led suit / 9.0 |
-| 3 | Trump_Power | Float | max rank in trump / 9.0 |
-| 4 | Hand_Point_Density | Float | hand points / remaining game points |
+Redesigned to capture only information a human player can observe — no future-trick knowledge.
+Pruned 8 low-signal features (side-suit Ace/7 tracking, raw suit power) in favor of 10 tactical-affordance
+features (boss detection, suit counts, "can I win?" evaluation).
+
+| # | Field | Type | Description |
+|---|-------|------|-------------|
+| 0 | Has_Led_Suit | Bool | Do I hold any card of the led suit? |
+| 1 | Has_Trump | Bool | Do I hold any trump? |
+| 2 | Led_Suit_Count | Float | Cards held in led suit / 10.0 |
+| 3 | Trump_Count | Float | Trumps held / 10.0 |
+| 4 | Hand_Point_Density | Float | My hand points / unplayed points |
 | 5 | Am_I_Leading | Bool | 1st to play in trick |
 | 6 | Am_I_Last_To_Play | Bool | 4th to play |
-| 7 | Is_Partner_Winning | Bool | |
-| 8 | Trick_Point_Value | Float | trick points / 44 |
-| 9 | Has_Trick_Been_Cut | Bool | trump played when led suit ≠ trump |
-| 10 | Partner_Void_Led | Bool | |
-| 11 | Partner_Void_Trump | Bool | |
-| 12 | Any_Opp_Void_Led | Bool | either opponent |
-| 13 | Any_Opp_Void_Trump | Bool | either opponent |
-| 14 | Led_Suit_Ace_Played | Bool | in previous tricks |
-| 15 | Led_Suit_7_Played | Bool | in previous tricks |
-| 16 | Trump_Ace_Played | Bool | |
-| 17 | Game_Pts_Remaining | Float | unplayed points / 120 |
-| 18 | Trick_Number | Float | current trick index / 9.0 |
-| 19 | Trumps_Remaining | Float | unplayed trump cards / 10.0 |
-| 20 | Score_Delta | Float | (our_pts − opp_pts + 120) / 240 |
-| 21 | Side0_Depletion | Float | played cards of side-suit 0 / 10 |
-| 22 | Side0_Ace_Played | Bool | in previous tricks |
-| 23 | Side0_7_Played | Bool | in previous tricks |
-| 24 | Side1_Depletion | Float | played cards of side-suit 1 / 10 |
-| 25 | Side1_Ace_Played | Bool | in previous tricks |
-| 26 | Side1_7_Played | Bool | in previous tricks |
-| 27 | Side2_Depletion | Float | played cards of side-suit 2 / 10 |
-| 28 | Side2_Ace_Played | Bool | in previous tricks |
-| 29 | Side2_7_Played | Bool | in previous tricks |
-| 30 | Points_Secured_Us | Float | Our team's secured game points / 120.0 |
-| 31 | Known_Void_Suits_Count | Float | Number of suits where any player is known void / 4.0 |
-| 32 | Depleted_Suits_Count | Float | Number of fully-depleted suits / 4.0 |
+| 7 | Is_Partner_Winning | Bool | Is partner currently winning the trick? |
+| 8 | Trick_Point_Value | Float | Points in current trick so far / 44.0 |
+| 9 | Has_Trick_Been_Cut | Bool | Trump played when led suit ≠ trump |
+| 10 | Partner_Void_Led | Bool | Partner known void in led suit? |
+| 11 | Partner_Void_Trump | Bool | Partner known void in trump? |
+| 12 | Any_Opp_Void_Led | Bool | Either opponent void in led suit? |
+| 13 | Any_Opp_Void_Trump | Bool | Either opponent void in trump? |
+| 14 | Led_Suit_Ace_Played | Bool | Led suit Ace already played? |
+| 15 | Led_Suit_7_Played | Bool | Led suit 7 (manilha) already played? |
+| 16 | Trump_Ace_Played | Bool | Trump Ace already played? |
+| 17 | Holds_Boss_Led | Bool | Do I hold the highest unplayed card in led suit? |
+| 18 | Holds_Boss_Trump | Bool | Do I hold the highest unplayed card in trump? |
+| 19 | Can_Beat_Winner | Bool | Can any legal card beat the current winner? |
+| 20 | Min_Winning_Cost | Float | Points of cheapest winning card / 11.0 (0 if N/A) |
+| 21 | Min_Sacrifice_Cost | Float | Points of cheapest legal card / 11.0 |
+| 22 | Game_Pts_Remaining | Float | Unplayed points / 120.0 |
+| 23 | Trick_Number | Float | Current trick index / 9.0 |
+| 24 | Trumps_Remaining | Float | Unplayed trump count / 10.0 |
+| 25 | Score_Delta | Float | (our_pts − opp_pts + 120) / 240 |
+| 26 | My_Void_Count | Float | Suits I'm void in / 3.0 |
+| 27 | Longest_Side_Suit | Float | Max cards in any non-trump, non-led suit / 10.0 |
+| 28 | Shortest_Side_Suit | Float | Min cards in any non-trump, non-led suit / 10.0 |
+| 29 | Side0_Depletion | Float | Played cards of side-suit 0 / 10 |
+| 30 | Side1_Depletion | Float | Played cards of side-suit 1 / 10 |
+| 31 | Side2_Depletion | Float | Played cards of side-suit 2 / 10 |
+| 32 | Points_Secured_Us | Float | Our team's secured game points / 120.0 |
+| 33 | Known_Void_Suits_Count | Float | Suits where any player is known void / 4.0 |
+| 34 | Depleted_Suits_Count | Float | Fully-depleted suits / 4.0 |
 
-### Oracle Intents (4 outputs)
+### Oracle Intents (3 outputs)
+
+MIN_FORCE removed — EFFICIENT_WIN subsumes its useful follow-player behavior
+(play cheapest winner, else concede). The resolver remaps WANN outputs 0,1,2
+to legacy resolver intents 0,2,3 internally.
 
 | ID | Intent | Action | Strategic Meaning |
 |----|--------|--------|-------------------|
 | 0 | MAX_FORCE | Aggressive / control | Lead high trump/master card or play max-rank card |
-| 1 | MIN_FORCE | Passive / resource saving | Lead longest suit or play lowest legal card |
-| 2 | EFFICIENT_WIN | Tactical exploitation | Play min card that beats winner, or cut cheaply |
-| 3 | EQUITY_BUILDER | Partnership / voids | Lead short suit or load points / cut when partner is void |
+| 1 | EFFICIENT_WIN | Tactical exploitation | Play min card that beats winner, or cut cheaply |
+| 2 | EQUITY_BUILDER | Partnership / voids | Lead short suit or load points / cut when partner is void |
 
 All intents are resolved to legal plays contextually by the heuristic resolver, guaranteeing 100% legality.
-When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied maximums (not deterministic argmax).
+When WANN outputs tie, a random intent is chosen among the tied maximums (not deterministic argmax).
 
 ### WANN Constraints
 
 - **Gene representation**: Connection genes `[5,N]` (innovation, src, dst, sign ∈ {+1,−1}, enabled). Node genes `[4,M]` (id, type, activation_fn, aggregation_fn).
-- **Initialization**: 33 input + 1 bias + 4 output nodes. All genomes start with these base nodes and receive random connections.
+- **Initialization**: 35 input + 1 bias + 3 output nodes (BIAS_ID=35, OUTPUT_START=36, FIRST_HIDDEN_ID=39). All genomes start with these base nodes and receive random connections.
 - **Sign-only weights**: Connections carry only a sign (+1 or −1), not a learned weight. A shared weight W is used for evaluation. sign=-1 inverts the signal (1.0 - x) before aggregation.
 - **Aggregation functions** (3 only): SUM=0, MIN(AND)=1, MAX(OR)=2. **No MEAN** — it causes float-precision issues at the THRESHOLD boundary.
 - **Activation functions** (3 only): IDENTITY=0, NOT=1, THRESHOLD=2. **No SIGMOID** — it breaks IF/THEN rule extraction.
@@ -209,17 +229,22 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 
 **Phase 0 (gens 0–`phase0_gens`): Supervised pretraining.**
 * **Dataset Split:** Expert PIMC dataset is split into `lead_dataset` and `follow_dataset` using the `BeliefFeature::AmILeading` flag.
-* **PFS-NEAT:** Populations start with exactly 0 active connections. Connection mutations are evaluated dynamically on 1000-state samples and rejected if they degrade accuracy compared to their parents (Online Mutational Filtering). Degraded mutations are logged into a FIFO `TabuVetoList` of size 1000.
+* **PFS-NEAT:** Populations start with exactly 0 active connections. Mutations are classified as `Structural` (add_node, add_conn) or `NonStructural` (toggle, flip_sign, change_act, change_agg). Only structural mutations trigger PFS validation. Adaptive 2-stage sampling: quick K=25 check first; only borderline cases (within 2% accuracy) run the full configurable `pfs_sample_size` (default 100, down from original 1000). Degraded mutations are logged into a FIFO `TabuVetoList` of size 1000.
 * **Fitness:** Supervised classification accuracy on respective splits. No game simulation.
+* **Scratchpad reuse:** PFS evaluations reuse a single pre-allocated scratchpad buffer per child, avoiding repeated allocations in the breeding hot path.
 
 **Phase 1 (gens `phase0_gens`–`generations`): Co-evolutionary Self-play.**
 * **Co-Evolution:** Lead and Follow brains co-evolve. Matches pair candidate Lead WANNs with reference Follow WANN champions, and vice versa.
 * **Dynamic Routing:** Games are played trick-by-trick and card-by-card. The simulator dynamically routes queries to the Lead or Follow brain on every decision slice based on `belief[BeliefFeature::AmILeading as usize]`.
 * **Fitness:** Raw game-point delta vs HeuristicBot. Partners/opponents sampled from HOF and MAP-Elites. Delta computed via Common Random Numbers on the same duplicate deals (seat rotations).
 
-**Phase 0→1 HOF transfer**: HOF entries are re-evaluated under Phase 1 fitness at the transition point, preserving knowledge from supervised pretraining.
+**Phase 0→1 HOF transfer**: HOF entries are re-evaluated under Phase 1 fitness at the transition point, preserving knowledge from supervised pretraining. Uniqueness filtering uses O(1) innovation fingerprint hashing (`Genome::innovation_fingerprint()`) instead of O(pop²·E) pairwise compatibility distance — hashes the sorted list of (innovation, sign) of enabled connections plus hidden node (id, activation, aggregation).
+
+**Speciation**: First-fit (lazy) assignment: each genome is tested against species serially until one accepts it, reducing average cost from O(P · Sp · E) to O(P · Sp_checked · E). Species count capped at `max_species` (default 20) via post-speciation merging of smallest species into closest larger neighbours.
 
 **Parallelism**: Rayon parallelizes genome→WANN conversion, speciation distance computation, Pareto domination detection, stagnation updates, and offspring generation. Innovation registry uses a Mutex for thread-safe mutation operations.
+
+**Per-generation profiling**: The training loop prints per-phase timings each generation: `phase`, `convert`, `eval`, `stats`, `reseed`, `breed`, `ckpt`. The CSV `elapsed_sec` column captures total wall-clock time including speciation and breeding (not just evaluation).
 
 ### Evolution
 
@@ -229,7 +254,7 @@ When WANN outputs tie (e.g. all zeros), a random intent is chosen among the tied
 - **Multi-objective Pareto ranking**: 50% of the time, rank by (performance, simplicity) Pareto front with lexicographic tie-breaking; 50% by performance only. Prevents bloat while maintaining selection pressure.
 - **Hall of Fame**: Frozen champion archive (size 50). Sampled as partners/opponents during Phase 1.
 - **MAP-Elites**: 10×10 grid archiving behavioral specialists by intent preference and aggression. Sampled as opponents with 50% probability when HOF/MAP-Elites is selected (vs OldHeuristicBot baseline).
-- **Mutations**: Add node, add connection, toggle connection, flip sign, change activation, change aggregation. No weight mutation.
+- **Mutations**: Add node, add connection, toggle connection, flip sign, change activation, change aggregation. No weight mutation. Classified as `Structural` (add_node, add_conn — triggers PFS) or `NonStructural` (all others — skips PFS).
 
 ## Code Conventions
 

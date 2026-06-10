@@ -1,4 +1,4 @@
-use crate::genome::INPUT_COUNT;
+use crate::genome::{INPUT_COUNT, OUTPUT_COUNT};
 use npyz::NpyFile;
 use std::fs::File;
 use std::io::BufReader;
@@ -8,7 +8,7 @@ use zip::ZipArchive;
 pub struct ExpertDataset {
     pub states: Vec<f64>, // flat array of states, shape (N, INPUT_COUNT)
     pub num_states: usize,
-    pub soft_intents: Vec<f32>, // flat array of shape (N, 4)
+    pub soft_intents: Vec<f32>, // flat array of shape (N, OUTPUT_COUNT)
     #[allow(dead_code)]
     pub legal_masks: Vec<u8>,
 }
@@ -25,7 +25,7 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
         );
         let num_states = 100;
         let states = vec![0.0; num_states * INPUT_COUNT];
-        let soft_intents = vec![0.25f32; num_states * 4];
+        let soft_intents = vec![0.33f32; num_states * OUTPUT_COUNT as usize];
         let legal_masks = vec![0x0F; num_states];
         return Ok(ExpertDataset {
             states,
@@ -47,27 +47,38 @@ pub fn load_expert_dataset<P: AsRef<Path>>(
         states_f32.into_iter().map(|v| v as f64).collect()
     };
 
-    // Read intents.npy (dynamically handle legacy u8 vs new f32 soft targets)
+    // Read intents.npy (expects 3-intent format: MAX_FORCE, EFFICIENT_WIN, EQUITY_BUILDER)
     let soft_intents: Vec<f32> = {
         let mut intents_file = archive.by_name("intents.npy")?;
         let intents_reader = NpyFile::new(&mut intents_file)?;
         let shape = intents_reader.shape().to_vec();
 
         if shape.len() == 1 || (shape.len() == 2 && shape[1] == 1) {
+            // Legacy u8 hard-intent format — remap to 3-output soft targets
             let intents_u8: Vec<u8> = intents_reader.into_vec()?;
-            let mut soft = Vec::with_capacity(intents_u8.len() * 4);
+            let mut soft = Vec::with_capacity(intents_u8.len() * OUTPUT_COUNT as usize);
             for &val in &intents_u8 {
-                let mut vec = [0.0f32; 4];
-                if (val as usize) < 4 {
-                    vec[val as usize] = 1.0;
+                let v = val as usize;
+                let mut vec = [0.0f32; 3];
+                // 0=MAX_FORCE stays, 1=MIN_FORCE→EFFICIENT_WIN, 2=EFFICIENT_WIN→EFFICIENT_WIN, 3=EQUITY_BUILDER→2
+                if v == 0 {
+                    vec[0] = 1.0;
+                } else if v <= 2 {
+                    vec[1] = 1.0;  // MIN_FORCE or EFFICIENT_WIN → new EFFICIENT_WIN
+                } else if v == 3 {
+                    vec[2] = 1.0;  // EQUITY_BUILDER stays
                 }
                 soft.extend_from_slice(&vec);
             }
             soft
-        } else if shape.len() == 2 && shape[1] == 4 {
+        } else if shape.len() == 2 && shape[1] == OUTPUT_COUNT as u64 {
             intents_reader.into_vec()?
         } else {
-            return Err(format!("Unexpected intents shape: {:?}", shape).into());
+            return Err(format!(
+                "Unexpected intents shape: {:?} (expected {} intents per state). \
+                 Migrate legacy datasets with: python scripts/migrate_intents.py <file>",
+                shape, OUTPUT_COUNT
+            ).into());
         }
     };
 

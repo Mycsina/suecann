@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BinaryHeap, HashSet};
+use std::hash::Hasher;
 
 pub use sueca_solver::constants::{
     BIAS_ID, FIRST_HIDDEN_ID, INPUT_COUNT, INPUT_START, OUTPUT_COUNT, OUTPUT_START,
@@ -254,6 +255,33 @@ impl Genome {
             conn_genes: self.conn_genes.clone(),
             next_innovation: self.next_innovation,
         }
+    }
+
+    /// Fast structural fingerprint for deduplication.
+    /// Hashes the sorted list of (innovation, sign) of enabled connections.
+    /// Two genomes with identical enabled topology AND sign patterns will
+    /// produce the same hash — useful for O(1) uniqueness checks without
+    /// the O(E) cost of `compatibility_distance`.
+    pub fn innovation_fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for c in &self.conn_genes {
+            if c.enabled {
+                hasher.write_usize(c.innovation);
+                hasher.write_i8(c.sign);
+            }
+        }
+        // Also hash node count and hidden node type info for extra
+        // discrimination (two genomes can have same conns but different
+        // activation/aggregation functions on hidden nodes).
+        hasher.write_usize(self.node_genes.len());
+        for n in &self.node_genes {
+            if n.node_type == NodeType::HIDDEN {
+                hasher.write_usize(n.id);
+                hasher.write_u8(n.activation_fn as u8);
+                hasher.write_u8(n.aggregation_fn as u8);
+            }
+        }
+        hasher.finish()
     }
 
     /// Two-pointer crossover. O(n + m) time, zero heap allocations beyond the result.

@@ -61,10 +61,42 @@ impl MapElitesArchive {
             Some(occupied[idx].copy())
         }
     }
+
+    /// Export grid occupancy as a lightweight serializable snapshot.
+    /// Each cell is `None` if unoccupied, or `Some(MapElitesCellSnapshot)`
+    /// with fitness, generation, connection/node counts.
+    pub fn dump_grid(&self) -> Vec<Vec<Option<MapElitesCellSnapshot>>> {
+        self.grid
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        cell.as_ref().map(|entry| MapElitesCellSnapshot {
+                            fitness: entry.fitness,
+                            generation: entry.generation,
+                            n_connections: entry.genome.conn_genes.len(),
+                            n_enabled: entry.genome.num_enabled(),
+                            n_nodes: entry.genome.node_genes.len(),
+                        })
+                    })
+                    .collect()
+            })
+            .collect()
+    }
 }
 
 impl Default for MapElitesArchive {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Lightweight per-cell snapshot for JSON export (no full genome).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapElitesCellSnapshot {
+    pub fitness: f64,
+    pub generation: usize,
+    pub n_connections: usize,
+    pub n_enabled: usize,
+    pub n_nodes: usize,
 }

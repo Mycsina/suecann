@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::dataset::ExpertDataset;
 use crate::genome::Genome;
-use crate::mutations::{apply_mutations, InnovationRegistry, TabuVetoList};
+use crate::mutations::{apply_mutations, InnovationRegistry, MutationOutcome, TabuVetoList};
 use crate::species::{speciate, Species};
 use crate::wann_network::RustWannNetwork;
 
@@ -282,6 +282,15 @@ impl Population {
             self.config.species.c_mismatch,
         );
 
+        // Enforce species cap to prevent proliferation
+        crate::species::enforce_species_cap(
+            &mut self.species_list,
+            self.config.species.max_species,
+            self.config.species.c_excess,
+            self.config.species.c_disjoint,
+            self.config.species.c_mismatch,
+        );
+
         // 2. Update stagnation (parallel — each species independent)
         let fitnesses = &self.fitnesses;
         self.species_list.par_iter_mut().for_each(|sp| {
@@ -504,7 +513,7 @@ impl Population {
                             };
 
                         let parent_copy = child.copy();
-                        let n_mut = apply_mutations(
+                        let outcome = apply_mutations(
                             &mut child,
                             registry,
                             tabu_list,
@@ -517,23 +526,50 @@ impl Population {
                             p_change_agg,
                         );
 
-                        if n_mut > 0 && current_phase == 0 {
+                        // PFS-NEAT: only validate structural mutations (topology changes).
+                        // Parameter tweaks (sign flip, act/agg change) are inherently
+                        // incremental and rarely cause catastrophic accuracy loss.
+                        if outcome == MutationOutcome::Structural && current_phase == 0 {
                             if let Some((dataset, sweep_weights)) = phase0_eval_data {
                                 let parent_net = parent_copy.to_rust_wann();
-                                let parent_acc = evaluate_single_phase0_sample(
-                                    &parent_net,
-                                    dataset,
-                                    sweep_weights,
-                                    1000,
+                                let child_net = child.to_rust_wann();
+                                let pfs_k = self.config.curriculum.pfs_sample_size;
+
+                                // Pre-allocate scratchpad once for both parent and child
+                                let max_nodes = parent_net.num_nodes.max(child_net.num_nodes);
+                                let mut pfs_scratchpad = vec![0.0f64; max_nodes * sweep_weights.len()];
+
+                                // Adaptive 2-stage: quick K=25 check first.
+                                let quick_k = 25.min(pfs_k);
+                                let parent_quick = evaluate_single_phase0_sample_scratchpad(
+                                    &parent_net, dataset, sweep_weights, quick_k,
+                                    &mut pfs_scratchpad,
+                                );
+                                let child_quick = evaluate_single_phase0_sample_scratchpad(
+                                    &child_net, dataset, sweep_weights, quick_k,
+                                    &mut pfs_scratchpad,
                                 );
 
-                                let child_net = child.to_rust_wann();
-                                let child_acc = evaluate_single_phase0_sample(
-                                    &child_net,
-                                    dataset,
-                                    sweep_weights,
-                                    1000,
-                                );
+                                let diff = child_quick - parent_quick;
+                                let child_acc = if diff < -0.05 {
+                                    child_quick
+                                } else if diff.abs() <= 0.02 && pfs_k > quick_k {
+                                    evaluate_single_phase0_sample_scratchpad(
+                                        &child_net, dataset, sweep_weights, pfs_k,
+                                        &mut pfs_scratchpad,
+                                    )
+                                } else {
+                                    child_quick
+                                };
+
+                                let parent_acc = if diff.abs() <= 0.02 && pfs_k > quick_k {
+                                    evaluate_single_phase0_sample_scratchpad(
+                                        &parent_net, dataset, sweep_weights, pfs_k,
+                                        &mut pfs_scratchpad,
+                                    )
+                                } else {
+                                    parent_quick
+                                };
 
                                 if child_acc < parent_acc {
                                     for c in &child.conn_genes {
@@ -676,6 +712,22 @@ pub fn evaluate_single_phase0_sample(
     sweep_weights: &[f64],
     sample_size: usize,
 ) -> f64 {
+    let mut scratchpad = vec![0.0f64; network.num_nodes * sweep_weights.len()];
+    evaluate_single_phase0_sample_scratchpad(
+        network, dataset, sweep_weights, sample_size, &mut scratchpad,
+    )
+}
+
+/// Same as `evaluate_single_phase0_sample` but reuses a caller-provided
+/// scratchpad to avoid allocation in hot loops (PFS-NEAT breeding).
+#[inline(always)]
+pub fn evaluate_single_phase0_sample_scratchpad(
+    network: &RustWannNetwork,
+    dataset: &ExpertDataset,
+    sweep_weights: &[f64],
+    sample_size: usize,
+    scratchpad: &mut [f64],
+) -> f64 {
     use crate::genome::{INPUT_COUNT, OUTPUT_COUNT, OUTPUT_START};
 
     let n_states = dataset.num_states.min(sample_size);
@@ -683,7 +735,9 @@ pub fn evaluate_single_phase0_sample(
         return 0.0;
     }
 
-    let mut scratchpad = vec![0.0f64; network.num_nodes];
+    // Ensure scratchpad is large enough for weight-batched forward pass
+    let n_weights = sweep_weights.len();
+    debug_assert!(scratchpad.len() >= network.num_nodes * n_weights);
     let mut correct: u32 = 0;
 
     for idx in 0..n_states {
@@ -692,32 +746,29 @@ pub fn evaluate_single_phase0_sample(
         let mut inputs = [0.0f64; INPUT_COUNT];
         inputs.copy_from_slice(&dataset.states[base..base + INPUT_COUNT]);
 
+        network.forward_batched(&inputs, sweep_weights, scratchpad);
+
         let mut total_outputs = [0.0f64; OUTPUT_COUNT];
-        for &w in sweep_weights {
-            network.forward(&inputs, w, &mut scratchpad);
-            total_outputs[0] += scratchpad[OUTPUT_START];
-            total_outputs[1] += scratchpad[OUTPUT_START + 1];
-            total_outputs[2] += scratchpad[OUTPUT_START + 2];
-            total_outputs[3] += scratchpad[OUTPUT_START + 3];
+        for w in 0..n_weights {
+            total_outputs[0] += scratchpad[(OUTPUT_START + 0) * n_weights + w];
+            total_outputs[1] += scratchpad[(OUTPUT_START + 1) * n_weights + w];
+            total_outputs[2] += scratchpad[(OUTPUT_START + 2) * n_weights + w];
         }
 
-        // Unrolled argmax
+        // Unrolled argmax (3 intents)
         let v0 = total_outputs[0];
         let v1 = total_outputs[1];
         let v2 = total_outputs[2];
-        let v3 = total_outputs[3];
 
-        let best_intent = if v0 >= v1 && v0 >= v2 && v0 >= v3 {
+        let best_intent = if v0 >= v1 && v0 >= v2 {
             0
-        } else if v1 >= v2 && v1 >= v3 {
+        } else if v1 >= v2 {
             1
-        } else if v2 >= v3 {
-            2
         } else {
-            3
+            2
         };
 
-        if dataset.soft_intents[idx * 4 + best_intent] > 0.0 {
+        if dataset.soft_intents[idx * OUTPUT_COUNT + best_intent] > 0.0 {
             correct += 1;
         }
     }
@@ -741,6 +792,15 @@ pub fn speciate_and_evolve_joint(
         lead_pop.config.species.compatibility_threshold,
         lead_pop.next_species_id,
         lead_pop.generation,
+        lead_pop.config.species.c_excess,
+        lead_pop.config.species.c_disjoint,
+        lead_pop.config.species.c_mismatch,
+    );
+
+    // Enforce species cap
+    crate::species::enforce_species_cap(
+        &mut lead_pop.species_list,
+        lead_pop.config.species.max_species,
         lead_pop.config.species.c_excess,
         lead_pop.config.species.c_disjoint,
         lead_pop.config.species.c_mismatch,

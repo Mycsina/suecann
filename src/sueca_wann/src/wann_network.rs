@@ -287,6 +287,157 @@ impl RustWannNetwork {
         }
     }
 
+    /// Weight-batched forward pass: evaluates all sweep weights in a single CSR
+    /// traversal instead of N separate passes. This eliminates redundant memory
+    /// fetches — the CSR graph topology is loaded once and all weights are applied
+    /// while node data sits in L1 cache.
+    ///
+    /// Scratchpad layout: `num_nodes * n_weights` f64 values, interleaved per node.
+    /// Node `n` at weight index `w` is at `scratchpad[n * n_weights + w]`.
+    ///
+    /// LLVM will auto-vectorize the inner weight loop for n_weights ≤ 8 (AVX2/AVX-512).
+    pub fn forward_batched(
+        &self,
+        inputs: &[f64; sueca_solver::constants::INPUT_COUNT],
+        weights: &[f64],
+        scratchpad: &mut [f64],
+    ) {
+        let n_weights = weights.len();
+        debug_assert_eq!(
+            scratchpad.len(),
+            self.num_nodes * n_weights,
+            "scratchpad size must be num_nodes * n_weights"
+        );
+
+        // 1. Broadcast input values across all weight slots
+        for i in 0..sueca_solver::constants::INPUT_COUNT {
+            let val = inputs[i].clamp(0.0, 1.0);
+            let base = i * n_weights;
+            for w in 0..n_weights {
+                scratchpad[base + w] = val;
+            }
+        }
+        // Bias node: broadcast 1.0 across all weight slots
+        {
+            let bias_base = sueca_solver::constants::INPUT_COUNT * n_weights;
+            for w in 0..n_weights {
+                scratchpad[bias_base + w] = 1.0;
+            }
+        }
+        // Zero output/hidden nodes
+        for nid in sueca_solver::constants::OUTPUT_START..self.num_nodes {
+            let base = nid * n_weights;
+            for w in 0..n_weights {
+                scratchpad[base + w] = 0.0;
+            }
+        }
+
+        // 2. Single CSR traversal — evaluate all weights per node
+        for &nid in &self.topological_order {
+            if nid <= sueca_solver::constants::BIAS_ID {
+                continue;
+            }
+
+            let start = self.node_ptrs[nid];
+            let end = self.node_ptrs[nid + 1];
+            if start == end {
+                continue; // already zeroed
+            }
+
+            let agg_fn = self.node_aggregations[nid];
+
+            // Accumulate across all incoming connections, all weights simultaneously
+            let agg_values = match agg_fn {
+                0 => {
+                    // SUM
+                    let mut accum = [0.0f64; 16]; // stack alloc, up to 16 weights
+                    debug_assert!(n_weights <= 16);
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let src_base = src * n_weights;
+                        // LLVM vectorizes this inner loop
+                        for w in 0..n_weights {
+                            let val = if sign == -1 {
+                                1.0 - scratchpad[src_base + w]
+                            } else {
+                                scratchpad[src_base + w]
+                            };
+                            accum[w] += val * weights[w];
+                        }
+                    }
+                    // Copy stack accum to a fixed array for activation
+                    let mut result = [0.0f64; 16];
+                    result[..n_weights].copy_from_slice(&accum[..n_weights]);
+                    result
+                }
+                1 => {
+                    // MIN (AND)
+                    let mut result = [f64::INFINITY; 16];
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let src_base = src * n_weights;
+                        for w in 0..n_weights {
+                            let val = if sign == -1 {
+                                1.0 - scratchpad[src_base + w]
+                            } else {
+                                scratchpad[src_base + w]
+                            };
+                            let signal = val * weights[w];
+                            if signal < result[w] {
+                                result[w] = signal;
+                            }
+                        }
+                    }
+                    result
+                }
+                2 => {
+                    // MAX (OR)
+                    let mut result = [f64::NEG_INFINITY; 16];
+                    for idx in start..end {
+                        let src = self.incoming_srcs[idx];
+                        let sign = self.incoming_signs[idx];
+                        let src_base = src * n_weights;
+                        for w in 0..n_weights {
+                            let val = if sign == -1 {
+                                1.0 - scratchpad[src_base + w]
+                            } else {
+                                scratchpad[src_base + w]
+                            };
+                            let signal = val * weights[w];
+                            if signal > result[w] {
+                                result[w] = signal;
+                            }
+                        }
+                    }
+                    result
+                }
+                _ => [0.0f64; 16],
+            };
+
+            // 3. Apply activation per weight
+            let act_fn = self.node_activations[nid];
+            let out_base = nid * n_weights;
+            for w in 0..n_weights {
+                let raw = agg_values[w];
+                scratchpad[out_base + w] = match act_fn {
+                    0 => raw.clamp(0.0, 1.0), // IDENTITY
+                    1 => 1.0 - raw.clamp(0.0, 1.0), // NOT
+                    2 => {
+                        // THRESHOLD
+                        if weights[w] >= 0.0 {
+                            if raw > 0.5 * weights[w] { 1.0 } else { 0.0 }
+                        } else {
+                            if raw < 0.5 * weights[w] { 1.0 } else { 0.0 }
+                        }
+                    }
+                    _ => raw.clamp(0.0, 1.0),
+                };
+            }
+        }
+    }
+
     /// Zero-allocation forward pass with independent weights.
     /// Evaluates the network using the provided input belief state and independent weights.
     /// The scratchpad must be pre-allocated to self.num_nodes.

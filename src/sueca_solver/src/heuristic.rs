@@ -509,6 +509,15 @@ pub fn resolve_intent(intent: usize, game: &SuecaSimulatorGame, seat: u8) -> u8 
         best_card
     };
 
+    // Remap 3-output WANN → legacy 4-intent resolver.
+    // WANN: 0=MAX_FORCE, 1=EFFICIENT_WIN, 2=EQUITY_BUILDER
+    // Legacy: 0=MAX_FORCE, 1=MIN_FORCE(unused), 2=EFFICIENT_WIN, 3=EQUITY_BUILDER
+    let intent = match intent {
+        1 => 2, // EFFICIENT_WIN (skip MIN_FORCE slot)
+        2 => 3, // EQUITY_BUILDER
+        _ => intent,
+    };
+
     match intent {
         0 => {
             // MAX_FORCE (Aggressive / Control)

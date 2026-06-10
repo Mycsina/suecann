@@ -28,6 +28,8 @@ pub mod optimize;
 #[cfg(feature = "training")]
 pub mod population;
 #[cfg(feature = "training")]
+pub mod runtime_data;
+#[cfg(feature = "training")]
 pub mod species;
 #[cfg(feature = "training")]
 pub mod train;
