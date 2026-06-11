@@ -556,6 +556,9 @@ mod tests {
                 adaptive_window: 10,
                 phase0_dataset: "expert_states_w20_d2.npz".to_string(),
                 pfs_sample_size: 100,
+                class_balance_target: 30000,
+                soft_balance_min_ratio: 0.20,
+                use_class_weighting: true,
             },
             hall_of_fame: crate::config::HallOfFameConfig {
                 hof_size: 5,

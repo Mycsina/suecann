@@ -197,14 +197,19 @@ pub fn solve_pimc(
     }
     let unknown_slice = &unknown_cards[..num_unknowns];
 
-    // 3. Batch-process worlds with early termination using Welford variance tracking.
-    //    Worlds are processed in batches of BATCH_SIZE. After each batch, per-move
-    //    EV means and standard errors are computed via Welford's online algorithm.
-    //    If the best move's EV margin over the second-best exceeds CONFIDENCE_Z × SE_diff,
-    //    remaining worlds are skipped — the decision is statistically clear.
+    // 3. Batch-process worlds with paired-difference Welford tracking.
+    //    After each batch: significance exit (paired SE confirms best move is better)
+    //    AND futility exit (projected gap at full worlds is too small to matter).
+    //
+    //    Paired comparison: within each world, all legal moves are evaluated on the
+    //    same sampled world, so between-world variance cancels out of move comparisons.
+    //    Tracking the Welford on (best_ev - second_best_ev) per world gives tighter SE
+    //    than sqrt(SE_best² + SE_second²) which assumes independence.
     const BATCH_SIZE: usize = 50;
     const MIN_WORLDS_FOR_EARLY_EXIT: usize = 50;
     const CONFIDENCE_Z: f64 = 2.0; // ~95% confidence
+    const FUTILITY_Z: f64 = 2.0;
+    const MIN_MEANINGFUL_GAP: f64 = 0.5; // Sueca points — below this, EV delta is noise
 
     // Per-move Welford statistics: online mean + M2 for variance estimation.
     // Parallel merge via Chan et al. formula — numerically stable across batches.
@@ -256,20 +261,46 @@ pub fn solve_pimc(
                 (self.variance() / self.count as f64).sqrt()
             }
         }
+
+        /// Project what the SE would be at `target_samples` total worlds,
+        /// assuming current variance is representative.
+        fn projected_se_at(&self, target_samples: usize) -> f64 {
+            if self.count < 2 {
+                return f64::INFINITY;
+            }
+            (self.variance() / target_samples as f64).sqrt()
+        }
+    }
+
+    // Per-world result: per-move Welford partials + raw (card, EV) pairs for paired-diff
+    struct WorldResult {
+        welfords: [MoveWelford; 40],
+        card_evs: [(u8, f64); 10], // up to 10 legal moves per Sueca hand
+        ev_count: u8,
     }
 
     // Running Welford statistics across all batches (indexed by card id 0..40)
     let mut running = [MoveWelford::default(); 40];
+    // Paired-difference Welford: tracks (best_ev - second_best_ev) per world
+    let mut paired_diff = MoveWelford::default();
+
+    // Track best/second card identities across batches for paired-diff accumulation.
+    // Re-determined after each batch merge; initialized in the first batch merge.
+    let mut best_card: u8 = 40; // 40 = unset, will be assigned in first batch merge
+    let mut second_card: u8 = 40;
+    let mut second_mean: f64 = 0.0;
 
     let mut batch_start = 0;
     while batch_start < n_worlds {
         let batch_end = (batch_start + BATCH_SIZE).min(n_worlds);
 
-        // Process this batch in parallel — each world returns its own per-move Welford stats
-        let batch_results: Vec<[MoveWelford; 40]> = (batch_start..batch_end)
+        // Process this batch in parallel — each world returns per-move Welford + raw EVs
+        let batch_results: Vec<WorldResult> = (batch_start..batch_end)
             .into_par_iter()
             .map(|world_idx| {
                 let mut welfords = [MoveWelford::default(); 40];
+                let mut card_evs = [(0u8, 0.0f64); 10];
+                let mut ev_count = 0u8;
 
                 let mut local_hands = [0u64; 4];
                 let mut local_seed =
@@ -293,7 +324,7 @@ pub fn solve_pimc(
                 }
 
                 if !success {
-                    return welfords;
+                    return WorldResult { welfords, card_evs, ev_count };
                 }
 
                 // Pre-compute invariants once per world (GameState is Copy)
@@ -336,27 +367,30 @@ pub fn solve_pimc(
                             &mut trick_points,
                         );
                         welfords[m as usize].update(val as f64);
+                        if (ev_count as usize) < 10 {
+                            card_evs[ev_count as usize] = (m, val as f64);
+                            ev_count += 1;
+                        }
                     }
                 });
 
-                welfords
+                WorldResult { welfords, card_evs, ev_count }
             })
             .collect();
 
-        // Merge batch results into running statistics (parallel Welford merge)
-        for batch_w in &batch_results {
+        // Merge batch results into running per-move statistics
+        for wr in &batch_results {
             for card in 0..40 {
-                if batch_w[card].count > 0 {
-                    running[card].merge_parallel(&batch_w[card]);
+                if wr.welfords[card].count > 0 {
+                    running[card].merge_parallel(&wr.welfords[card]);
                 }
             }
         }
 
-        // Early termination check
-        if batch_end >= MIN_WORLDS_FOR_EARLY_EXIT {
-            // Two-pass: find best and second-best legal moves by mean EV
-            let mut best_card = legal_moves[0];
-            let mut best_mean = running[best_card as usize].mean;
+        // Re-determine best and second-best cards from updated running means
+        {
+            let mut best_mean = running[legal_moves[0] as usize].mean;
+            best_card = legal_moves[0];
             for i in 1..legal_count {
                 let m = legal_moves[i];
                 let mean = running[m as usize].mean;
@@ -366,8 +400,8 @@ pub fn solve_pimc(
                 }
             }
 
-            let mut second_card = legal_moves[0];
-            let mut second_mean = f64::NEG_INFINITY;
+            second_mean = f64::NEG_INFINITY;
+            second_card = best_card; // fallback
             for i in 0..legal_count {
                 let m = legal_moves[i];
                 if m != best_card {
@@ -378,15 +412,46 @@ pub fn solve_pimc(
                     }
                 }
             }
+        }
 
-            if second_mean > f64::NEG_INFINITY {
-                let se_best = running[best_card as usize].std_error();
-                let se_second = running[second_card as usize].std_error();
-                let se_diff = (se_best.powi(2) + se_second.powi(2)).sqrt();
-
-                if (best_mean - second_mean) > CONFIDENCE_Z * se_diff {
-                    break; // Statistically significant — skip remaining worlds
+        // Accumulate paired-difference Welford for this batch.
+        // For each world, compute (best_ev - second_ev) and update paired_diff.
+        if second_card != best_card {
+            for wr in &batch_results {
+                // Find best and second EV in this world's raw results
+                let mut world_best_ev = f64::NEG_INFINITY;
+                let mut world_second_ev = f64::NEG_INFINITY;
+                for i in 0..(wr.ev_count as usize) {
+                    let (card, ev) = wr.card_evs[i];
+                    if card == best_card {
+                        world_best_ev = ev;
+                    } else if card == second_card {
+                        world_second_ev = ev;
+                    }
                 }
+                if world_best_ev > f64::NEG_INFINITY && world_second_ev > f64::NEG_INFINITY {
+                    paired_diff.update(world_best_ev - world_second_ev);
+                }
+            }
+        }
+
+        // ── Early termination checks ──
+        if batch_end >= MIN_WORLDS_FOR_EARLY_EXIT && paired_diff.count >= 2 {
+            let paired_mean = paired_diff.mean;
+            let paired_se = paired_diff.std_error();
+
+            // Significance exit: best move is clearly better
+            if paired_mean > CONFIDENCE_Z * paired_se {
+                break;
+            }
+
+            // Futility exit: project to full world budget — will the gap ever be meaningful?
+            let projected_se = paired_diff.projected_se_at(n_worlds);
+            let projected_lower = (paired_mean - FUTILITY_Z * projected_se).max(0.0);
+            if projected_lower < MIN_MEANINGFUL_GAP {
+                // This state cannot possibly produce a clear preference.
+                // Return empty to signal futility to the caller.
+                return Vec::new();
             }
         }
 

@@ -112,6 +112,15 @@ adaptive_window = 10
 # PFS-NEAT sample size. Adaptive 2-stage: K=25 quick check first, full K only for
 # borderline mutations (within 2% of parent accuracy). Reduced from original 1000.
 pfs_sample_size = 100
+# Target total states for dataset generation. Reduced from 100K — capacity-limited
+# WANNs cannot absorb datasets that large, and quality filtering matters more than volume.
+class_balance_target = 30000
+# Minimum fraction each intent class must have. 0.20 = no class below 20% of total.
+# Soft balance avoids the brutal marginal cost of perfect 33.3% balance.
+soft_balance_min_ratio = 0.20
+# Apply inverse-frequency class weighting in Phase 0 fitness to compensate for
+# imbalanced datasets without requiring the generator to enforce perfect balance.
+use_class_weighting = true
 
 [hall_of_fame]
 # 5% of population. Provides diverse opponent pool for Phase 1 self-play.

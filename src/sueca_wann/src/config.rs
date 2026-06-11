@@ -65,6 +65,15 @@ fn default_phase0_dataset() -> String {
 fn default_pfs_sample_size() -> usize {
     100
 }
+fn default_class_balance_target() -> usize {
+    30000
+}
+fn default_soft_balance_min_ratio() -> f64 {
+    0.20
+}
+fn default_use_class_weighting() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurriculumConfig {
@@ -81,6 +90,21 @@ pub struct CurriculumConfig {
     /// while cutting validation cost by 10×.
     #[serde(default = "default_pfs_sample_size")]
     pub pfs_sample_size: usize,
+    /// Target total states for class-balanced dataset generation.
+    /// Reduced from 100K — capacity-limited WANNs cannot absorb datasets
+    /// that large, and quality filtering matters more than volume.
+    #[serde(default = "default_class_balance_target")]
+    pub class_balance_target: usize,
+    /// Minimum fraction of total states any single intent class must have.
+    /// 0.20 means no class falls below 20% of total. Soft balance avoids
+    /// the brutal marginal cost of perfect 33.3% balance.
+    #[serde(default = "default_soft_balance_min_ratio")]
+    pub soft_balance_min_ratio: f64,
+    /// Whether to apply inverse-frequency class weighting in Phase 0
+    /// fitness. Compensates for imbalanced datasets without requiring
+    /// perfect balance from the generator.
+    #[serde(default = "default_use_class_weighting")]
+    pub use_class_weighting: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -60,6 +60,7 @@ pub fn evaluate_phase0(
     genomes: &[crate::wann_network::RustWannNetwork],
     dataset: &ExpertDataset,
     sweep_weights: &[f64],
+    use_class_weighting: bool,
 ) -> Vec<f64> {
     // Pre-compute constants outside the parallel closure
     let n_states = dataset.num_states;
@@ -75,13 +76,38 @@ pub fn evaluate_phase0(
         })
         .collect();
 
-            // note: using weight-batched forward — single CSR traversal for all sweep weights
+    // Compute per-class weights for balanced accuracy.
+    // Weight = total_samples / (n_classes * class_count).
+    // Average weight is 1.0, so the overall accuracy scale is preserved.
+    let class_weights: [f64; OUTPUT_COUNT] = if use_class_weighting {
+        let mut class_counts = [0usize; OUTPUT_COUNT];
+        for idx in 0..n_states {
+            let offset = idx * OUTPUT_COUNT as usize;
+            for c in 0..OUTPUT_COUNT as usize {
+                if dataset.soft_intents[offset + c] > 0.5 {
+                    class_counts[c] += 1;
+                    break;
+                }
+            }
+        }
+        let mut w = [1.0f64; OUTPUT_COUNT];
+        for c in 0..OUTPUT_COUNT as usize {
+            if class_counts[c] > 0 {
+                w[c] = n_states as f64 / (OUTPUT_COUNT as f64 * class_counts[c] as f64);
+            }
+        }
+        w
+    } else {
+        [1.0f64; OUTPUT_COUNT]
+    };
+
+    // note: using weight-batched forward — single CSR traversal for all sweep weights
     genomes
         .into_par_iter()
         .map(|candidate| {
             let n_weights = sweep_weights.len();
             let mut scratchpad = vec![0.0f64; candidate.num_nodes * n_weights];
-            let mut correct = 0.0;
+            let mut weighted_correct = 0.0;
 
             for (idx, inputs) in states.iter().enumerate() {
                 candidate.forward_batched(inputs, sweep_weights, &mut scratchpad);
@@ -108,10 +134,13 @@ pub fn evaluate_phase0(
                     2
                 };
 
-                correct += dataset.soft_intents[idx * OUTPUT_COUNT as usize + best_intent] as f64;
+                let is_correct = dataset.soft_intents[idx * OUTPUT_COUNT as usize + best_intent] as f64;
+                weighted_correct += is_correct * class_weights[best_intent];
             }
 
-            correct / n_states as f64
+            // Normalize by total weight applied (should equal n_states since mean weight = 1.0)
+            let total_weight: f64 = class_weights.iter().sum::<f64>() * (n_states as f64 / OUTPUT_COUNT as f64);
+            weighted_correct / total_weight
         })
         .collect()
 }
@@ -924,8 +953,8 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
         // ── Fitness evaluation ──────────────────────────────────────────
         let t_eval_start = Instant::now();
         let (lead_fitnesses, follow_fitnesses, lead_behaviors, follow_behaviors) = if current_phase == 0 {
-            let lead_accs = evaluate_phase0(&lead_rust_genomes, &lead_dataset, &config.evaluation.sweep_weights);
-            let follow_accs = evaluate_phase0(&follow_rust_genomes, &follow_dataset, &config.evaluation.sweep_weights);
+            let lead_accs = evaluate_phase0(&lead_rust_genomes, &lead_dataset, &config.evaluation.sweep_weights, config.curriculum.use_class_weighting);
+            let follow_accs = evaluate_phase0(&follow_rust_genomes, &follow_dataset, &config.evaluation.sweep_weights, config.curriculum.use_class_weighting);
             (lead_accs.clone(), follow_accs.clone(), Vec::new(), Vec::new())
         } else {
             let (fitnesses, behaviors) = run_phase1_generation_joint(

@@ -54,6 +54,9 @@ enum Command {
         seed: u64,
         #[arg(long, default_value = "expert_states.npz")]
         output: String,
+        /// Minimum fraction of total states each intent class must have (0.0-1.0)
+        #[arg(long, default_value = "0.20")]
+        soft_balance_min_ratio: f64,
         /// Resume from a checkpoint file (output path with .checkpoint extension)
         #[arg(long, default_value_t = false)]
         resume: bool,
@@ -104,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_count,
             seed,
             output,
+            soft_balance_min_ratio,
             resume,
         } => {
             let config = dataset_gen::DatasetConfig {
@@ -112,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target_total: target_count,
                 seed,
                 output_path: output,
+                soft_balance_min_ratio,
             };
             dataset_gen::generate_dataset(&config, resume);
         }
