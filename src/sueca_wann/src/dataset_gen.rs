@@ -164,13 +164,16 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
         }
         batches += 1;
 
-        // Determine rarest intent for steering (if any class below soft_min)
+        // Determine rarest intent for steering.
+        // Only activate when a class is critically behind (< 50% of soft_min)
+        // to avoid prematurely starving the other classes.
         let steer_intent: Option<usize> = {
             let min_count = *class_counts.iter().min().unwrap_or(&0);
-            if min_count < soft_min {
+            let critical_threshold = soft_min / 2;
+            if min_count < critical_threshold {
                 class_counts.iter().position(|&c| c == min_count)
             } else {
-                None // all above soft_min, no steering needed
+                None
             }
         };
 
@@ -394,18 +397,34 @@ pub fn generate_deal_states(
         return (results, rejects);
     }
 
-    // ── Post-walk steering filter ──
+    // ── Post-walk steering: advance past mismatched positions ──
+    // Instead of rejecting, play one more card to advance to a following
+    // position (for EFFICIENT_WIN) or a new trick (for EQUITY_BUILDER).
+    // This salvages the deal instead of wasting the setup cost.
     if let Some(target) = steer_intent {
         let is_leading = game.current_trick_len == 0;
-        let keep = match target {
-            1 => !is_leading || rng.gen_ratio(1, 4),
-            2 => is_leading || rng.gen_ratio(1, 4),
-            0 => is_leading || rng.gen_ratio(1, 3),
-            _ => true,
+        let needs_advance = match target {
+            1 => is_leading,
+            2 => !is_leading,
+            0 => !is_leading,
+            _ => false,
         };
-        if !keep {
-            rejects.steered_out += 1;
-            return (results, rejects);
+        if needs_advance && game.state.trick_number < 9 {
+            // Play the ego's legal card to advance past this position.
+            // Uses HeuristicBot for speed — we just need to get to the next player.
+            let seat = game.state.current_player;
+            let card = select_card_heuristic(&game, seat);
+            game.play_card(card);
+            // Complete the rest of the trick if needed
+            while game.state.cards_played_in_trick > 0 && game.state.trick_number < 10 {
+                let s = game.state.current_player;
+                let c = select_card_heuristic(&game, s);
+                game.play_card(c);
+            }
+            if game.state.trick_number >= 10 {
+                rejects.terminal += 1;
+                return (results, rejects);
+            }
         }
     }
 

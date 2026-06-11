@@ -11,3 +11,8 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+
+# Temporary profiling profile
+[profile.perf]
+inherits = "release"
+debug = 1
