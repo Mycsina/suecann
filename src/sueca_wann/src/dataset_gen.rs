@@ -164,13 +164,23 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
         }
         batches += 1;
 
+        // Determine rarest intent for steering (if any class below soft_min)
+        let steer_intent: Option<usize> = {
+            let min_count = *class_counts.iter().min().unwrap_or(&0);
+            if min_count < soft_min {
+                class_counts.iter().position(|&c| c == min_count)
+            } else {
+                None // all above soft_min, no steering needed
+            }
+        };
+
         let batch_size = 512;
         let batch_results: Vec<Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)>> = (0..batch_size)
             .into_par_iter()
             .map(|i| {
                 let deal_seed = batch_seed + i as u64;
                 let mut rng = Pcg64::seed_from_u64(deal_seed);
-                generate_deal_states(&mut rng, config)
+                generate_deal_states(&mut rng, config, steer_intent)
             })
             .collect();
 
@@ -281,6 +291,7 @@ const N_EXTRA_EXTRACTIONS: usize = 2;
 pub fn generate_deal_states(
     rng: &mut Pcg64,
     config: &DatasetConfig,
+    steer_intent: Option<usize>,
 ) -> Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)> {
     let mut results = Vec::new();
 
@@ -301,8 +312,27 @@ pub fn generate_deal_states(
     let trump = (rng.gen_range(0u64..4)) as u8;
     let first_player = (rng.gen_range(0u64..4)) as u8;
 
-    // Play random cards until a random mid-game position
-    let max_tricks = (rng.gen_range(1u64..9)) as usize; // 1 to 8 tricks played
+    // ── Intent-biased random walk steering ──
+    // Bias the random walk depth toward positions where the scarce intent
+    // is likely to be the correct play. Avoids generating positions where
+    // the rare intent is structurally impossible (e.g., EFFICIENT_WIN
+    // requires following, EQUITY_BUILDER prefers leading with short suits).
+    let max_tricks: usize = match steer_intent {
+        Some(1) => {
+            // EFFICIENT_WIN: wants mid-trick following positions.
+            // Play deeper (3-8 tricks) so ego is more likely to be following.
+            rng.gen_range(3u64..9) as usize
+        }
+        Some(2) => {
+            // EQUITY_BUILDER: prefers leading with short suits.
+            // Play shallower (1-5 tricks) so game state is less depleted.
+            rng.gen_range(1u64..6) as usize
+        }
+        _ => {
+            // MAX_FORCE or no steering: uniform 1-8 tricks
+            rng.gen_range(1u64..9) as usize
+        }
+    };
     let mut game = SuecaSimulatorGame::new(hands, trump, first_player);
 
     for _ in 0..max_tricks {
@@ -325,6 +355,31 @@ pub fn generate_deal_states(
 
     if game.state.trick_number >= 10 {
         return results;
+    }
+
+    // ── Post-walk steering filter: skip positions that don't match the ──
+    // hunted intent's structural preconditions. Avoids expensive PIMC on
+    // positions where the rare intent is unlikely to apply.
+    if let Some(target) = steer_intent {
+        let is_leading = game.current_trick_len == 0;
+        let keep = match target {
+            1 => {
+                // EFFICIENT_WIN: needs following position to apply
+                !is_leading || rng.gen_ratio(1, 4) // keep 25% of leading for diversity
+            }
+            2 => {
+                // EQUITY_BUILDER: prefers leading to build voids
+                is_leading || rng.gen_ratio(1, 4)
+            }
+            0 => {
+                // MAX_FORCE: prefers leading with trump/master cards
+                is_leading || rng.gen_ratio(1, 3)
+            }
+            _ => true,
+        };
+        if !keep {
+            return results;
+        }
     }
 
     // ── Extract state at current position ──
@@ -644,7 +699,7 @@ mod tests {
         let mut rng = Pcg64::seed_from_u64(42);
         // Generate many deal states and verify each one
         for _ in 0..100 {
-            let results = generate_deal_states(&mut rng, &config);
+            let results = generate_deal_states(&mut rng, &config, None);
             // We can't directly inspect current_player since the game is consumed,
             // but we can verify the states come from a single consistent perspective
             // by checking that belief features 5 (Am_I_Leading) is consistent
@@ -674,7 +729,7 @@ mod tests {
         let mut rng = Pcg64::seed_from_u64(99);
         let mut total = 0;
         for _ in 0..600 {
-            for (state, _, _) in generate_deal_states(&mut rng, &config) {
+            for (state, _, _) in generate_deal_states(&mut rng, &config, None) {
                 total += 1;
                 for (i, &v) in state.iter().enumerate() {
                     assert!(
@@ -959,7 +1014,7 @@ mod tests {
         let mut total = 0;
 
         for _ in 0..500 {
-            for (_, soft_intent, _) in generate_deal_states(&mut rng, &config) {
+            for (_, soft_intent, _) in generate_deal_states(&mut rng, &config, None) {
                 for i in 0..OUTPUT_COUNT as usize {
                     if soft_intent[i] > 0.0 {
                         counts[i] += 1;
@@ -1070,7 +1125,7 @@ mod tests {
         let mut intents = Vec::new();
         let mut masks = Vec::new();
         loop {
-            for (state, intent, mask) in generate_deal_states(&mut rng, &config) {
+            for (state, intent, mask) in generate_deal_states(&mut rng, &config, None) {
                 if intents.len() / (OUTPUT_COUNT as usize) < config.target_total {
                     states.extend(state);
                     intents.extend_from_slice(&intent);

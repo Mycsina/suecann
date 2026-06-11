@@ -52,6 +52,50 @@ fn sample_constraints(
     false
 }
 
+/// Quick constraint feasibility check. Returns false if the void constraints
+/// are provably impossible — e.g., if remaining cards in a suit exceed the
+/// combined hand capacity of non-void players. Runs in O(cards) and prevents
+/// wasted retry cycles in sample_world's backtracking solver.
+fn constraints_feasible(
+    unknown_cards: &[u8],
+    voids: [u8; 4],
+    target_sizes: [u8; 4],
+    my_seat: u8,
+) -> bool {
+    let mut suit_remaining = [0u8; 4];
+    let mut non_void_capacity = [0u8; 4];
+    let force_assigned = [0u8; 4];
+
+    for &card in unknown_cards {
+        let suit = crate::engine::CARD_SUIT[card as usize];
+        suit_remaining[suit as usize] += 1;
+    }
+
+    for p in 0..4 {
+        if p == my_seat as usize {
+            continue;
+        }
+        let mut cap = target_sizes[p];
+        for s in 0..4 {
+            let void_mask = 1u8 << s;
+            if (voids[p] & void_mask) != 0 {
+                // Player p cannot receive cards of suit s
+                cap = cap.saturating_sub(force_assigned[s as usize]);
+            } else {
+                non_void_capacity[s as usize] += target_sizes[p];
+            }
+        }
+    }
+
+    for s in 0..4 {
+        if suit_remaining[s] > non_void_capacity[s] {
+            return false; // Impossible: more cards of this suit than capacity
+        }
+    }
+
+    true
+}
+
 /// Sample a single world consistent with public information.
 /// `unknown_cards` is the pre-built pool of cards not in my hand and not yet played.
 /// Returns true if successful, false if constraints cannot be satisfied.
@@ -196,6 +240,15 @@ pub fn solve_pimc(
         }
     }
     let unknown_slice = &unknown_cards[..num_unknowns];
+
+    // ── Constraint feasibility pre-check ──
+    // If the void constraints are provably impossible (e.g., remaining cards
+    // of a suit exceed the combined hand capacity of non-void players), all
+    // world samples will fail. Detect this in O(cards) instead of wasting
+    // up to 10 retry cycles per world.
+    if !constraints_feasible(unknown_slice, voids, target_sizes, my_seat) {
+        return Vec::new();
+    }
 
     // 3. Batch-process worlds with paired-difference Welford tracking.
     //    After each batch: significance exit (paired SE confirms best move is better)
@@ -345,6 +398,9 @@ pub fn solve_pimc(
                 THREAD_TT.with(|tt_cell| {
                     let mut tt = tt_cell.borrow_mut();
                     tt.next_generation();
+                    // Stack-allocated killer tables (128 bytes total)
+                    let mut killer_a = [40u8; 64];
+                    let mut killer_b = [40u8; 64];
 
                     for i in 0..legal_count {
                         let m = legal_moves[i];
@@ -365,6 +421,8 @@ pub fn solve_pimc(
                             plies_left,
                             &mut tt,
                             &mut trick_points,
+                            &mut killer_a,
+                            &mut killer_b,
                         );
                         welfords[m as usize].update(val as f64);
                         if (ev_count as usize) < 10 {
