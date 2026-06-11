@@ -2,12 +2,59 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_pcg::Pcg64;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use sueca_solver::belief::encode_belief_state;
 use sueca_solver::constants::{INPUT_COUNT, OUTPUT_COUNT};
 use sueca_solver::engine::{CARD_POINTS, CARD_SUIT};
 use sueca_solver::heuristic::resolve_intent;
 use sueca_solver::simulator::SuecaSimulatorGame;
 
+/// Serializable snapshot of dataset generation progress.
+/// Saved every CHECKPOINT_INTERVAL batches so a crashed/restarted run
+/// can resume without losing accumulated states.
+#[derive(Serialize, Deserialize)]
+struct DatasetCheckpoint {
+    class_counts: [usize; OUTPUT_COUNT as usize],
+    bucket_states: [Vec<f64>; OUTPUT_COUNT as usize],
+    bucket_intents: [Vec<f32>; OUTPUT_COUNT as usize],
+    bucket_masks: [Vec<u8>; OUTPUT_COUNT as usize],
+    batch_seed: u64,
+    batches: usize,
+    // Config fields for validation on resume
+    n_worlds: usize,
+    search_depth: u8,
+    target_total: usize,
+    seed: u64,
+}
+
+/// Save a checkpoint to a bincode file.
+fn save_checkpoint(ckpt: &DatasetCheckpoint, path: &str) {
+    let file = std::fs::File::create(path)
+        .unwrap_or_else(|e| panic!("Cannot create checkpoint file '{}': {}", path, e));
+    let writer = std::io::BufWriter::new(file);
+    bincode::serialize_into(writer, ckpt)
+        .unwrap_or_else(|e| panic!("Cannot write checkpoint '{}': {}", path, e));
+}
+
+/// Load a checkpoint from a bincode file. Returns None if the file doesn't exist.
+fn load_checkpoint(path: &str) -> Option<DatasetCheckpoint> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    bincode::deserialize_from(reader).ok()
+}
+
+fn checkpoint_path(output_path: &str) -> String {
+    // Strip .npz suffix if present, then append .checkpoint
+    output_path
+        .strip_suffix(".npz")
+        .unwrap_or(output_path)
+        .to_string()
+        + ".checkpoint"
+}
+
+const CHECKPOINT_INTERVAL: usize = 5; // save every 5 batches (~23 min)
+
+#[derive(Serialize, Deserialize)]
 pub struct DatasetConfig {
     pub n_worlds: usize,
     pub search_depth: u8,
@@ -18,7 +65,7 @@ pub struct DatasetConfig {
     // (EV delta > best.std_error) rather than a fixed margin threshold.
 }
 
-pub fn generate_dataset(config: &DatasetConfig) {
+pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
     let total_target = config.target_total;
 
     println!(
@@ -37,14 +84,67 @@ pub fn generate_dataset(config: &DatasetConfig) {
     // If a bucket fills slowly, the generator keeps running — it is better to
     // wait for 10,000 textbook examples than to dilute the dataset with ties.
     let per_class_target = total_target / (OUTPUT_COUNT as usize);
+    let ckpt_path = checkpoint_path(&config.output_path);
 
-    let mut bucket_states: [Vec<f64>; OUTPUT_COUNT as usize] = Default::default();
-    let mut bucket_intents: [Vec<f32>; OUTPUT_COUNT as usize] = Default::default();
-    let mut bucket_masks: [Vec<u8>; OUTPUT_COUNT as usize] = Default::default();
-    let mut class_counts = [0usize; OUTPUT_COUNT as usize];
-
-    let mut batch_seed = config.seed;
-    let mut batches = 0;
+    // ── Resume from checkpoint or start fresh ──
+    let (mut bucket_states, mut bucket_intents, mut bucket_masks, mut class_counts, mut batch_seed, mut batches): (
+        [Vec<f64>; OUTPUT_COUNT as usize],
+        [Vec<f32>; OUTPUT_COUNT as usize],
+        [Vec<u8>; OUTPUT_COUNT as usize],
+        [usize; OUTPUT_COUNT as usize],
+        u64,
+        usize,
+    ) = if resume {
+        match load_checkpoint(&ckpt_path) {
+            Some(ckpt) => {
+                // Validate config compatibility
+                if ckpt.n_worlds != config.n_worlds
+                    || ckpt.search_depth != config.search_depth
+                    || ckpt.target_total != config.target_total
+                    || ckpt.seed != config.seed
+                {
+                    eprintln!(
+                        "Error: checkpoint config mismatch.\n\
+                         Checkpoint: n_worlds={}, depth={}, target={}, seed={}\n\
+                         Current:    n_worlds={}, depth={}, target={}, seed={}\n\
+                         Delete '{}' to start fresh, or adjust config to match.",
+                        ckpt.n_worlds, ckpt.search_depth, ckpt.target_total, ckpt.seed,
+                        config.n_worlds, config.search_depth, config.target_total, config.seed,
+                        ckpt_path,
+                    );
+                    std::process::exit(1);
+                }
+                println!(
+                    "Resumed from checkpoint: batch {}, collected {:?} (target {} each)",
+                    ckpt.batches, ckpt.class_counts, per_class_target,
+                );
+                (
+                    ckpt.bucket_states,
+                    ckpt.bucket_intents,
+                    ckpt.bucket_masks,
+                    ckpt.class_counts,
+                    ckpt.batch_seed,
+                    ckpt.batches,
+                )
+            }
+            None => {
+                eprintln!(
+                    "Error: --resume specified but checkpoint file '{}' not found.",
+                    ckpt_path,
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        (
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            [0usize; OUTPUT_COUNT as usize],
+            config.seed,
+            0usize,
+        )
+    };
 
     loop {
         // Stop when every intent bucket is full
@@ -106,6 +206,23 @@ pub fn generate_dataset(config: &DatasetConfig) {
                 per_class_target
             );
         }
+
+        // Periodic checkpoint — resume-safe across crashes/restarts
+        if batches % CHECKPOINT_INTERVAL == 0 {
+            let ckpt = DatasetCheckpoint {
+                class_counts,
+                bucket_states: bucket_states.clone(),
+                bucket_intents: bucket_intents.clone(),
+                bucket_masks: bucket_masks.clone(),
+                batch_seed,
+                batches,
+                n_worlds: config.n_worlds,
+                search_depth: config.search_depth,
+                target_total: config.target_total,
+                seed: config.seed,
+            };
+            save_checkpoint(&ckpt, &ckpt_path);
+        }
     }
 
     // Interleave buckets so the final flat arrays alternate intents rather
@@ -139,6 +256,13 @@ pub fn generate_dataset(config: &DatasetConfig) {
     );
 
     save_npz(&all_states, &all_intents, &all_masks, &config.output_path);
+
+    // Remove checkpoint — dataset is complete, no need to resume
+    if let Err(e) = std::fs::remove_file(&ckpt_path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("Warning: could not remove checkpoint '{}': {}", ckpt_path, e);
+        }
+    }
 }
 
 pub fn generate_deal_states(

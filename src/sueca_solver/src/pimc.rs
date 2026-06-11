@@ -303,7 +303,7 @@ pub fn solve_pimc(
                 }
 
                 let mut base_game = GameState::new(local_hands, trump, current_player);
-                base_game.led_suit = led_suit;
+                base_game.set_led_suit(led_suit);
                 base_game.current_trick_winner = current_trick_winner;
                 base_game.current_trick_best_card = current_trick_best_card;
                 base_game.cards_played_in_trick = current_trick_cards.len() as u8;

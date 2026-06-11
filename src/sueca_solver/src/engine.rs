@@ -4,6 +4,8 @@
 /// Suits: Hearts=0, Diamonds=1, Clubs=2, Spades=3.
 use std::fmt;
 
+use crate::search::{LED_SUIT_ZOBRIST, PLAYER_ZOBRIST, ZOBRIST_TABLE};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Suit {
     Hearts = 0,
@@ -55,6 +57,7 @@ pub struct GameState {
     pub team_02_score: u8,           // 0..120
     pub team_13_score: u8,           // 0..120
     pub trick_number: u8,            // 0..10
+    pub hash: u64,                   // Incremental Zobrist hash (O(1) get_hash)
 }
 
 impl fmt::Debug for GameState {
@@ -72,8 +75,21 @@ impl fmt::Debug for GameState {
 }
 
 impl GameState {
-    /// Initialize a new game state.
+    /// Initialize a new game state with incremental Zobrist hash.
     pub fn new(hands: [u64; 4], trump: u8, first_player: u8) -> Self {
+        // Compute initial Zobrist hash: all hand cards + current player + led suit
+        let mut hash = 0u64;
+        for p in 0..4 {
+            let mut hand = hands[p];
+            while hand != 0 {
+                let card = hand.trailing_zeros() as usize;
+                hash ^= ZOBRIST_TABLE[p][card];
+                hand &= hand - 1;
+            }
+        }
+        hash ^= PLAYER_ZOBRIST[first_player as usize];
+        hash ^= LED_SUIT_ZOBRIST[4]; // led_suit starts as 4 (none)
+
         Self {
             hands,
             trump,
@@ -85,6 +101,17 @@ impl GameState {
             team_02_score: 0,
             team_13_score: 0,
             trick_number: 0,
+            hash,
+        }
+    }
+
+    /// Set led_suit after construction, maintaining the incremental hash.
+    /// Only affects the hash if the value actually changes (e.g., from default 4 to suit 0..3).
+    pub fn set_led_suit(&mut self, suit: u8) {
+        if suit != self.led_suit {
+            self.hash ^= LED_SUIT_ZOBRIST[self.led_suit as usize];
+            self.hash ^= LED_SUIT_ZOBRIST[suit as usize];
+            self.led_suit = suit;
         }
     }
 
@@ -163,19 +190,78 @@ pub fn next_player_after(seat: u8) -> u8 {
     }
 }
 
+/// Snapshot of GameState before a move, used for make/unmake in alpha_beta.
+/// Captures every field that play_card_and_resolve can mutate, plus the
+/// pre-move hash value for incremental Zobrist rollback.
+#[derive(Clone, Copy)]
+pub struct StateSnapshot {
+    hand_seat: u64,
+    led_suit: u8,
+    current_player: u8,
+    current_trick_winner: u8,
+    current_trick_best_card: u8,
+    cards_played_in_trick: u8,
+    team_02_score: u8,
+    team_13_score: u8,
+    trick_number: u8,
+    hash: u64,
+}
+
 impl GameState {
+    /// Capture all mutable state before making a move.
+    #[inline(always)]
+    pub fn save_snapshot(&self) -> StateSnapshot {
+        let seat = self.current_player as usize;
+        StateSnapshot {
+            hand_seat: self.hands[seat],
+            led_suit: self.led_suit,
+            current_player: self.current_player,
+            current_trick_winner: self.current_trick_winner,
+            current_trick_best_card: self.current_trick_best_card,
+            cards_played_in_trick: self.cards_played_in_trick,
+            team_02_score: self.team_02_score,
+            team_13_score: self.team_13_score,
+            trick_number: self.trick_number,
+            hash: self.hash,
+        }
+    }
+
+    /// Restore state from a snapshot (undo a move).
+    #[inline(always)]
+    pub fn restore_snapshot(&mut self, snap: &StateSnapshot) {
+        self.hands[snap.current_player as usize] = snap.hand_seat;
+        self.led_suit = snap.led_suit;
+        self.current_player = snap.current_player;
+        self.current_trick_winner = snap.current_trick_winner;
+        self.current_trick_best_card = snap.current_trick_best_card;
+        self.cards_played_in_trick = snap.cards_played_in_trick;
+        self.team_02_score = snap.team_02_score;
+        self.team_13_score = snap.team_13_score;
+        self.trick_number = snap.trick_number;
+        self.hash = snap.hash;
+    }
+
     /// Play card with trick completion scoring.
+    /// Maintains incremental Zobrist hash for O(1) get_hash().
     #[inline]
     pub fn play_card_and_resolve(&mut self, card: u8, trick_points: &mut u8) {
         let seat = self.current_player;
-        let card_mask = 1u64 << card;
 
+        // Incremental Zobrist: XOR out the played card
+        self.hash ^= ZOBRIST_TABLE[seat as usize][card as usize];
+
+        let card_mask = 1u64 << card;
         self.hands[seat as usize] &= !card_mask;
         *trick_points += CARD_POINTS[card as usize];
 
         let card_suit = CARD_SUIT[card as usize];
 
         if self.cards_played_in_trick == 0 {
+            // First card: led_suit transitions from current value → card_suit
+            // Note: self.led_suit is typically 4 (none) but may have been set
+            // by set_led_suit() when resuming a mid-trick PIMC game state.
+            self.hash ^= LED_SUIT_ZOBRIST[self.led_suit as usize];
+            self.hash ^= LED_SUIT_ZOBRIST[card_suit as usize];
             self.led_suit = card_suit;
             self.current_trick_winner = seat;
             self.current_trick_best_card = card;
@@ -200,12 +286,22 @@ impl GameState {
             // Reset trick state
             *trick_points = 0;
             self.cards_played_in_trick = 0;
+            // led_suit transitions back to 4 (none)
+            self.hash ^= LED_SUIT_ZOBRIST[self.led_suit as usize];
+            self.hash ^= LED_SUIT_ZOBRIST[4];
             self.led_suit = 4;
             self.current_trick_best_card = 40;
+            // Player change (XOR old, XOR winner)
+            self.hash ^= PLAYER_ZOBRIST[self.current_player as usize];
+            self.hash ^= PLAYER_ZOBRIST[winner as usize];
             self.current_player = winner;
             self.trick_number += 1;
         } else {
-            self.current_player = next_player_after(seat);
+            let next = next_player_after(seat);
+            // Player change (XOR old, XOR new)
+            self.hash ^= PLAYER_ZOBRIST[self.current_player as usize];
+            self.hash ^= PLAYER_ZOBRIST[next as usize];
+            self.current_player = next;
         }
     }
 }
@@ -218,7 +314,7 @@ mod tests {
     #[test]
     fn test_beats() {
         let mut state = GameState::new([0; 4], 3, 0); // Spades is trump
-        state.led_suit = 0; // Hearts led
+        state.set_led_suit(0); // Hearts led
 
         let ace_hearts = 9;
         let seven_hearts = 8;
@@ -270,7 +366,7 @@ mod tests {
 
             let mut state = GameState::new([0; 4], 0, 0);
             state.hands[0] = hand;
-            state.led_suit = led_suit;
+            state.set_led_suit(led_suit);
             state.cards_played_in_trick = if led_suit == 4 { 0 } else { 1 };
 
             let bitboard_moves = state.legal_moves();

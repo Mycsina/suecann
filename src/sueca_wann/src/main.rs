@@ -54,6 +54,9 @@ enum Command {
         seed: u64,
         #[arg(long, default_value = "expert_states.npz")]
         output: String,
+        /// Resume from a checkpoint file (output path with .checkpoint extension)
+        #[arg(long, default_value_t = false)]
+        resume: bool,
     },
     /// Optimize independent continuous weights using Differential Evolution
     OptimizeWeights {
@@ -101,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_count,
             seed,
             output,
+            resume,
         } => {
             let config = dataset_gen::DatasetConfig {
                 n_worlds,
@@ -109,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 seed,
                 output_path: output,
             };
-            dataset_gen::generate_dataset(&config);
+            dataset_gen::generate_dataset(&config, resume);
         }
         Command::OptimizeWeights {
             genome,

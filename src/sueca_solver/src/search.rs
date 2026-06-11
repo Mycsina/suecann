@@ -58,24 +58,31 @@ const fn generate_led_zobrist() -> [u64; 5] {
     led
 }
 
-static ZOBRIST_TABLE: [[u64; 40]; 4] = generate_zobrist_table();
-static PLAYER_ZOBRIST: [u64; 4] = generate_player_zobrist();
-static LED_SUIT_ZOBRIST: [u64; 5] = generate_led_zobrist();
+pub(crate) static ZOBRIST_TABLE: [[u64; 40]; 4] = generate_zobrist_table();
+pub(crate) static PLAYER_ZOBRIST: [u64; 4] = generate_player_zobrist();
+pub(crate) static LED_SUIT_ZOBRIST: [u64; 5] = generate_led_zobrist();
 
+/// O(1) hash read — the Zobrist hash is maintained incrementally in
+/// play_card_and_resolve. This was previously O(cards_remaining) and
+/// consumed ~14% of total CPU in dataset generation.
 #[inline(always)]
 pub fn get_hash(state: &GameState) -> u64 {
-    let mut hash = 0u64;
-    for p in 0..4 {
-        let mut hand = state.hands[p];
-        while hand != 0 {
-            let card = hand.trailing_zeros() as usize;
-            hash ^= ZOBRIST_TABLE[p][card];
-            hand &= hand - 1;
+    debug_assert!({
+        // Full recomputation check (stripped in release builds)
+        let mut hash = 0u64;
+        for p in 0..4 {
+            let mut hand = state.hands[p];
+            while hand != 0 {
+                let card = hand.trailing_zeros() as usize;
+                hash ^= ZOBRIST_TABLE[p][card];
+                hand &= hand - 1;
+            }
         }
-    }
-    hash ^= PLAYER_ZOBRIST[state.current_player as usize];
-    hash ^= LED_SUIT_ZOBRIST[state.led_suit as usize];
-    hash
+        hash ^= PLAYER_ZOBRIST[state.current_player as usize];
+        hash ^= LED_SUIT_ZOBRIST[state.led_suit as usize];
+        hash == state.hash
+    }, "Incremental Zobrist hash mismatch");
+    state.hash
 }
 
 #[derive(Clone, Copy, Default)]
@@ -188,69 +195,90 @@ pub fn alpha_beta(
     let is_maximizing = curr_player == 0 || curr_player == 2;
     let legal = state.legal_moves();
 
-    // Move ordering: try cached best move first, then high cards / trumps.
-    let mut moves = [0u8; 10];
-    let mut move_count = 0;
-    let mut temp = legal;
-    while temp != 0 {
-        moves[move_count] = temp.trailing_zeros() as u8;
-        move_count += 1;
-        temp &= temp - 1;
-    }
-
-    // If TT has a cached best move, swap it to the front for faster cutoffs.
-    if let Some(best) = tt.lookup_best_move(hash) {
-        if (legal & (1u64 << best)) != 0 {
-            for i in 0..move_count {
-                if moves[i] == best {
-                    moves[i] = moves[0];
-                    moves[0] = best;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Sort remaining moves by power rank desc
-    if move_count > 1 {
-        moves[1..move_count]
-            .sort_by_key(|&c| std::cmp::Reverse(crate::engine::CARD_RANK[c as usize]));
-    }
-
     let mut best_val = if is_maximizing { -1000 } else { 1000 };
-    let mut best_move = 40;
+    let mut best_move_card = 40;
 
-    for i in 0..move_count {
-        let m = moves[i];
-        let mut next_state = *state;
-        let mut next_points = *trick_points;
-        next_state.play_card_and_resolve(m, &mut next_points);
+    // ── TT best move: try it first with make/unmake ──
+    let tt_best = tt.lookup_best_move(hash).filter(|&m| (legal & (1u64 << m)) != 0);
+    if let Some(best) = tt_best {
+        let snap = state.save_snapshot();
+        let pre_points = *trick_points;
+        state.play_card_and_resolve(best, trick_points);
 
-        let val = alpha_beta(
-            &mut next_state,
-            alpha,
-            beta,
-            plies_left - 1,
-            tt,
-            &mut next_points,
-        );
+        let val = alpha_beta(state, alpha, beta, plies_left - 1, tt, trick_points);
+
+        // Unmake
+        state.restore_snapshot(&snap);
+        *trick_points = pre_points;
 
         if is_maximizing {
             if val > best_val {
                 best_val = val;
-                best_move = m;
+                best_move_card = best;
             }
             alpha = alpha.max(best_val);
         } else {
             if val < best_val {
                 best_val = val;
-                best_move = m;
+                best_move_card = best;
             }
             beta = beta.min(best_val);
         }
+    }
 
-        if alpha >= beta {
-            break; // Prune
+    // ── Remaining moves: MSB-first bitboard iteration (no array, no sort) ──
+    // Card encoding is suit*10+rank (rank 9=Ace, 0=2). Iterating MSB-first
+    // naturally yields rank-descending within a suit — Ace (rank 9) before
+    // 7 (rank 8) before K (rank 7), etc. For follow-suit (all cards in one
+    // suit), this is perfect. For non-follow-suit, suit 3 (spades) iterates
+    // before suit 0 (hearts), which is arbitrary but cheap.
+    let remaining = if tt_best.is_some() {
+        legal & !(1u64 << tt_best.unwrap())
+    } else {
+        legal
+    };
+
+    // Process remaining moves directly from the bitboard — MSB-first for
+    // rank-descending order. This eliminates the move array (cache pressure),
+    // the insertion sort (6.9% of CPU), and the GameState copy (memcpy)
+    // by using make/unmake snapshots.
+    if alpha < beta {
+        // (alpha >= beta means we already pruned after TT best move)
+        let mut bitboard = remaining;
+        while bitboard != 0 {
+            // MSB-first: highest card index = highest rank within a suit
+            let m = (63 - bitboard.leading_zeros()) as u8;
+
+            // Make move (save/play, no GameState copy)
+            let snap = state.save_snapshot();
+            let pre_points = *trick_points;
+            state.play_card_and_resolve(m, trick_points);
+
+            let val = alpha_beta(state, alpha, beta, plies_left - 1, tt, trick_points);
+
+            // Unmake move (restore pre-move state)
+            state.restore_snapshot(&snap);
+            *trick_points = pre_points;
+
+            if is_maximizing {
+                if val > best_val {
+                    best_val = val;
+                    best_move_card = m;
+                }
+                alpha = alpha.max(best_val);
+            } else {
+                if val < best_val {
+                    best_val = val;
+                    best_move_card = m;
+                }
+                beta = beta.min(best_val);
+            }
+
+            if alpha >= beta {
+                break; // Prune
+            }
+
+            bitboard &= !(1u64 << m); // clear the bit we just processed
         }
     }
 
@@ -263,7 +291,7 @@ pub fn alpha_beta(
         0 // Exact
     };
 
-    tt.store(hash, best_val, flag, plies_left, best_move);
+    tt.store(hash, best_val, flag, plies_left, best_move_card);
 
     best_val
 }
