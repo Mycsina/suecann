@@ -157,32 +157,17 @@ impl TranspositionTable {
 /// Search for optimal play using alpha-beta minimax.
 /// Returns score for Team 0-2 (0..120).
 
-/// Cards of same suit with zero points that are neither the boss (highest
-/// unplayed) nor minimum (lowest unplayed) of their suit are strategically
-/// equivalent — playing any has identical downstream consequences.
-/// Collapsing them reduces branching factor by 30-50% in typical Sueca positions.
+/// Returns a bitmask of all cards in the same suit with ranks strictly
+/// between c1 and c2 (exclusive of both endpoints).
 #[inline(always)]
-fn is_boss_of_suit(card: u8, remaining: u64) -> bool {
-    let suit = crate::engine::CARD_SUIT[card as usize];
-    let suit_mask = 0x3FFu64 << (suit * 10);
-    let remaining_in_suit = remaining & suit_mask;
-    if remaining_in_suit == 0 {
-        return false;
+fn mask_between(c1: u8, c2: u8) -> u64 {
+    let lo = c1.min(c2);
+    let hi = c1.max(c2);
+    if hi <= lo + 1 {
+        return 0; // adjacent — nothing between
     }
-    let max_card = 63 - remaining_in_suit.leading_zeros() as u8;
-    max_card == card
-}
-
-#[inline(always)]
-fn is_minimum_of_suit(card: u8, remaining: u64) -> bool {
-    let suit = crate::engine::CARD_SUIT[card as usize];
-    let suit_mask = 0x3FFu64 << (suit * 10);
-    let remaining_in_suit = remaining & suit_mask;
-    if remaining_in_suit == 0 {
-        return false;
-    }
-    let min_card = remaining_in_suit.trailing_zeros() as u8;
-    min_card == card
+    // All bits with indices in (lo, hi)
+    ((1u64 << hi) - 1) ^ ((1u64 << (lo + 1)) - 1)
 }
 
 pub fn alpha_beta(
@@ -315,10 +300,12 @@ pub fn alpha_beta(
     };
     let remaining = remaining_base & !tried_killer;
 
-    // Build equivalence-reduced move set
+    // Build equivalence-reduced move set with exact adjacency test.
+    // Two same-suit zero-point cards are equivalent iff no remaining card
+    // ranks strictly between them. This is provably lossless: if an opponent
+    // holds a card between them, playing one vs the other changes who wins.
     let all_remaining = state.hands[0] | state.hands[1] | state.hands[2] | state.hands[3];
     let mut distinct_moves = 0u64;
-    let mut rep_of_group = [40u8; 40]; // 40 = unset; maps card → representative
 
     {
         let mut temp = remaining;
@@ -327,19 +314,28 @@ pub fn alpha_beta(
             let suit = crate::engine::CARD_SUIT[card as usize];
             let points = crate::engine::CARD_POINTS[card as usize];
 
-            // Zero-point, non-boss, non-minimum cards of the same suit are equivalent
-            let can_group = points == 0
-                && !is_boss_of_suit(card, all_remaining)
-                && !is_minimum_of_suit(card, all_remaining);
-
-            if can_group {
-                let key = suit; // all zero-point same-suit cards share a group
-                if rep_of_group[key as usize] == 40 {
-                    rep_of_group[key as usize] = card;
+            if points == 0 {
+                // Check if any higher-ranked card in same suit is already
+                // a representative AND has no remaining cards between them.
+                let suit_mask = 0x3FFu64 << (suit * 10);
+                let mut higher = distinct_moves & suit_mask & !((1u64 << (card + 1)) - 1);
+                let mut is_equivalent = false;
+                while higher != 0 {
+                    let rep = (63 - higher.leading_zeros()) as u8;
+                    // Equivalent if same suit, zero-point, and no card between
+                    if crate::engine::CARD_POINTS[rep as usize] == 0
+                        && (mask_between(card, rep) & all_remaining) == 0
+                    {
+                        is_equivalent = true;
+                        break;
+                    }
+                    higher &= !(1u64 << rep);
+                }
+                if !is_equivalent {
                     distinct_moves |= 1u64 << card;
                 }
-                // else: this card's group already has a representative — skip
             } else {
+                // Point cards always distinct
                 distinct_moves |= 1u64 << card;
             }
             temp &= !(1u64 << card);

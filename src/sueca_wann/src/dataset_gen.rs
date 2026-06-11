@@ -175,7 +175,7 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
         };
 
         let batch_size = 512;
-        let batch_results: Vec<Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)>> = (0..batch_size)
+        let batch_pairs: Vec<(Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)>, DealRejectCounts)> = (0..batch_size)
             .into_par_iter()
             .map(|i| {
                 let deal_seed = batch_seed + i as u64;
@@ -184,7 +184,9 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
             })
             .collect();
 
-        for results in batch_results {
+        let mut batch_rejects = DealRejectCounts::default();
+        for (results, deal_rejects) in batch_pairs {
+            batch_rejects.merge(&deal_rejects);
             for (state, soft_intent, mask) in results {
                 // With one-hot targets (ambiguous ties rejected upstream),
                 // the primary intent is simply the argmax.
@@ -221,6 +223,13 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
             println!(
                 "  batch {}, per intent: {:?} (total {}, soft min {}, target {})",
                 batches, class_counts, total, soft_min, total_target
+            );
+            println!(
+                "    rejects: acc={} col={} fut={} conf={} uncl={} steer={} sl={} term={}",
+                batch_rejects.accepted, batch_rejects.intent_collision,
+                batch_rejects.futility_stop, batch_rejects.confidence_filter,
+                batch_rejects.unclassifiable, batch_rejects.steered_out,
+                batch_rejects.single_legal, batch_rejects.terminal,
             );
         }
 
@@ -288,12 +297,39 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
 /// is harmless for capacity-limited WANNs.
 const N_EXTRA_EXTRACTIONS: usize = 2;
 
+/// Per-deal rejection counters for quality diagnostics.
+#[derive(Default, Clone)]
+pub struct DealRejectCounts {
+    pub single_legal: usize,
+    pub intent_collision: usize,
+    pub futility_stop: usize,
+    pub confidence_filter: usize,
+    pub unclassifiable: usize,
+    pub steered_out: usize,
+    pub accepted: usize,
+    pub terminal: usize,
+}
+
+impl DealRejectCounts {
+    fn merge(&mut self, other: &DealRejectCounts) {
+        self.single_legal += other.single_legal;
+        self.intent_collision += other.intent_collision;
+        self.futility_stop += other.futility_stop;
+        self.confidence_filter += other.confidence_filter;
+        self.unclassifiable += other.unclassifiable;
+        self.steered_out += other.steered_out;
+        self.accepted += other.accepted;
+        self.terminal += other.terminal;
+    }
+}
+
 pub fn generate_deal_states(
     rng: &mut Pcg64,
     config: &DatasetConfig,
     steer_intent: Option<usize>,
-) -> Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)> {
+) -> (Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)>, DealRejectCounts) {
     let mut results = Vec::new();
+    let mut rejects = DealRejectCounts::default();
 
     // Deal cards
     let mut deck: Vec<u8> = (0..40).collect();
@@ -354,88 +390,110 @@ pub fn generate_deal_states(
     }
 
     if game.state.trick_number >= 10 {
-        return results;
+        rejects.terminal += 1;
+        return (results, rejects);
     }
 
-    // ── Post-walk steering filter: skip positions that don't match the ──
-    // hunted intent's structural preconditions. Avoids expensive PIMC on
-    // positions where the rare intent is unlikely to apply.
+    // ── Post-walk steering filter ──
     if let Some(target) = steer_intent {
         let is_leading = game.current_trick_len == 0;
         let keep = match target {
-            1 => {
-                // EFFICIENT_WIN: needs following position to apply
-                !is_leading || rng.gen_ratio(1, 4) // keep 25% of leading for diversity
-            }
-            2 => {
-                // EQUITY_BUILDER: prefers leading to build voids
-                is_leading || rng.gen_ratio(1, 4)
-            }
-            0 => {
-                // MAX_FORCE: prefers leading with trump/master cards
-                is_leading || rng.gen_ratio(1, 3)
-            }
+            1 => !is_leading || rng.gen_ratio(1, 4),
+            2 => is_leading || rng.gen_ratio(1, 4),
+            0 => is_leading || rng.gen_ratio(1, 3),
             _ => true,
         };
         if !keep {
-            return results;
+            rejects.steered_out += 1;
+            return (results, rejects);
         }
     }
 
     // ── Extract state at current position ──
-    extract_state_at(&game, config, rng, &mut results);
+    match extract_state_at(&game, config, rng, &mut results) {
+        RejectReason::Accepted => rejects.accepted += 1,
+        RejectReason::SingleLegal => rejects.single_legal += 1,
+        RejectReason::IntentCollision => rejects.intent_collision += 1,
+        RejectReason::FutilityStop => rejects.futility_stop += 1,
+        RejectReason::ConfidenceFilter => rejects.confidence_filter += 1,
+        RejectReason::Unclassifiable => rejects.unclassifiable += 1,
+        RejectReason::SteeredOut => rejects.steered_out += 1,
+    }
 
-    // ── Multi-state extraction: complete the current trick using ──
-    // HeuristicBot, then extract states at subsequent positions to
-    // amortize deal setup and void tracking across multiple states.
+    // ── Multi-state extraction with coin-flip advancement ──
     let mut extra_game = game;
     for _ in 0..N_EXTRA_EXTRACTIONS {
         if extra_game.state.trick_number >= 10 {
             break;
         }
 
-        // Complete the current trick if mid-trick
+        let use_heuristic = rng.gen_bool(0.5);
         while extra_game.state.cards_played_in_trick > 0 {
             let seat = extra_game.state.current_player;
             let legal = extra_game.state.legal_moves();
             if legal.count_ones() <= 1 {
                 let card = legal.trailing_zeros() as u8;
                 extra_game.play_card(card);
-            } else {
+            } else if use_heuristic {
                 let card = select_card_heuristic(&extra_game, seat);
                 extra_game.play_card(card);
+            } else {
+                let count = legal.count_ones();
+                let idx = rng.gen_range(0u64..(count as u64)) as usize;
+                let mut temp = legal;
+                for _ in 0..idx {
+                    temp &= temp - 1;
+                }
+                extra_game.play_card(temp.trailing_zeros() as u8);
             }
         }
 
-        // Now at the start of a new trick — extract state
         if extra_game.state.trick_number < 10 {
-            extract_state_at(&extra_game, config, rng, &mut results);
+            match extract_state_at(&extra_game, config, rng, &mut results) {
+                RejectReason::Accepted => rejects.accepted += 1,
+                RejectReason::SingleLegal => rejects.single_legal += 1,
+                RejectReason::IntentCollision => rejects.intent_collision += 1,
+                RejectReason::FutilityStop => rejects.futility_stop += 1,
+                RejectReason::ConfidenceFilter => rejects.confidence_filter += 1,
+                RejectReason::Unclassifiable => rejects.unclassifiable += 1,
+                RejectReason::SteeredOut => rejects.steered_out += 1,
+            }
         }
     }
 
-    results
+    (results, rejects)
+}
+
+/// Rejection reasons for dataset quality tracking.
+#[derive(Clone, Copy)]
+enum RejectReason {
+    Accepted,
+    SingleLegal,
+    IntentCollision,
+    FutilityStop,
+    ConfidenceFilter,
+    Unclassifiable,
+    SteeredOut,
 }
 
 /// Extract a single labeled state from the current game position.
 /// Applies always-on pre-filters before PIMC and confidence filtering after.
+/// Returns the rejection reason for logging.
 fn extract_state_at(
     game: &SuecaSimulatorGame,
     config: &DatasetConfig,
     rng: &mut Pcg64,
     results: &mut Vec<(Vec<f64>, [f32; OUTPUT_COUNT], u8)>,
-) {
+) -> RejectReason {
     // CRITICAL: Extract data ONLY for the active player whose turn it is.
     let seat = game.state.current_player;
     let legal = game.state.legal_moves();
 
     if legal.count_ones() <= 1 {
-        return;
+        return RejectReason::SingleLegal;
     }
 
     // ── Always-on pre-filter: intent uniqueness check ──
-    // If any two oracle intents resolve to the same card, the downstream
-    // map_card_to_soft_intents filter will reject this state. Skip PIMC entirely.
-    // resolve_intent() is O(legal_moves) — microseconds vs seconds for PIMC.
     {
         let mut card_for_intent = [40u8; OUTPUT_COUNT as usize];
         for intent in 0..OUTPUT_COUNT as usize {
@@ -454,7 +512,7 @@ fn extract_state_at(
             }
         }
         if collision {
-            return;
+            return RejectReason::IntentCollision;
         }
     }
 
@@ -503,15 +561,11 @@ fn extract_state_at(
 
     // Empty EV results → futility stop fired. Skip this state.
     if evs.is_empty() {
-        return;
+        return RejectReason::FutilityStop;
     }
 
     let mut sorted: Vec<&sueca_solver::pimc::PimcResult> = evs.iter().collect();
     sorted.sort_by(|a, b| b.ev.partial_cmp(&a.ev).unwrap_or(std::cmp::Ordering::Equal));
-
-    if sorted.is_empty() {
-        return;
-    }
 
     // ── Confidence filter: reject strategically ambiguous states ──
     let best = sorted[0];
@@ -532,13 +586,16 @@ fn extract_state_at(
     };
 
     if !is_clear {
-        return;
+        return RejectReason::ConfidenceFilter;
     }
 
     if let Some(soft_intent) = map_card_to_soft_intents(best.card, game, seat) {
         let legal_mask = build_legal_mask(legal, game, seat);
         let state_vec: Vec<f64> = belief.to_vec();
         results.push((state_vec, soft_intent, legal_mask));
+        RejectReason::Accepted
+    } else {
+        RejectReason::Unclassifiable
     }
 }
 
@@ -699,11 +756,7 @@ mod tests {
         let mut rng = Pcg64::seed_from_u64(42);
         // Generate many deal states and verify each one
         for _ in 0..100 {
-            let results = generate_deal_states(&mut rng, &config, None);
-            // We can't directly inspect current_player since the game is consumed,
-            // but we can verify the states come from a single consistent perspective
-            // by checking that belief features 5 (Am_I_Leading) is consistent
-            // with the encoded perspective — it must be 0 or 1, never NaN or out of bounds.
+            let (results, _) = generate_deal_states(&mut rng, &config, None);
             for (state, _intent, _mask) in &results {
                 assert_eq!(state.len(), INPUT_COUNT);
                 // Every belief value must be in [0, 1]
@@ -729,7 +782,7 @@ mod tests {
         let mut rng = Pcg64::seed_from_u64(99);
         let mut total = 0;
         for _ in 0..600 {
-            for (state, _, _) in generate_deal_states(&mut rng, &config, None) {
+            for (state, _, _) in generate_deal_states(&mut rng, &config, None).0 {
                 total += 1;
                 for (i, &v) in state.iter().enumerate() {
                     assert!(
@@ -1014,7 +1067,7 @@ mod tests {
         let mut total = 0;
 
         for _ in 0..500 {
-            for (_, soft_intent, _) in generate_deal_states(&mut rng, &config, None) {
+            for (_, soft_intent, _) in generate_deal_states(&mut rng, &config, None).0 {
                 for i in 0..OUTPUT_COUNT as usize {
                     if soft_intent[i] > 0.0 {
                         counts[i] += 1;
@@ -1125,7 +1178,7 @@ mod tests {
         let mut intents = Vec::new();
         let mut masks = Vec::new();
         loop {
-            for (state, intent, mask) in generate_deal_states(&mut rng, &config, None) {
+            for (state, intent, mask) in generate_deal_states(&mut rng, &config, None).0 {
                 if intents.len() / (OUTPUT_COUNT as usize) < config.target_total {
                     states.extend(state);
                     intents.extend_from_slice(&intent);
