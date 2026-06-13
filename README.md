@@ -2,33 +2,34 @@
 
 Evolves Weight-Agnostic Neural Networks (WANNs) to play Sueca, a Portuguese four-player partnership trick-taking card game. The system evolves discrete network topologies built from logical gates. You can compile the resulting networks into human-readable IF/THEN rules.
 
+> **2026-06-12 — Pipeline recovery in progress.** The dataset pipeline has been restructured (mid-trick walks, 6-bucket per-split balance, multi-label acceptance). A new 18K-state dataset is generating. Benchmarks below are from the **previous** run; updated numbers will replace them after retraining. See `43417da` for the recovery commit.
+
 ## Architecture
 
 ```
-Belief State (33 features) → WANN (Logical Gates) → Oracle Intent (4 outputs) → Heuristic Resolver → Card
+Belief State (35 features) → WANN (Logical Gates) → Oracle Intent (3 outputs) → Heuristic Resolver → Card
 ```
 
-**Belief State.** 33 normalized floats encoding hand composition, trick state, void tracking, game progress, side-suit depletion, secured points, and void/depletion counts.
+**Belief State.** 35 normalized floats encoding hand composition, trick state, void tracking, tactical affordances (boss detection, "can I win?" evaluation), game progress, side-suit depletion, secured points, and meta features.
 
-**WANN.** Weight-agnostic network with sign-only connections (±1), logical aggregations (SUM, MIN, MAX), and discrete activations (IDENTITY, NOT, THRESHOLD). Topologies are evaluated across a weight sweep W ∈ {−2.0, −1.0, −0.5, 0.5, 1.0, 2.0}.
+**WANN.** Weight-agnostic network with sign-only connections (±1), logical aggregations (SUM, MIN/AND, MAX/OR), and discrete activations (IDENTITY, NOT, THRESHOLD). No MEAN (float-precision issues at THRESHOLD boundary) and no SIGMOID (breaks IF/THEN rule extraction). Topologies are evaluated across a weight sweep W ∈ {−2.0, −1.0, −0.5, 0.5, 1.0, 2.0}.
 
-**Oracle Intents.** Four abstract play archetypes that map to legal cards in any game state:
+**Oracle Intents.** Three abstract play archetypes that map to legal cards in any game state (MIN_FORCE removed — subsumed by EFFICIENT_WIN):
 
-- **MAX_FORCE** — Lead high trump or a cash master card. Play the highest-ranking card when following.
-- **MIN_FORCE** — Lead from the longest non-trump suit. Play the lowest legal card to preserve high cards.
-- **EFFICIENT_WIN** — Lead low trump or longest suit. Play the cheapest card that beats the current winner, or cut with the cheapest trump.
-- **EQUITY_BUILDER** — Lead a short suit to build voids. Load points when partner is winning. Exploit opponent voids. Cut when partner is void.
+- **MAX_FORCE (0)** — Aggressive/control. Lead high trump or cash a master card. Play max-rank when following.
+- **EFFICIENT_WIN (1)** — Tactical exploitation. Play the cheapest card that beats the current winner, or cut cheaply with trump.
+- **EQUITY_BUILDER (2)** — Partnership/voids. Lead from short suit to build voids. Load points when partner is winning. Cut when partner is void.
 
-**Heuristic Resolver.** Maps each intent to a legal card contextually. All four intents always resolve to a legal move, so illegal intents never occur during rollouts.
+**Heuristic Resolver.** Maps each intent to a legal card contextually. All three intents always resolve to a legal move. When WANN outputs tie, a random choice is made among tied maximums (not deterministic argmax).
 
-### Belief State Layout (33 inputs, all in [0, 1])
+### Belief State Layout (35 inputs, all in [0, 1])
 
 | Index | Feature | Type | Description |
 |:---:|---|---|---|
 | 0 | `Has_Led_Suit` | Bool | Holds at least one card of the led suit |
 | 1 | `Has_Trump` | Bool | Holds at least one trump card |
-| 2 | `Led_Suit_Power` | Float | Highest rank held in led suit / 9.0 |
-| 3 | `Trump_Power` | Float | Highest rank held in trump / 9.0 |
+| 2 | `Led_Suit_Count` | Float | Cards held in led suit / 10.0 |
+| 3 | `Trump_Count` | Float | Trumps held / 10.0 |
 | 4 | `Hand_Point_Density` | Float | Points in hand / points remaining in game |
 | 5 | `Am_I_Leading` | Bool | First to play in the trick |
 | 6 | `Am_I_Last_To_Play` | Bool | Fourth to play in the trick |
@@ -40,29 +41,50 @@ Belief State (33 features) → WANN (Logical Gates) → Oracle Intent (4 outputs
 | 12 | `Any_Opp_Void_Led` | Bool | Either opponent is void in the led suit |
 | 13 | `Any_Opp_Void_Trump` | Bool | Either opponent is void in the trump suit |
 | 14 | `Led_Suit_Ace_Played` | Bool | Ace of led suit already played |
-| 15 | `Led_Suit_7_Played` | Bool | 7 of led suit already played |
+| 15 | `Led_Suit_7_Played` | Bool | 7 (manilha) of led suit already played |
 | 16 | `Trump_Ace_Played` | Bool | Trump ace already played |
-| 17 | `Game_Pts_Remaining` | Float | Unplayed card points / 120.0 |
-| 18 | `Trick_Number` | Float | Current trick index / 9.0 |
-| 19 | `Trumps_Remaining` | Float | Unplayed trump cards / 10.0 |
-| 20 | `Score_Delta` | Float | (our_pts − opp_pts + 120) / 240.0 |
-| 21 | `Side0_Depletion` | Float | Played cards of side-suit 0 / 10.0 |
-| 22 | `Side0_Ace_Played` | Bool | Ace of side-suit 0 already played |
-| 23 | `Side0_7_Played` | Bool | 7 of side-suit 0 already played |
-| 24 | `Side1_Depletion` | Float | Played cards of side-suit 1 / 10.0 |
-| 25 | `Side1_Ace_Played` | Bool | Ace of side-suit 1 already played |
-| 26 | `Side1_7_Played` | Bool | 7 of side-suit 1 already played |
-| 27 | `Side2_Depletion` | Float | Played cards of side-suit 2 / 10.0 |
-| 28 | `Side2_Ace_Played` | Bool | Ace of side-suit 2 already played |
-| 29 | `Side2_7_Played` | Bool | 7 of side-suit 2 already played |
-| 30 | `Points_Secured_Us` | Float | Our team's secured game points / 120.0 |
-| 31 | `Known_Void_Suits_Count` | Float | Number of suits where any player is known void / 4.0 |
-| 32 | `Depleted_Suits_Count` | Float | Number of fully-depleted suits / 4.0 |
+| 17 | `Holds_Boss_Led` | Bool | Holds the highest unplayed card in led suit |
+| 18 | `Holds_Boss_Trump` | Bool | Holds the highest unplayed card in trump |
+| 19 | `Can_Beat_Winner` | Bool | Any legal card can beat the current winner |
+| 20 | `Min_Winning_Cost` | Float | Points of cheapest winning card / 11.0 |
+| 21 | `Min_Sacrifice_Cost` | Float | Points of cheapest legal card / 11.0 |
+| 22 | `Game_Pts_Remaining` | Float | Unplayed card points / 120.0 |
+| 23 | `Trick_Number` | Float | Current trick index / 9.0 |
+| 24 | `Trumps_Remaining` | Float | Unplayed trump cards / 10.0 |
+| 25 | `Score_Delta` | Float | (our_pts − opp_pts + 120) / 240.0 |
+| 26 | `My_Void_Count` | Float | Suits the player is void in / 3.0 |
+| 27 | `Longest_Side_Suit` | Float | Max cards in non-trump, non-led suit / 10.0 |
+| 28 | `Shortest_Side_Suit` | Float | Min cards in non-trump, non-led suit / 10.0 |
+| 29 | `Side0_Depletion` | Float | Played cards of side-suit 0 / 10.0 |
+| 30 | `Side1_Depletion` | Float | Played cards of side-suit 1 / 10.0 |
+| 31 | `Side2_Depletion` | Float | Played cards of side-suit 2 / 10.0 |
+| 32 | `Points_Secured_Us` | Float | Our team's secured game points / 120.0 |
+| 33 | `Known_Void_Suits_Count` | Float | Suits where any player is known void / 4.0 |
+| 34 | `Depleted_Suits_Count` | Float | Fully-depleted suits / 4.0 |
 
-## Benchmark Results
+### Dataset Pipeline (2026-06 Recovery)
 
-We evaluated the evolved WANN models in a round-robin tournament (200 duplicate matches / 400 games total per matchup).
-With the correct duplicate-match win-rate calculation (summing to 100%), the results are:
+The dataset generator uses PIMC (Perfect Information Monte Carlo) with several quality filters:
+
+- **Mid-trick random walk**: plays 0-7 complete tricks + 0-3 extra cards, ending at a uniform random point within a trick (~25% lead, ~75% follow).
+- **Six-bucket per-split balance**: (Lead, Follow) × (MAX_FORCE, EFFICIENT_WIN, EQUITY_BUILDER). Each split targets `total/2` states with soft floors per intent.
+- **Multi-label acceptance**: when multiple intents map to the PIMC-best card, the state is accepted with fractional targets (1/k per intent) rather than rejected.
+- **Futility stop**: ambiguous states exit PIMC early when the EV gap cannot plausibly become significant.
+- **Exact card equivalence**: zero-point cards in the same suit with no intervening remaining cards are collapsed in alpha-beta search (provably lossless via `mask_between` test).
+- **Killer-move heuristic**: 2-slot per-ply killer table in alpha-beta for ~30% more cutoffs.
+- **Class weighting**: inverse-frequency weights in Phase 0 fitness compensate for any remaining class imbalance.
+- **Holdout set**: 10% stratified across all 6 buckets for validation accuracy tracking.
+- **Diff mode**: `--diff-mode --fixed-worlds N` for controlled label comparison between pipeline versions.
+
+Generate with:
+```bash
+./target/release/sueca_wann generate-dataset \
+  --n-worlds 80 --search-depth 4 --target-count 18000 \
+  --seed 42 --soft-balance-min-ratio 0.20 \
+  --output expert_states_v4.npz
+```
+
+## Benchmark Results (previous run — pre-recovery)
 
 | Bot | RandomBot | OldHeuristicBot | EliteHeuristicBot | WANN (Champion) | WANN (Optimized) |
 |---|---|---|---|---|---|
@@ -72,11 +94,7 @@ With the correct duplicate-match win-rate calculation (summing to 100%), the res
 | **WANN (Champion)** | 92.2% | 54.8% | 41.5% | 50.0% | 49.8% |
 | **WANN (Optimized)** | 87.0% | 61.0% | 39.8% | 50.2% | 50.0% |
 
-**Key Takeaways:**
-1. **WANN (Champion)** decisively beats **OldHeuristicBot** with a **54.8% win rate** (61.9 vs 58.1 average card points per match).
-2. **WANN (Optimized)** (with continuous weights optimized via DE) achieves a **61.0% win rate** against **OldHeuristicBot** (62.6 vs 57.4 average card points per match).
-3. Both WANN variants show strong competitive performance against **EliteHeuristicBot** (~40% win rate), outperforming **OldHeuristicBot** which only wins 37.5% of games against **EliteHeuristicBot**.
-4. WANN Champion and WANN Optimized are in near-perfect parity, with WANN Optimized winning **50.2%** of their head-to-head matches.
+> Note: These numbers are from the pre-recovery run (June 3). The June 12 recovery run regressed to 43.8% due to Follow-brain starvation (9.4% Follow split, EFFICIENT_WIN at 8.2%). The pipeline fixes above address that. Updated benchmarks will replace this table after retraining.
 
 ## Rust Crates
 

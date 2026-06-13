@@ -53,6 +53,67 @@ pub fn generate_deals_rust(
     deals
 }
 
+/// Generate a frozen set of deals for the fixed-yardstick Phase 1 probe.
+/// These deals are never regenerated — they provide a stationary benchmark
+/// to disentangle opponent-hardening from genuine capability regression.
+fn generate_frozen_probe_deals(base_seed: u64) -> Vec<crate::evaluator::EvaluatorDeal> {
+    let n_deals = 64;
+    let mut deals = Vec::with_capacity(n_deals);
+    let mut rng = Pcg64::seed_from_u64(base_seed);
+    for i in 0..n_deals {
+        let deal_seed = base_seed.wrapping_mul(1000).wrapping_add(i as u64);
+        let mut deal_rng = Pcg64::seed_from_u64(deal_seed);
+        let mut deck: Vec<u8> = (0..40).collect();
+        deck.shuffle(&mut deal_rng);
+        let mut hands = [0u64; 4];
+        for p in 0..4 {
+            for c in 0..10 {
+                hands[p] |= 1u64 << deck[p * 10 + c];
+            }
+        }
+        let trump = deal_rng.gen_range(0..4) as u8;
+        deals.push(crate::evaluator::EvaluatorDeal { hands, trump, seed: deal_seed });
+    }
+    deals
+}
+
+/// Evaluate a (lead, follow) pair against 4× OldHeuristicBot on frozen deals.
+/// Returns mean point delta per game (Team 0-2 score minus baseline).
+fn evaluate_fixed_probe(
+    lead_brain: &crate::wann_network::RustWannNetwork,
+    follow_brain: &crate::wann_network::RustWannNetwork,
+    deals: &[crate::evaluator::EvaluatorDeal],
+    sweep_weights: &[f64],
+    base_seed: u64,
+) -> f64 {
+    let max_nodes = lead_brain.num_nodes.max(follow_brain.num_nodes);
+    let mut total_delta = 0.0f64;
+    let n_weights = sweep_weights.len();
+    // Evaluate each deal × 4 rotations with the candidate pair at seat 0
+    for (d_idx, deal) in deals.iter().enumerate() {
+        for rot in 0..4 {
+            let rotated = crate::evaluator::rotate_hands(&deal.hands, rot);
+            let adj_first = (0u8 + rot as u8) % 4;
+            let eval_seed = base_seed ^ ((d_idx as u64) << 32) ^ (rot as u64);
+
+            let candidate_bot = crate::evaluator::SimulatorBot::Wann {
+                lead_brain, follow_brain, weights: sweep_weights,
+            };
+            let baseline_bot = crate::evaluator::SimulatorBot::OldHeuristic;
+            let bots = [candidate_bot.clone(), baseline_bot.clone(), baseline_bot.clone(), baseline_bot.clone()];
+
+            let mut scratchpad = vec![0.0f64; max_nodes * n_weights];
+            let mut behavior = crate::evaluator::WannBehavior::default();
+            let result = crate::evaluator::play_game_sim(
+                rotated, deal.trump, adj_first, &bots, eval_seed,
+                &mut scratchpad, &mut behavior,
+            );
+            total_delta += result.team_02_score as f64 - 60.0; // baseline = 60 (expected score)
+        }
+    }
+    total_delta / (deals.len() * 4) as f64
+}
+
 // ---------------------------------------------------------------------------
 // Phase 0: Supervised classification accuracy
 // ---------------------------------------------------------------------------
@@ -798,17 +859,21 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
     if !resume || csv_file.metadata()?.len() == 0 {
         writeln!(
             csv_file,
-            "generation,phase,lead_best_fitness,lead_avg_fitness,follow_best_fitness,follow_avg_fitness,lead_n_species,follow_n_species,lead_n_connections_best,follow_n_connections_best,lead_val_acc,follow_val_acc,elapsed_sec"
+            "generation,phase,lead_best_fitness,lead_avg_fitness,follow_best_fitness,follow_avg_fitness,lead_n_species,follow_n_species,lead_n_connections_best,follow_n_connections_best,lead_val_acc,follow_val_acc,fixed_probe_delta,elapsed_sec"
         )?;
     }
 
     println!(
-        "{:>4} {:>2} {:>8} {:>8} {:>8} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8}",
+        "{:>4} {:>2} {:>8} {:>8} {:>8} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8} {:>8}",
         "Gen", "Ph", "L-Best", "L-Avg", "F-Best", "F-Avg",
         "L-Spec", "F-Spec", "L-Conn", "F-Conn",
-        "L-Val", "F-Val", "Time"
+        "L-Val", "F-Val", "Prb", "Time"
     );
-    println!("{}", "-".repeat(110));
+    println!("{}", "-".repeat(120));
+
+    // Fixed-yardstick probe: frozen deal set for Phase 1 stationary benchmarking.
+    // Generated once at Phase transition; same deals used for all probe evaluations.
+    let mut frozen_probe_deals: Option<Vec<crate::evaluator::EvaluatorDeal>> = None;
 
     for gen in start_gen..config.population.generations {
         let t_gen = Instant::now();
@@ -943,6 +1008,9 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
                 follow_pop.global_best_fitness = f64::NEG_INFINITY;
                 follow_pop.global_best_genome = None;
                 follow_pop.generations_since_improvement = 0;
+
+                // Generate frozen probe deals once for the entire Phase 1
+                frozen_probe_deals = Some(generate_frozen_probe_deals(config.evaluation.seed + 9999));
             }
         }
         let t_phase = t_phase_start.elapsed();
@@ -1218,12 +1286,25 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
 
         let t_ckpt = t_ckpt_start.elapsed();
 
+        // ── Fixed-yardstick probe (every 25 Phase 1 gens) ──
+        let mut fixed_probe_delta = 0.0f64;
+        if current_phase == 1 && gen % 25 == 0 {
+            if let Some(ref probe_deals) = frozen_probe_deals {
+                let best_lead = lead_pop.genomes[lead_best_idx].to_rust_wann();
+                let best_follow = follow_pop.genomes[follow_best_idx].to_rust_wann();
+                fixed_probe_delta = evaluate_fixed_probe(
+                    &best_lead, &best_follow, probe_deals,
+                    &config.evaluation.sweep_weights, config.evaluation.seed + 7777,
+                );
+            }
+        }
+
         // --- End-of-generation timing and reporting (captures ALL work) ---
         let t_total = t_gen.elapsed().as_secs_f64();
 
         writeln!(
             csv_file,
-            "{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.6},{:.6},{:.2}",
+            "{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.6},{:.6},{:.6},{:.2}",
             gen,
             current_phase,
             lead_best_fit,
@@ -1236,6 +1317,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             follow_best_conns,
             lead_val_acc,
             follow_val_acc,
+            fixed_probe_delta,
             t_total
         )?;
         csv_file.flush()?;

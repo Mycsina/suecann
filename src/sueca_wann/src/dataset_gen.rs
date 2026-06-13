@@ -639,6 +639,14 @@ fn extract_state_at(
 }
 
 pub fn map_card_to_soft_intents(card: u8, game: &SuecaSimulatorGame, seat: u8) -> Option<[f32; OUTPUT_COUNT]> {
+    // Guard: this function must only be called with the PIMC-best card
+    // (post-confidence-filter). The multi-label acceptance gate depends on
+    // this invariant. In debug builds, verify the card is legal.
+    debug_assert!(
+        (game.state.legal_moves() & (1u64 << card)) != 0,
+        "map_card_to_soft_intents called with card {} which is not legal for current player",
+        card
+    );
     let mut matching_intents = Vec::new();
     for intent in 0..OUTPUT_COUNT as usize {
         let resolved = resolve_intent(intent, game, seat);
