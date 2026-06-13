@@ -563,49 +563,59 @@ fn run_phase1_generation_joint(
 }
 
 
-fn split_dataset(dataset: &ExpertDataset) -> (ExpertDataset, ExpertDataset) {
-    let mut lead_states = Vec::new();
-    let mut lead_soft_intents = Vec::new();
-    let mut lead_legal_masks = Vec::new();
-
-    let mut follow_states = Vec::new();
-    let mut follow_soft_intents = Vec::new();
-    let mut follow_legal_masks = Vec::new();
-
+fn split_dataset(dataset: &ExpertDataset, holdout_frac: f64)
+    -> (ExpertDataset, ExpertDataset, ExpertDataset, ExpertDataset)
+{
+    // Collect indices by (split, intent) for stratified holdout
+    let mut buckets: [[Vec<usize>; 3]; 2] = Default::default();
     for idx in 0..dataset.num_states {
         let state_offset = idx * INPUT_COUNT;
         let is_leading = (dataset.states[state_offset + crate::constants::BeliefFeature::AmILeading as usize] - 1.0).abs() < 1e-9;
-        
-        let state_slice = &dataset.states[state_offset..state_offset + INPUT_COUNT];
-        let intent_slice = &dataset.soft_intents[idx * OUTPUT_COUNT as usize..idx * OUTPUT_COUNT as usize + OUTPUT_COUNT as usize];
-        let legal_mask = dataset.legal_masks[idx];
+        let split = if is_leading { 0 } else { 1 };
+        let intent = dataset.soft_intents[idx * OUTPUT_COUNT as usize..idx * OUTPUT_COUNT as usize + OUTPUT_COUNT as usize]
+            .iter().enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i).unwrap_or(0);
+        buckets[split][intent].push(idx);
+    }
 
-        if is_leading {
-            lead_states.extend_from_slice(state_slice);
-            lead_soft_intents.extend_from_slice(intent_slice);
-            lead_legal_masks.push(legal_mask);
-        } else {
-            follow_states.extend_from_slice(state_slice);
-            follow_soft_intents.extend_from_slice(intent_slice);
-            follow_legal_masks.push(legal_mask);
+    let mut lead_train = (Vec::new(), Vec::new(), Vec::new());
+    let mut lead_val = (Vec::new(), Vec::new(), Vec::new());
+    let mut follow_train = (Vec::new(), Vec::new(), Vec::new());
+    let mut follow_val = (Vec::new(), Vec::new(), Vec::new());
+
+    for split in 0..2 {
+        for intent in 0..3 {
+            let indices = &buckets[split][intent];
+            let n_val = (indices.len() as f64 * holdout_frac).max(1.0) as usize;
+            let (val_idxs, train_idxs) = indices.split_at(n_val.min(indices.len()));
+            let (train_dest, val_dest) = if split == 0 {
+                (&mut lead_train, &mut lead_val)
+            } else {
+                (&mut follow_train, &mut follow_val)
+            };
+            for &idx in train_idxs {
+                let off = idx * INPUT_COUNT;
+                train_dest.0.extend_from_slice(&dataset.states[off..off + INPUT_COUNT]);
+                let ioff = idx * OUTPUT_COUNT as usize;
+                train_dest.1.extend_from_slice(&dataset.soft_intents[ioff..ioff + OUTPUT_COUNT as usize]);
+                train_dest.2.push(dataset.legal_masks[idx]);
+            }
+            for &idx in val_idxs {
+                let off = idx * INPUT_COUNT;
+                val_dest.0.extend_from_slice(&dataset.states[off..off + INPUT_COUNT]);
+                let ioff = idx * OUTPUT_COUNT as usize;
+                val_dest.1.extend_from_slice(&dataset.soft_intents[ioff..ioff + OUTPUT_COUNT as usize]);
+                val_dest.2.push(dataset.legal_masks[idx]);
+            }
         }
     }
 
-    let lead_dataset = ExpertDataset {
-        num_states: lead_legal_masks.len(),
-        states: lead_states,
-        soft_intents: lead_soft_intents,
-        legal_masks: lead_legal_masks,
-    };
-
-    let follow_dataset = ExpertDataset {
-        num_states: follow_legal_masks.len(),
-        states: follow_states,
-        soft_intents: follow_soft_intents,
-        legal_masks: follow_legal_masks,
-    };
-
-    (lead_dataset, follow_dataset)
+    let lead_train_ds = ExpertDataset { num_states: lead_train.2.len(), states: lead_train.0, soft_intents: lead_train.1, legal_masks: lead_train.2 };
+    let lead_val_ds = ExpertDataset { num_states: lead_val.2.len(), states: lead_val.0, soft_intents: lead_val.1, legal_masks: lead_val.2 };
+    let follow_train_ds = ExpertDataset { num_states: follow_train.2.len(), states: follow_train.0, soft_intents: follow_train.1, legal_masks: follow_train.2 };
+    let follow_val_ds = ExpertDataset { num_states: follow_val.2.len(), states: follow_val.0, soft_intents: follow_val.1, legal_masks: follow_val.2 };
+    (lead_train_ds, lead_val_ds, follow_train_ds, follow_val_ds)
 }
 
 // ---------------------------------------------------------------------------
@@ -766,10 +776,13 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
 
     // Load dataset for Phase 0
     let dataset = load_expert_dataset(&config.curriculum.phase0_dataset)?;
-    let (lead_dataset, follow_dataset) = split_dataset(&dataset);
+    let (lead_dataset, lead_val_dataset, follow_dataset, follow_val_dataset) = split_dataset(&dataset, 0.10);
     println!(
-        "  >>> Split dataset: {} Lead states, {} Follow states.",
-        lead_dataset.num_states, follow_dataset.num_states
+        "  >>> Split dataset: {} Lead ({} train / {} val), {} Follow ({} train / {} val).",
+        lead_dataset.num_states + lead_val_dataset.num_states,
+        lead_dataset.num_states, lead_val_dataset.num_states,
+        follow_dataset.num_states + follow_val_dataset.num_states,
+        follow_dataset.num_states, follow_val_dataset.num_states
     );
 
     // CSV Stats
@@ -785,25 +798,17 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
     if !resume || csv_file.metadata()?.len() == 0 {
         writeln!(
             csv_file,
-            "generation,phase,lead_best_fitness,lead_avg_fitness,follow_best_fitness,follow_avg_fitness,lead_n_species,follow_n_species,lead_n_connections_best,follow_n_connections_best,elapsed_sec"
+            "generation,phase,lead_best_fitness,lead_avg_fitness,follow_best_fitness,follow_avg_fitness,lead_n_species,follow_n_species,lead_n_connections_best,follow_n_connections_best,lead_val_acc,follow_val_acc,elapsed_sec"
         )?;
     }
 
     println!(
-        "{:>4} {:>2} {:>8} {:>8} {:>8} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8}",
-        "Gen",
-        "Ph",
-        "L-Best",
-        "L-Avg",
-        "F-Best",
-        "F-Avg",
-        "L-Spec",
-        "F-Spec",
-        "L-Conn",
-        "F-Conn",
-        "Time"
+        "{:>4} {:>2} {:>8} {:>8} {:>8} {:>8} {:>6} {:>6} {:>6} {:>6} {:>8} {:>8} {:>8}",
+        "Gen", "Ph", "L-Best", "L-Avg", "F-Best", "F-Avg",
+        "L-Spec", "F-Spec", "L-Conn", "F-Conn",
+        "L-Val", "F-Val", "Time"
     );
-    println!("{}", "-".repeat(95));
+    println!("{}", "-".repeat(110));
 
     for gen in start_gen..config.population.generations {
         let t_gen = Instant::now();
@@ -952,9 +957,22 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
 
         // ── Fitness evaluation ──────────────────────────────────────────
         let t_eval_start = Instant::now();
+        let mut lead_val_acc = 0.0f64;
+        let mut follow_val_acc = 0.0f64;
         let (lead_fitnesses, follow_fitnesses, lead_behaviors, follow_behaviors) = if current_phase == 0 {
             let lead_accs = evaluate_phase0(&lead_rust_genomes, &lead_dataset, &config.evaluation.sweep_weights, config.curriculum.use_class_weighting);
             let follow_accs = evaluate_phase0(&follow_rust_genomes, &follow_dataset, &config.evaluation.sweep_weights, config.curriculum.use_class_weighting);
+            // Validation accuracy on holdout (best genome only)
+            lead_val_acc = lead_accs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            follow_val_acc = follow_accs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            if lead_val_dataset.num_states > 0 {
+                let lead_val_genomes: Vec<crate::wann_network::RustWannNetwork> = vec![lead_pop.genomes[lead_accs.iter().enumerate().fold((0, f64::NEG_INFINITY), |(bi, bv), (i, &v)| if v > bv { (i, v) } else { (bi, bv) }).0].to_rust_wann()];
+                lead_val_acc = evaluate_phase0(&lead_val_genomes, &lead_val_dataset, &config.evaluation.sweep_weights, false)[0];
+            }
+            if follow_val_dataset.num_states > 0 {
+                let follow_val_genomes: Vec<crate::wann_network::RustWannNetwork> = vec![follow_pop.genomes[follow_accs.iter().enumerate().fold((0, f64::NEG_INFINITY), |(bi, bv), (i, &v)| if v > bv { (i, v) } else { (bi, bv) }).0].to_rust_wann()];
+                follow_val_acc = evaluate_phase0(&follow_val_genomes, &follow_val_dataset, &config.evaluation.sweep_weights, false)[0];
+            }
             (lead_accs.clone(), follow_accs.clone(), Vec::new(), Vec::new())
         } else {
             let (fitnesses, behaviors) = run_phase1_generation_joint(
@@ -1205,7 +1223,7 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
 
         writeln!(
             csv_file,
-            "{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.2}",
+            "{},{},{:.6},{:.6},{:.6},{:.6},{},{},{},{},{:.6},{:.6},{:.2}",
             gen,
             current_phase,
             lead_best_fit,
@@ -1216,13 +1234,15 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             follow_species,
             lead_best_conns,
             follow_best_conns,
+            lead_val_acc,
+            follow_val_acc,
             t_total
         )?;
         csv_file.flush()?;
 
         // ── Console output: fitness table + per-phase profiling ─────────
         println!(
-            "{:4} {:2} {:8.4} {:8.4} {:8.4} {:8.4} {:6} {:6} {:6} {:6} {:7.1}s",
+            "{:4} {:2} {:8.4} {:8.4} {:8.4} {:8.4} {:6} {:6} {:6} {:6} {:8.4} {:8.4} {:7.1}s",
             gen,
             current_phase,
             lead_best_fit,
@@ -1233,6 +1253,8 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
             follow_species,
             lead_best_conns,
             follow_best_conns,
+            lead_val_acc,
+            follow_val_acc,
             t_total
         );
         println!(

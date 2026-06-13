@@ -240,6 +240,8 @@ impl<'a> SimulatorBot<'a> {
                     *n_worlds,
                     *search_depth,
                     rng.next_u64(),
+                    false,
+                    None,
                 );
 
                 let mut best_card = legal.trailing_zeros() as u8;

@@ -197,7 +197,10 @@ pub fn solve_pimc(
     n_worlds: usize,
     search_depth: u8,
     seed: u64,
+    diff_mode: bool,
+    fixed_worlds: Option<usize>,
 ) -> Vec<PimcResult> {
+    let effective_worlds = fixed_worlds.unwrap_or(n_worlds);
     // 1. Determine legal moves for the player
     let mut legal_moves = [0u8; 10];
     let mut legal_count = 0;
@@ -346,7 +349,7 @@ pub fn solve_pimc(
 
     let mut batch_start = 0;
     while batch_start < n_worlds {
-        let batch_end = (batch_start + BATCH_SIZE).min(n_worlds);
+        let batch_end = (batch_start + BATCH_SIZE).min(effective_worlds);
 
         // Process this batch in parallel — each world returns per-move Welford + raw EVs
         let batch_results: Vec<WorldResult> = (batch_start..batch_end)
@@ -507,7 +510,8 @@ pub fn solve_pimc(
         }
 
         // ── Early termination checks (using paired SE) ──
-        if batch_end >= MIN_WORLDS_FOR_EARLY_EXIT && paired_diff.count >= 2 {
+        // In diff mode, skip early termination to eliminate stopping variance.
+        if !diff_mode && batch_end >= MIN_WORLDS_FOR_EARLY_EXIT && paired_diff.count >= 2 {
             let paired_mean = paired_diff.mean;
             let paired_se = paired_diff.std_error();
 
@@ -517,7 +521,7 @@ pub fn solve_pimc(
             }
 
             // Futility exit: project paired SE to full world budget
-            let projected_se = paired_diff.projected_se_at(n_worlds);
+            let projected_se = paired_diff.projected_se_at(effective_worlds);
             let projected_lower = (paired_mean - FUTILITY_Z * projected_se).max(0.0);
             if projected_lower < MIN_MEANINGFUL_GAP {
                 return Vec::new();
@@ -670,6 +674,8 @@ mod tests {
             5,      // n_worlds
             1,      // search depth (tricks)
             123,    // seed
+            false,
+            None,
         );
 
         assert!(!evs.is_empty());
@@ -719,6 +725,8 @@ mod tests {
             10,
             1,
             42,
+            false,
+            None,
         );
         let evs2 = solve_pimc(
             0,
@@ -737,6 +745,8 @@ mod tests {
             10,
             1,
             42,
+            false,
+            None,
         );
 
         assert_eq!(evs1.len(), evs2.len());
@@ -786,6 +796,8 @@ mod tests {
             50,
             1,
             100,
+            false,
+            None,
         );
         let evs_b = solve_pimc(
             0,
@@ -804,6 +816,8 @@ mod tests {
             50,
             1,
             999,
+            false,
+            None,
         );
 
         assert!(!evs_a.is_empty());
@@ -851,6 +865,8 @@ mod tests {
             10,
             1,
             42,
+            false,
+            None,
         );
 
         // Every legal move must appear exactly once in the output

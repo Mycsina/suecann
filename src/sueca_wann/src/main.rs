@@ -57,6 +57,12 @@ enum Command {
         /// Minimum fraction of total states each intent class must have (0.0-1.0)
         #[arg(long, default_value = "0.20")]
         soft_balance_min_ratio: f64,
+        /// Disable early termination and futility in PIMC for label diffing
+        #[arg(long, default_value_t = false)]
+        diff_mode: bool,
+        /// Use exactly this many worlds per PIMC call (diff mode only)
+        #[arg(long)]
+        fixed_worlds: Option<usize>,
         /// Resume from a checkpoint file (output path with .checkpoint extension)
         #[arg(long, default_value_t = false)]
         resume: bool,
@@ -109,6 +115,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output,
             soft_balance_min_ratio,
             resume,
+            diff_mode,
+            fixed_worlds,
         } => {
             let config = dataset_gen::DatasetConfig {
                 n_worlds,
@@ -117,6 +125,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 seed,
                 output_path: output,
                 soft_balance_min_ratio,
+                diff_mode,
+                fixed_worlds,
             };
             dataset_gen::generate_dataset(&config, resume);
         }

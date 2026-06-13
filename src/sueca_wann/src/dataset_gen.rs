@@ -9,15 +9,20 @@ use sueca_solver::engine::{CARD_POINTS, CARD_SUIT};
 use sueca_solver::heuristic::{resolve_intent, select_card_heuristic};
 use sueca_solver::simulator::SuecaSimulatorGame;
 
+/// Number of buckets: 2 splits (lead, follow) × 3 intents = 6.
+const N_BUCKETS: usize = 6;
+
 /// Serializable snapshot of dataset generation progress.
 /// Saved every CHECKPOINT_INTERVAL batches so a crashed/restarted run
 /// can resume without losing accumulated states.
 #[derive(Serialize, Deserialize)]
 struct DatasetCheckpoint {
-    class_counts: [usize; OUTPUT_COUNT as usize],
-    bucket_states: [Vec<f64>; OUTPUT_COUNT as usize],
-    bucket_intents: [Vec<f32>; OUTPUT_COUNT as usize],
-    bucket_masks: [Vec<u8>; OUTPUT_COUNT as usize],
+    /// Flat 6-bucket counts indexed by split * 3 + intent.
+    /// split 0 = Lead, split 1 = Follow.
+    class_counts: [usize; N_BUCKETS],
+    bucket_states: [Vec<f64>; N_BUCKETS],
+    bucket_intents: [Vec<f32>; N_BUCKETS],
+    bucket_masks: [Vec<u8>; N_BUCKETS],
     batch_seed: u64,
     batches: usize,
     // Config fields for validation on resume
@@ -25,6 +30,12 @@ struct DatasetCheckpoint {
     search_depth: u8,
     target_total: usize,
     seed: u64,
+}
+
+/// Bucket index helper: split (0=Lead, 1=Follow) × intent → flat index
+#[inline(always)]
+fn bucket_idx(split: usize, intent: usize) -> usize {
+    split * 3 + intent
 }
 
 /// Save a checkpoint to a bincode file.
@@ -62,10 +73,15 @@ pub struct DatasetConfig {
     pub seed: u64,
     pub output_path: String,
     /// Minimum fraction of total each intent class must have.
-    /// 0.20 = no class below 20% of total. Soft balance via class weighting
-    /// compensates for remaining imbalance in Phase 0 fitness.
     #[serde(default = "default_soft_balance_min_ratio")]
     pub soft_balance_min_ratio: f64,
+    /// If true, disable early termination and futility stop in PIMC.
+    /// Used for controlled label-comparison diffing between pipeline versions.
+    #[serde(default)]
+    pub diff_mode: bool,
+    /// When set, use exactly this many worlds per PIMC call (diff_mode only).
+    #[serde(default)]
+    pub fixed_worlds: Option<usize>,
 }
 
 fn default_soft_balance_min_ratio() -> f64 {
@@ -74,39 +90,32 @@ fn default_soft_balance_min_ratio() -> f64 {
 
 pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
     let total_target = config.target_total;
-    let soft_min = (total_target as f64 * config.soft_balance_min_ratio) as usize;
+    // Per-split target: half the total for Lead, half for Follow
+    let per_split_target = total_target / 2;
+    let soft_min = (per_split_target as f64 * config.soft_balance_min_ratio) as usize;
 
     println!(
-        "Generating expert dataset: {} worlds, depth {}, {} total states (soft min {} per class)...",
-        config.n_worlds, config.search_depth, total_target, soft_min
+        "Generating expert dataset: {} worlds, depth {}, {} total ({} per split, soft min {} per intent/split)...",
+        config.n_worlds, config.search_depth, total_target, per_split_target, soft_min
     );
 
-    // Soft-balanced accumulation: each intent class must have at least soft_min
-    // states, but the total target can be met with any distribution. This avoids
-    // the brutal marginal cost of perfect 33.3% balance — the class weighting in
-    // Phase 0 fitness compensates for any remaining imbalance.
-    //
-    // Ambiguous states are rejected at two levels:
-    //   1. Always-on pre-filter (intent uniqueness — resolve_intent collision check)
-    //   2. PIMC confidence filter (EV delta must exceed measurement noise)
-    //   3. Intent uniqueness filter (card must map to exactly one intent)
-    //
-    // Only crystal-clear, strategically unambiguous examples enter the buckets.
-    let per_class_target = total_target / (OUTPUT_COUNT as usize); // for logging
+    // 6-bucket accumulation: (lead, follow) × (MAX_FORCE, EFFICIENT_WIN, EQUITY_BUILDER).
+    // Indexed by bucket_idx(split, intent). split=0 for Lead, split=1 for Follow.
+    // The Follow brain trains ONLY on its split — per-split balance is non-negotiable.
+    let per_class_target = per_split_target / (OUTPUT_COUNT as usize); // for logging
     let ckpt_path = checkpoint_path(&config.output_path);
 
     // ── Resume from checkpoint or start fresh ──
     let (mut bucket_states, mut bucket_intents, mut bucket_masks, mut class_counts, mut batch_seed, mut batches): (
-        [Vec<f64>; OUTPUT_COUNT as usize],
-        [Vec<f32>; OUTPUT_COUNT as usize],
-        [Vec<u8>; OUTPUT_COUNT as usize],
-        [usize; OUTPUT_COUNT as usize],
+        [Vec<f64>; N_BUCKETS],
+        [Vec<f32>; N_BUCKETS],
+        [Vec<u8>; N_BUCKETS],
+        [usize; N_BUCKETS],
         u64,
         usize,
     ) = if resume {
         match load_checkpoint(&ckpt_path) {
             Some(ckpt) => {
-                // Validate config compatibility
                 if ckpt.n_worlds != config.n_worlds
                     || ckpt.search_depth != config.search_depth
                     || ckpt.target_total != config.target_total
@@ -124,7 +133,7 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
                     std::process::exit(1);
                 }
                 println!(
-                    "Resumed from checkpoint: batch {}, collected {:?} (target {} each)",
+                    "Resumed from checkpoint: batch {}, collected {:?} (target {} per intent/split)",
                     ckpt.batches, ckpt.class_counts, per_class_target,
                 );
                 (
@@ -149,29 +158,30 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
             Default::default(),
             Default::default(),
             Default::default(),
-            [0usize; OUTPUT_COUNT as usize],
+            [0usize; N_BUCKETS],
             config.seed,
             0usize,
         )
     };
 
     loop {
-        // Stop when total target met AND each class has at least soft_min
-        let total_collected: usize = class_counts.iter().sum();
-        let all_above_soft_min = class_counts.iter().all(|&c| c >= soft_min);
-        if total_collected >= total_target && all_above_soft_min {
+        // Stop when each split has met its target AND each bucket has soft_min
+        let lead_total: usize = (0..3).map(|i| class_counts[bucket_idx(0, i)]).sum();
+        let follow_total: usize = (0..3).map(|i| class_counts[bucket_idx(1, i)]).sum();
+        let all_above_soft_min = (0..N_BUCKETS).all(|b| class_counts[b] >= soft_min);
+        if lead_total >= per_split_target && follow_total >= per_split_target && all_above_soft_min {
             break;
         }
         batches += 1;
 
-        // Determine rarest intent for steering.
-        // Only activate when a class is critically behind (< 50% of soft_min)
-        // to avoid prematurely starving the other classes.
+        // Determine rarest of 6 buckets for steering.
+        // Only activate when critically behind (< 50% of soft_min).
         let steer_intent: Option<usize> = {
             let min_count = *class_counts.iter().min().unwrap_or(&0);
-            let critical_threshold = soft_min / 2;
+            let critical_threshold = (soft_min / 2).max(1);
             if min_count < critical_threshold {
-                class_counts.iter().position(|&c| c == min_count)
+                let rarest_bucket = class_counts.iter().position(|&c| c == min_count).unwrap_or(0);
+                Some(rarest_bucket % 3) // intent part of bucket index
             } else {
                 None
             }
@@ -191,30 +201,31 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
         for (results, deal_rejects) in batch_pairs {
             batch_rejects.merge(&deal_rejects);
             for (state, soft_intent, mask) in results {
-                // With one-hot targets (ambiguous ties rejected upstream),
-                // the primary intent is simply the argmax.
                 let primary = soft_intent
                     .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
                     .map(|(i, _)| i)
                     .unwrap_or(0);
+                // AmILeading is belief feature index 5
+                let split = if state[5] > 0.5 { 0 } else { 1 };
+                let bidx = bucket_idx(split, primary);
+                let split_total: usize = (0..3).map(|i| class_counts[bucket_idx(split, i)]).sum();
 
-                // Soft balance: accept if this class hasn't exceeded its
-                // effective cap (leaving room for other classes to meet soft_min)
-                let other_slack: usize = (0..OUTPUT_COUNT as usize)
+                // Per-split soft balance
+                let other_slack: usize = (0..3usize)
                     .filter(|&c| c != primary)
-                    .map(|c| soft_min.saturating_sub(class_counts[c]))
+                    .map(|c| soft_min.saturating_sub(class_counts[bucket_idx(split, c)]))
                     .sum();
-                let cap_for_this_class = total_target.saturating_sub(
-                    (OUTPUT_COUNT as usize - 1) * soft_min + other_slack
-                ).max(soft_min);
+                let cap = per_split_target.saturating_sub(2 * soft_min + other_slack).max(soft_min);
 
-                if class_counts[primary] < cap_for_this_class {
-                    class_counts[primary] += 1;
-                    bucket_states[primary].extend(&state);
-                    bucket_intents[primary].extend_from_slice(&soft_intent);
-                    bucket_masks[primary].push(mask);
+                if split_total < per_split_target || class_counts[bidx] < soft_min {
+                    if class_counts[bidx] < cap {
+                        class_counts[bidx] += 1;
+                        bucket_states[bidx].extend(&state);
+                        bucket_intents[bidx].extend_from_slice(&soft_intent);
+                        bucket_masks[bidx].push(mask);
+                    }
                 }
             }
         }
@@ -223,16 +234,26 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
 
         if batches % 1 == 0 {
             let total: usize = class_counts.iter().sum();
+            let lead_pct = if batch_rejects.lead_primary + batch_rejects.follow_primary > 0 {
+                100.0 * batch_rejects.lead_primary as f64
+                    / (batch_rejects.lead_primary + batch_rejects.follow_primary) as f64
+            } else {
+                0.0
+            };
             println!(
-                "  batch {}, per intent: {:?} (total {}, soft min {}, target {})",
-                batches, class_counts, total, soft_min, total_target
+                "  batch {}, L:{:?} F:{:?} (total {}, soft min {}, target {})",
+                batches,
+                &class_counts[0..3],
+                &class_counts[3..6],
+                total, soft_min, total_target
             );
             println!(
-                "    rejects: acc={} col={} fut={} conf={} uncl={} steer={} sl={} term={}",
+                "    rejects: acc={} col={} fut={} conf={} uncl={} steer={} sl={} term={} lead={:.0}%",
                 batch_rejects.accepted, batch_rejects.intent_collision,
                 batch_rejects.futility_stop, batch_rejects.confidence_filter,
                 batch_rejects.unclassifiable, batch_rejects.steered_out,
                 batch_rejects.single_legal, batch_rejects.terminal,
+                lead_pct,
             );
         }
 
@@ -254,34 +275,35 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
         }
     }
 
-    // Interleave buckets so the final flat arrays alternate intents rather
-    // than concatenating all of intent 0, then all of intent 1, etc.
+    // Interleave across all 6 buckets for balanced final output
     let total = class_counts.iter().sum::<usize>();
     let mut all_states = Vec::with_capacity(total * INPUT_COUNT);
     let mut all_intents = Vec::with_capacity(total * OUTPUT_COUNT as usize);
     let mut all_masks = Vec::with_capacity(total);
 
-    let max_per_class = *class_counts.iter().max().unwrap();
-    for i in 0..max_per_class {
-        for c in 0..(OUTPUT_COUNT as usize) {
-            if i < bucket_masks[c].len() {
+    let max_per_bucket = *class_counts.iter().max().unwrap();
+    for i in 0..max_per_bucket {
+        for b in 0..N_BUCKETS {
+            if i < bucket_masks[b].len() {
                 let state_off = i * INPUT_COUNT;
                 all_states
-                    .extend_from_slice(&bucket_states[c][state_off..state_off + INPUT_COUNT]);
+                    .extend_from_slice(&bucket_states[b][state_off..state_off + INPUT_COUNT]);
                 let intent_off = i * (OUTPUT_COUNT as usize);
                 all_intents.extend_from_slice(
-                    &bucket_intents[c][intent_off..intent_off + (OUTPUT_COUNT as usize)],
+                    &bucket_intents[b][intent_off..intent_off + (OUTPUT_COUNT as usize)],
                 );
-                all_masks.push(bucket_masks[c][i]);
+                all_masks.push(bucket_masks[b][i]);
             }
         }
     }
 
+    let lead_total: usize = (0..3).map(|i| class_counts[bucket_idx(0, i)]).sum();
+    let follow_total: usize = (0..3).map(|i| class_counts[bucket_idx(1, i)]).sum();
     println!(
-        "Final dataset: {} states, intent distribution: {:?} (target {} each)",
-        total,
-        class_counts,
-        per_class_target
+        "Final dataset: {} states (L:{} F:{}), L:[{:?}] F:[{:?}]",
+        total, lead_total, follow_total,
+        &class_counts[0..3],
+        &class_counts[3..6],
     );
 
     save_npz(&all_states, &all_intents, &all_masks, &config.output_path);
@@ -294,11 +316,9 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
     }
 }
 
-/// Number of additional states to extract from the same deal after the
-/// PIMC-recommended move is played. Amortizes deal setup and void tracking
-/// across multiple states. States are mildly correlated (same deal), which
-/// is harmless for capacity-limited WANNs.
-const N_EXTRA_EXTRACTIONS: usize = 2;
+/// Number of additional extractions per deal. Each advances 1-6 random
+/// cards (not to a trick boundary) to maintain the ~25% lead fraction.
+const N_EXTRA_EXTRACTIONS: usize = 1;
 
 /// Per-deal rejection counters for quality diagnostics.
 #[derive(Default, Clone)]
@@ -311,6 +331,8 @@ pub struct DealRejectCounts {
     pub steered_out: usize,
     pub accepted: usize,
     pub terminal: usize,
+    pub lead_primary: usize,
+    pub follow_primary: usize,
 }
 
 impl DealRejectCounts {
@@ -323,6 +345,8 @@ impl DealRejectCounts {
         self.steered_out += other.steered_out;
         self.accepted += other.accepted;
         self.terminal += other.terminal;
+        self.lead_primary += other.lead_primary;
+        self.follow_primary += other.follow_primary;
     }
 }
 
@@ -351,30 +375,18 @@ pub fn generate_deal_states(
     let trump = (rng.gen_range(0u64..4)) as u8;
     let first_player = (rng.gen_range(0u64..4)) as u8;
 
-    // ── Intent-biased random walk steering ──
-    // Bias the random walk depth toward positions where the scarce intent
-    // is likely to be the correct play. Avoids generating positions where
-    // the rare intent is structurally impossible (e.g., EFFICIENT_WIN
-    // requires following, EQUITY_BUILDER prefers leading with short suits).
-    let max_tricks: usize = match steer_intent {
-        Some(1) => {
-            // EFFICIENT_WIN: wants mid-trick following positions.
-            // Play deeper (3-8 tricks) so ego is more likely to be following.
-            rng.gen_range(3u64..9) as usize
-        }
-        Some(2) => {
-            // EQUITY_BUILDER: prefers leading with short suits.
-            // Play shallower (1-5 tricks) so game state is less depleted.
-            rng.gen_range(1u64..6) as usize
-        }
-        _ => {
-            // MAX_FORCE or no steering: uniform 1-8 tricks
-            rng.gen_range(1u64..9) as usize
-        }
-    };
+    // ── Mid-trick random walk ──
+    // Play k complete tricks (0-7) plus 0-3 additional cards so the ego
+    // ends at a uniform random point within a trick. Primary extractions
+    // are ~25% leading, ~75% following — matching the natural distribution
+    // of a 4-player trick-taking game.
+    let n_tricks = rng.gen_range(0u64..8) as usize;
+    let n_cards = rng.gen_range(0u64..4) as usize;
+    let total_cards = n_tricks * 4 + n_cards;
+
     let mut game = SuecaSimulatorGame::new(hands, trump, first_player);
 
-    for _ in 0..max_tricks {
+    for _ in 0..total_cards {
         if game.state.trick_number >= 10 {
             break;
         }
@@ -397,30 +409,21 @@ pub fn generate_deal_states(
         return (results, rejects);
     }
 
-    // ── Post-walk steering: advance past mismatched positions ──
-    // Instead of rejecting, play one more card to advance to a following
-    // position (for EFFICIENT_WIN) or a new trick (for EQUITY_BUILDER).
-    // This salvages the deal instead of wasting the setup cost.
+    // ── Post-walk steering: advance ONE card past mismatched position ──
+    // Does NOT complete the trick — stays mid-trick to preserve the
+    // ~25% lead fraction for the follow-on extraction.
     if let Some(target) = steer_intent {
         let is_leading = game.current_trick_len == 0;
         let needs_advance = match target {
-            1 => is_leading,
-            2 => !is_leading,
-            0 => !is_leading,
+            1 => is_leading,     // EFFICIENT_WIN wants following
+            2 => !is_leading,    // EQUITY_BUILDER wants leading
+            0 => !is_leading,    // MAX_FORCE wants leading
             _ => false,
         };
         if needs_advance && game.state.trick_number < 9 {
-            // Play the ego's legal card to advance past this position.
-            // Uses HeuristicBot for speed — we just need to get to the next player.
             let seat = game.state.current_player;
             let card = select_card_heuristic(&game, seat);
             game.play_card(card);
-            // Complete the rest of the trick if needed
-            while game.state.cards_played_in_trick > 0 && game.state.trick_number < 10 {
-                let s = game.state.current_player;
-                let c = select_card_heuristic(&game, s);
-                game.play_card(c);
-            }
             if game.state.trick_number >= 10 {
                 rejects.terminal += 1;
                 return (results, rejects);
@@ -428,9 +431,14 @@ pub fn generate_deal_states(
         }
     }
 
-    // ── Extract state at current position ──
+    // ── Primary extraction ──
+    let primary_is_lead = game.current_trick_len == 0;
     match extract_state_at(&game, config, rng, &mut results) {
-        RejectReason::Accepted => rejects.accepted += 1,
+        RejectReason::Accepted => {
+            rejects.accepted += 1;
+            if primary_is_lead { rejects.lead_primary += 1; }
+            else { rejects.follow_primary += 1; }
+        }
         RejectReason::SingleLegal => rejects.single_legal += 1,
         RejectReason::IntentCollision => rejects.intent_collision += 1,
         RejectReason::FutilityStop => rejects.futility_stop += 1,
@@ -439,21 +447,26 @@ pub fn generate_deal_states(
         RejectReason::SteeredOut => rejects.steered_out += 1,
     }
 
-    // ── Multi-state extraction with coin-flip advancement ──
+    // ── Extra extraction: advance 1-6 random cards, then extract ──
+    // Does NOT complete the trick — stays mid-trick. This keeps extras
+    // at ~25% lead, same as primary.
     let mut extra_game = game;
     for _ in 0..N_EXTRA_EXTRACTIONS {
         if extra_game.state.trick_number >= 10 {
             break;
         }
 
-        let use_heuristic = rng.gen_bool(0.5);
-        while extra_game.state.cards_played_in_trick > 0 {
+        let n_advance = rng.gen_range(1u64..=6) as usize;
+        for _ in 0..n_advance {
+            if extra_game.state.trick_number >= 10 {
+                break;
+            }
             let seat = extra_game.state.current_player;
             let legal = extra_game.state.legal_moves();
             if legal.count_ones() <= 1 {
                 let card = legal.trailing_zeros() as u8;
                 extra_game.play_card(card);
-            } else if use_heuristic {
+            } else if rng.gen_bool(0.5) {
                 let card = select_card_heuristic(&extra_game, seat);
                 extra_game.play_card(card);
             } else {
@@ -468,8 +481,13 @@ pub fn generate_deal_states(
         }
 
         if extra_game.state.trick_number < 10 {
+            let extra_is_lead = extra_game.current_trick_len == 0;
             match extract_state_at(&extra_game, config, rng, &mut results) {
-                RejectReason::Accepted => rejects.accepted += 1,
+                RejectReason::Accepted => {
+                    rejects.accepted += 1;
+                    if extra_is_lead { rejects.lead_primary += 1; }
+                    else { rejects.follow_primary += 1; }
+                }
                 RejectReason::SingleLegal => rejects.single_legal += 1,
                 RejectReason::IntentCollision => rejects.intent_collision += 1,
                 RejectReason::FutilityStop => rejects.futility_stop += 1,
@@ -576,6 +594,8 @@ fn extract_state_at(
         config.n_worlds,
         config.search_depth,
         rng.gen_range(0u64..u64::MAX),
+        config.diff_mode,
+        config.fixed_worlds,
     );
 
     // Empty EV results → futility stop fired. Skip this state.
@@ -630,30 +650,19 @@ pub fn map_card_to_soft_intents(card: u8, game: &SuecaSimulatorGame, seat: u8) -
         return None;
     }
 
-    // Apply Intent Demotion for leading states:
-    // If a card satisfies both MAX_FORCE (0) and EQUITY_BUILDER (2) when leading,
-    // break the tie in favor of the more specific tactical intent (EQUITY_BUILDER).
-    if game.current_trick_len == 0 {
-        if matching_intents.contains(&0) && matching_intents.contains(&2) {
-            matching_intents.retain(|&intent| intent != 0);
-        }
-    }
-
-    // Reject states where multiple intents still map to the same card.
-    // WANNs learn broad IF/THEN heuristics from structural patterns in the
-    // dataset. States where two intents resolve identically (e.g., both
-    // EFFICIENT_WIN and EQUITY_BUILDER pick the same card) are "shrugs" —
-    // they teach no discrimination. Including them dilutes the pure strategic
-    // signal of each class and causes the network to learn fuzzy boundaries.
+    // Multi-label acceptance: when ≥2 intents map to the PIMC-best card,
+    // accept as a fractional multi-label state instead of rejecting.
+    // The card IS the PIMC-best (caller only passes confidence-filtered best).
+    // Each labeled intent gets 1/k weight.
     //
-    // It is better to have 8,000 crystal-clear examples of EQUITY_BUILDER
-    // than 10,000 examples where 2,000 are ambiguous padding.
-    if matching_intents.len() > 1 {
-        return None;
-    }
-
+    // The old intent-demotion rule (force EQUITY_BUILDER on lead ties) is
+    // replaced — multi-label is honest about ambiguity.
+    let k = matching_intents.len();
     let mut target_vector = [0.0f32; OUTPUT_COUNT];
-    target_vector[matching_intents[0]] = 1.0;
+    let weight = 1.0 / k as f32;
+    for &intent in &matching_intents {
+        target_vector[intent] = weight;
+    }
     Some(target_vector)
 }
 
@@ -763,6 +772,8 @@ mod tests {
             target_total: 100,
             seed: 12345,
             output_path: String::new(),
+            diff_mode: false,
+            fixed_worlds: None,
             soft_balance_min_ratio: 0.20,
         }
     }
@@ -829,6 +840,8 @@ mod tests {
             target_total: 4000,
             seed: 777,
             output_path: String::new(),
+            diff_mode: false,
+            fixed_worlds: None,
             soft_balance_min_ratio: 0.20,
         };
         let mut rng = Pcg64::seed_from_u64(777);
@@ -911,6 +924,8 @@ mod tests {
                 config.n_worlds,
                 config.search_depth,
                 rng.gen_range(0u64..u64::MAX),
+                false,
+                None,
             );
 
             let mut best_card = legal.trailing_zeros() as u8;
@@ -1079,6 +1094,8 @@ mod tests {
             target_total: 200,
             seed: 999,
             output_path: String::new(),
+            diff_mode: false,
+            fixed_worlds: None,
             soft_balance_min_ratio: 0.20,
         };
         let mut rng = Pcg64::seed_from_u64(999);
@@ -1188,6 +1205,8 @@ mod tests {
             target_total: 40,
             seed: 42,
             output_path: "/tmp/test_roundtrip.npz".into(),
+            diff_mode: false,
+            fixed_worlds: None,
             soft_balance_min_ratio: 0.20,
         };
 
@@ -1309,6 +1328,8 @@ mod tests {
             target_total: 1000,
             seed: 54321,
             output_path: String::new(),
+            diff_mode: false,
+            fixed_worlds: None,
             soft_balance_min_ratio: 0.20,
         };
         let mut rng = Pcg64::seed_from_u64(config.seed);
@@ -1404,6 +1425,8 @@ mod tests {
                 config.n_worlds,
                 config.search_depth,
                 rng.gen_range(0u64..u64::MAX),
+            false,
+                None,
             );
 
             let mut sorted: Vec<&sueca_solver::pimc::PimcResult> = evs.iter().collect();
