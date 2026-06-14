@@ -176,6 +176,190 @@ pub struct PimcResult {
     pub std_error: f64, // standard error of the mean EV (σ/√n)
 }
 
+/// Online mean/variance accumulator (module-level so `solve_pimc_rollout` can use
+/// it across rayon fold/reduce). Mirrors the local `MoveWelford` inside `solve_pimc`
+/// but kept separate so that function is left untouched.
+#[derive(Clone, Copy, Default)]
+struct RolloutWelford {
+    count: u32,
+    mean: f64,
+    m2: f64,
+}
+
+impl RolloutWelford {
+    #[inline]
+    fn update(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    #[inline]
+    fn merge(&mut self, other: &RolloutWelford) {
+        if other.count == 0 {
+            return;
+        }
+        if self.count == 0 {
+            *self = *other;
+            return;
+        }
+        let total = self.count + other.count;
+        let delta = other.mean - self.mean;
+        self.mean =
+            (self.count as f64 * self.mean + other.count as f64 * other.mean) / total as f64;
+        self.m2 += other.m2
+            + delta * delta * (self.count as f64 * other.count as f64) / total as f64;
+        self.count = total;
+    }
+}
+
+/// Flat Monte-Carlo PIMC with Elite (HeuristicBot) playouts.
+///
+/// For each legal move of the current player, EV = mean over `n_worlds` determinized
+/// worlds of the **ego team's** final score after playing that move and then letting
+/// Elite play all four seats to terminal. By the rollout policy-improvement theorem
+/// this is >= Elite, and it is cheaper than deep alpha-beta because every playout is
+/// O(remaining cards) of bitboard heuristic decisions (no search tree, no leaf eval).
+///
+/// Determinization reuses the live game's trick/score/void state verbatim and only
+/// overwrites the hidden hands with a sampled world (the ego hand is preserved). The
+/// Zobrist hash becomes stale after the hand swap, but Elite playouts never read it
+/// (only the alpha-beta transposition table does), so the rollout remains correct.
+pub fn solve_pimc_rollout(
+    game: &crate::simulator::SuecaSimulatorGame,
+    n_worlds: usize,
+    seed: u64,
+) -> Vec<PimcResult> {
+    use crate::heuristic::select_card_heuristic;
+
+    let my_seat = game.state.current_player;
+    let my_hand = game.state.hands[my_seat as usize];
+
+    // 1. Legal moves for the current player (from the live state).
+    let legal_mask = game.state.legal_moves();
+    let mut legal_moves = [0u8; 10];
+    let mut legal_count = 0usize;
+    let mut t = legal_mask;
+    while t != 0 {
+        legal_moves[legal_count] = t.trailing_zeros() as u8;
+        legal_count += 1;
+        t &= t - 1;
+    }
+    if legal_count == 0 {
+        return Vec::new();
+    }
+    if legal_count == 1 {
+        return vec![PimcResult {
+            card: legal_moves[0],
+            ev: 0.0,
+            std_error: 0.0,
+        }];
+    }
+
+    // 2. Unknown pool = cards held by the other three players (everything still in
+    //    a hand that is not mine). Current-trick cards are already out of all hands.
+    let all_hands =
+        game.state.hands[0] | game.state.hands[1] | game.state.hands[2] | game.state.hands[3];
+    let unknown_mask = all_hands & !my_hand;
+    let mut unknown_cards = [0u8; 40];
+    let mut num_unknowns = 0usize;
+    let mut u = unknown_mask;
+    while u != 0 {
+        unknown_cards[num_unknowns] = u.trailing_zeros() as u8;
+        num_unknowns += 1;
+        u &= u - 1;
+    }
+    let unknown_slice = &unknown_cards[..num_unknowns];
+
+    // Target hand sizes = current remaining popcounts (ego entry ignored by sampler).
+    let mut target_sizes = [0u8; 4];
+    for i in 0..4 {
+        target_sizes[i] = game.state.hands[i].count_ones() as u8;
+    }
+    let voids = game.voids;
+    let ego_team = my_seat % 2; // 0 -> team 0&2, 1 -> team 1&3
+
+    // 3. Per-move accumulation over determinized worlds (parallel paired comparison:
+    //    all legal moves share the same sampled world within an iteration).
+    let stats: [RolloutWelford; 40] = (0..n_worlds)
+        .into_par_iter()
+        .fold(
+            || [RolloutWelford::default(); 40],
+            |mut acc, world_idx| {
+                let mut local_hands = [0u64; 4];
+                let mut local_seed =
+                    seed.wrapping_add((world_idx as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15));
+                let mut ok = false;
+                for _ in 0..10 {
+                    if sample_world(
+                        my_seat,
+                        my_hand,
+                        unknown_slice,
+                        voids,
+                        target_sizes,
+                        &mut local_hands,
+                        &mut local_seed,
+                    ) {
+                        ok = true;
+                        break;
+                    }
+                }
+                if !ok {
+                    return acc;
+                }
+
+                for i in 0..legal_count {
+                    let m = legal_moves[i];
+                    let mut g = *game;
+                    g.state.hands = local_hands; // determinize hidden hands (ego unchanged)
+                    g.play_card(m);
+                    while g.state.trick_number < 10 {
+                        let s = g.state.current_player;
+                        let c = select_card_heuristic(&g, s);
+                        g.play_card(c);
+                    }
+                    let score = if ego_team == 0 {
+                        g.state.team_02_score
+                    } else {
+                        g.state.team_13_score
+                    };
+                    acc[m as usize].update(score as f64);
+                }
+                acc
+            },
+        )
+        .reduce(
+            || [RolloutWelford::default(); 40],
+            |mut a, b| {
+                for i in 0..40 {
+                    a[i].merge(&b[i]);
+                }
+                a
+            },
+        );
+
+    // 4. Emit one PimcResult per legal move.
+    let mut out = Vec::with_capacity(legal_count);
+    for i in 0..legal_count {
+        let m = legal_moves[i];
+        let w = &stats[m as usize];
+        let n = w.count.max(1) as f64;
+        let var = if w.count > 1 {
+            w.m2 / (w.count as f64 - 1.0)
+        } else {
+            0.0
+        };
+        out.push(PimcResult {
+            card: m,
+            ev: w.mean,
+            std_error: (var / n).sqrt(),
+        });
+    }
+    out
+}
+
 /// Evaluates the Expected Value (EV) of each legal move using PIMC.
 /// Returns per-move EV scores with standard errors from Welford variance tracking.
 /// Thread-safe and parallelized using Rayon.
@@ -1015,5 +1199,79 @@ mod tests {
             !any_success,
             "Impossible constraints (3 players void in same suit with cards remaining) must fail"
         );
+    }
+
+    // ───────────────────────── solve_pimc_rollout ─────────────────────────
+
+    use crate::simulator::SuecaSimulatorGame;
+
+    /// A valid 40-card deal: hands[i] = cards [10*i .. 10*i+10).
+    fn deterministic_deal() -> [u64; 4] {
+        let mut hands = [0u64; 4];
+        for p in 0..4 {
+            for r in 0..10 {
+                hands[p] |= 1u64 << (p as u64 * 10 + r);
+            }
+        }
+        hands
+    }
+
+    #[test]
+    fn test_rollout_leading_scores_all_moves() {
+        // Leading player (seat 0) has all 10 cards legal; each must get a bounded EV.
+        let game = SuecaSimulatorGame::new(deterministic_deal(), /*trump*/ 0, /*first*/ 0);
+        let res = solve_pimc_rollout(&game, /*n_worlds*/ 24, /*seed*/ 42);
+        assert_eq!(res.len(), 10, "leading -> every hand card is a legal move");
+        let mut seen = [false; 40];
+        for r in &res {
+            assert!(
+                r.ev >= 0.0 && r.ev <= 120.0,
+                "team score EV out of range: {}",
+                r.ev
+            );
+            assert!(!seen[r.card as usize], "duplicate card {}", r.card);
+            seen[r.card as usize] = true;
+            // Returned card must be a card the leader actually holds.
+            assert!(game.state.hands[0] & (1u64 << r.card) != 0);
+        }
+    }
+
+    #[test]
+    fn test_rollout_following_respects_legal_set() {
+        // Seat 0 leads its lowest card; the next player (seat 3, counter-clockwise)
+        // then chooses among ITS legal follow-suit moves only.
+        let mut game = SuecaSimulatorGame::new(deterministic_deal(), 0, 0);
+        let lead = game.state.legal_moves().trailing_zeros() as u8;
+        game.play_card(lead);
+        let follower = game.state.current_player;
+        let legal = game.state.legal_moves();
+        let res = solve_pimc_rollout(&game, 24, 7);
+        assert_eq!(res.len(), legal.count_ones() as usize);
+        for r in &res {
+            assert!(
+                legal & (1u64 << r.card) != 0,
+                "card {} not in follower's legal set",
+                r.card
+            );
+            assert!(game.state.hands[follower as usize] & (1u64 << r.card) != 0);
+            assert!(r.ev >= 0.0 && r.ev <= 120.0);
+        }
+    }
+
+    #[test]
+    fn test_rollout_forced_single_move_in_endgame() {
+        // Play the deal down with Elite until exactly one card remains per hand
+        // (start of the last trick), then the leader has a single legal move.
+        use crate::heuristic::select_card_heuristic;
+        let mut game = SuecaSimulatorGame::new(deterministic_deal(), 0, 0);
+        while !(game.state.trick_number == 9 && game.state.cards_played_in_trick == 0) {
+            let s = game.state.current_player;
+            let c = select_card_heuristic(&game, s);
+            game.play_card(c);
+        }
+        assert_eq!(game.state.legal_moves().count_ones(), 1);
+        let res = solve_pimc_rollout(&game, 8, 1);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].card, game.state.legal_moves().trailing_zeros() as u8);
     }
 }
