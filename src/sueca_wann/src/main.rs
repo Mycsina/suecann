@@ -63,6 +63,10 @@ enum Command {
         /// Use exactly this many worlds per PIMC call (diff mode only)
         #[arg(long)]
         fixed_worlds: Option<usize>,
+        /// Teacher for EV labels: "alphabeta" (depth-limited PIMC) or "rollout"
+        /// (flat MC with Elite playouts; supra-Elite, recommended).
+        #[arg(long, default_value = "alphabeta")]
+        teacher: String,
         /// Resume from a checkpoint file (output path with .checkpoint extension)
         #[arg(long, default_value_t = false)]
         resume: bool,
@@ -117,7 +121,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             resume,
             diff_mode,
             fixed_worlds,
+            teacher,
         } => {
+            let use_rollout_teacher = match teacher.to_ascii_lowercase().as_str() {
+                "rollout" => true,
+                "alphabeta" => false,
+                other => {
+                    eprintln!(
+                        "warning: unknown --teacher '{}', expected 'alphabeta' or 'rollout'; using alphabeta",
+                        other
+                    );
+                    false
+                }
+            };
             let config = dataset_gen::DatasetConfig {
                 n_worlds,
                 search_depth,
@@ -127,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 soft_balance_min_ratio,
                 diff_mode,
                 fixed_worlds,
+                use_rollout_teacher,
             };
             dataset_gen::generate_dataset(&config, resume);
         }

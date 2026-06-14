@@ -82,6 +82,12 @@ pub struct DatasetConfig {
     /// When set, use exactly this many worlds per PIMC call (diff_mode only).
     #[serde(default)]
     pub fixed_worlds: Option<usize>,
+    /// When true, label states with the flat Monte-Carlo rollout teacher
+    /// (`solve_pimc_rollout`, Elite playouts) instead of alpha-beta PIMC.
+    /// The rollout teacher is supra-Elite (62% vs Elite) where alpha-beta PIMC
+    /// only ties Elite, so its EV labels carry above-Elite intent preferences.
+    #[serde(default)]
+    pub use_rollout_teacher: bool,
 }
 
 fn default_soft_balance_min_ratio() -> f64 {
@@ -573,26 +579,36 @@ fn extract_state_at(
 
     let current_trick_cards = &game.current_trick[..game.current_trick_len];
 
-    let evs = sueca_solver::pimc::solve_pimc(
-        seat,
-        game.state.hands[seat as usize],
-        played_cards_mask,
-        game.voids,
-        target_sizes,
-        game.state.trump,
-        led_suit,
-        current_trick_cards,
-        seat,
-        game.state.current_trick_winner,
-        game.state.current_trick_best_card,
-        current_scores,
-        current_trick_number,
-        config.n_worlds,
-        config.search_depth,
-        rng.gen_range(0u64..u64::MAX),
-        config.diff_mode,
-        config.fixed_worlds,
-    );
+    let evs = if config.use_rollout_teacher {
+        // Supra-Elite teacher: flat MC with Elite playouts. Same Vec<PimcResult>
+        // shape (one per legal move), so the labeling below is unchanged.
+        sueca_solver::pimc::solve_pimc_rollout(
+            game,
+            config.n_worlds,
+            rng.gen_range(0u64..u64::MAX),
+        )
+    } else {
+        sueca_solver::pimc::solve_pimc(
+            seat,
+            game.state.hands[seat as usize],
+            played_cards_mask,
+            game.voids,
+            target_sizes,
+            game.state.trump,
+            led_suit,
+            current_trick_cards,
+            seat,
+            game.state.current_trick_winner,
+            game.state.current_trick_best_card,
+            current_scores,
+            current_trick_number,
+            config.n_worlds,
+            config.search_depth,
+            rng.gen_range(0u64..u64::MAX),
+            config.diff_mode,
+            config.fixed_worlds,
+        )
+    };
 
     // Empty EV results → futility stop fired. Skip this state.
     if evs.is_empty() {
@@ -792,6 +808,7 @@ mod tests {
             output_path: String::new(),
             diff_mode: false,
             fixed_worlds: None,
+            use_rollout_teacher: false,
             soft_balance_min_ratio: 0.20,
         }
     }
@@ -860,6 +877,7 @@ mod tests {
             output_path: String::new(),
             diff_mode: false,
             fixed_worlds: None,
+            use_rollout_teacher: false,
             soft_balance_min_ratio: 0.20,
         };
         let mut rng = Pcg64::seed_from_u64(777);
@@ -1114,6 +1132,7 @@ mod tests {
             output_path: String::new(),
             diff_mode: false,
             fixed_worlds: None,
+            use_rollout_teacher: false,
             soft_balance_min_ratio: 0.20,
         };
         let mut rng = Pcg64::seed_from_u64(999);
@@ -1225,6 +1244,7 @@ mod tests {
             output_path: "/tmp/test_roundtrip.npz".into(),
             diff_mode: false,
             fixed_worlds: None,
+            use_rollout_teacher: false,
             soft_balance_min_ratio: 0.20,
         };
 
@@ -1352,6 +1372,7 @@ mod tests {
             output_path: String::new(),
             diff_mode: false,
             fixed_worlds: None,
+            use_rollout_teacher: false,
             soft_balance_min_ratio: 0.20,
         };
         let mut rng = Pcg64::seed_from_u64(config.seed);
