@@ -104,7 +104,7 @@ bulking_gens = 50       # Reduced from 100 to match shorter Phase 0.
 # variance tracking exits when best move margin exceeds 2×SE_diff).
 # Generate with:
 #   cargo run --release -- generate-dataset --n-worlds 200 --search-depth 4 --target-count 30000 --output expert_states_v3.npz
-phase0_dataset = "expert_states_v3.npz"
+phase0_dataset = "expert_states_v5.npz"
 # Minimum generations per phase — prevents premature transitions from noise spikes.
 min_gens_per_phase = 20
 # Sliding window for fitness trend detection (10 gens).
@@ -120,7 +120,7 @@ class_balance_target = 30000
 soft_balance_min_ratio = 0.20
 # Apply inverse-frequency class weighting in Phase 0 fitness to compensate for
 # imbalanced datasets without requiring the generator to enforce perfect balance.
-use_class_weighting = true
+use_class_weighting = false
 
 [hall_of_fame]
 # 5% of population. Provides diverse opponent pool for Phase 1 self-play.

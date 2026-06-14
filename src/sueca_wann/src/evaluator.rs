@@ -609,4 +609,388 @@ mod tests {
             assert_eq!(sp_l.members, sp_f.members);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Resolver-ceiling diagnostic.
+    //
+    // Question: can the 3-intent resolver even EXPRESS Elite-grade play?
+    // We measure, over realistic game states, how often Elite's chosen card is
+    // reproducible by SOME intent (expressiveness coverage), and we play each
+    // pure intent + a "mimic-Elite oracle" head-to-head vs the Elite team.
+    //
+    // If coverage < 100% and the oracle (the best a perfect intent-selector
+    // could do) cannot match Elite, the ceiling is architectural — no amount
+    // of WANN training closes the gap. Run with:
+    //   cargo test -p sueca_wann --release diagnostic_resolver_ceiling -- --nocapture --test-threads=1
+    // -----------------------------------------------------------------------
+    #[derive(Clone, Copy)]
+    enum DiagPolicy {
+        Elite,
+        Intent(usize),
+        MimicOracle,
+        RolloutOracle,
+    }
+
+    /// Play a game-copy to completion with Elite in all four seats.
+    fn diag_rollout_elite(mut game: sueca_solver::simulator::SuecaSimulatorGame) -> (u8, u8) {
+        use sueca_solver::heuristic::select_card_heuristic;
+        while game.state.trick_number < 10 {
+            let s = game.state.current_player;
+            let c = select_card_heuristic(&game, s);
+            game.play_card(c);
+        }
+        (game.state.team_02_score, game.state.team_13_score)
+    }
+
+    fn diag_pick(p: DiagPolicy, game: &sueca_solver::simulator::SuecaSimulatorGame, seat: u8) -> u8 {
+        use sueca_solver::heuristic::{resolve_intent, select_card_heuristic};
+        match p {
+            DiagPolicy::Elite => select_card_heuristic(game, seat),
+            DiagPolicy::Intent(i) => resolve_intent(i, game, seat),
+            DiagPolicy::MimicOracle => {
+                let e = select_card_heuristic(game, seat);
+                for i in 0..sueca_solver::constants::OUTPUT_COUNT {
+                    if resolve_intent(i, game, seat) == e {
+                        return e;
+                    }
+                }
+                // No intent expresses Elite's move — fall back to EFFICIENT_WIN.
+                resolve_intent(1, game, seat)
+            }
+            DiagPolicy::RolloutOracle => {
+                // Per-decision best response: try each intent, continue the game
+                // with Elite in all seats, keep the intent that maximizes this
+                // ego-team's final score. ego team = seat % 2.
+                let ego_team = seat % 2;
+                let mut best_card = resolve_intent(0, game, seat);
+                let mut best_score = -1i32;
+                for i in 0..sueca_solver::constants::OUTPUT_COUNT {
+                    let card = resolve_intent(i, game, seat);
+                    let mut g = *game;
+                    g.play_card(card);
+                    let (t02, t13) = diag_rollout_elite(g);
+                    let score = if ego_team == 0 { t02 as i32 } else { t13 as i32 };
+                    if score > best_score {
+                        best_score = score;
+                        best_card = card;
+                    }
+                }
+                best_card
+            }
+        }
+    }
+
+    /// Play one deal with the given per-seat policies. Returns (team02, team13).
+    fn diag_play(deal: &crate::evaluator::EvaluatorDeal, policies: [DiagPolicy; 4]) -> (u8, u8) {
+        use sueca_solver::simulator::SuecaSimulatorGame;
+        let mut game = SuecaSimulatorGame::new(deal.hands, deal.trump, 0);
+        while game.state.trick_number < 10 {
+            let seat = game.state.current_player;
+            let card = diag_pick(policies[seat as usize], &game, seat);
+            game.play_card(card);
+        }
+        (game.state.team_02_score, game.state.team_13_score)
+    }
+
+    // Dump (belief[35], rollout-optimal-intent) for DECISIVE states to CSV, so we
+    // can measure (in Python) whether the belief features can predict the winning
+    // intent at all. Sampled on the Elite-vs-Elite trajectory (the states faced
+    // when playing the opponent we must beat).
+    //   cargo test -p sueca_wann --release diagnostic_dump_intent_labels -- --nocapture --test-threads=1
+    #[test]
+    #[ignore = "on-demand diagnostic; run explicitly"]
+    fn diagnostic_dump_intent_labels() {
+        use std::io::Write;
+        use rand::SeedableRng;
+        use rand_pcg::Pcg64;
+
+        // Use the REAL PIMC-labeling extraction path (no balancer). Each accepted
+        // state carries the best-of-3-intent soft label. Dump (belief[35], argmax)
+        // so Python RF can measure whether the belief predicts the best intent.
+        let config = crate::dataset_gen::DatasetConfig {
+            n_worlds: 100,
+            search_depth: 4,
+            target_total: 0,
+            seed: 4242,
+            output_path: String::new(),
+            soft_balance_min_ratio: 0.0,
+            diff_mode: false,
+            fixed_worlds: None,
+        };
+        let n_deals: u64 = std::env::var("DUMP_DEALS").ok().and_then(|s| s.parse().ok()).unwrap_or(4000);
+        let mut out = String::new();
+        let mut counts = [0usize; 3];
+        let mut n = 0usize;
+        for d in 0..n_deals {
+            let mut rng = Pcg64::seed_from_u64(4242u64.wrapping_mul(1000).wrapping_add(d));
+            let (states, _rej) = crate::dataset_gen::generate_deal_states(&mut rng, &config, None);
+            for (belief, soft, _mask) in states {
+                let lab = (0..3)
+                    .max_by(|&a, &b| soft[a].partial_cmp(&soft[b]).unwrap())
+                    .unwrap();
+                counts[lab] += 1;
+                n += 1;
+                for v in belief.iter() {
+                    out.push_str(&format!("{:.5},", v));
+                }
+                out.push_str(&format!("{}\n", lab));
+            }
+        }
+        let path = "/tmp/champ/intent_labels.csv";
+        std::fs::File::create(path).unwrap().write_all(out.as_bytes()).unwrap();
+        println!("Wrote {} PIMC-labeled states to {}  (label counts {:?})", n, path, counts);
+    }
+
+    // How good is Elite vs near-optimal (strong PIMC) play? This bounds what ANY
+    // belief-state policy can achieve against Elite. If strong PIMC only ties
+    // Elite, Elite is near-optimal and beating it is essentially impossible; if
+    // PIMC crushes Elite, the headroom is real and the bottleneck is the policy.
+    //   cargo test -p sueca_wann --release diagnostic_pimc_vs_elite -- --nocapture --test-threads=1
+    #[test]
+    #[ignore = "on-demand diagnostic; run explicitly"]
+    fn diagnostic_pimc_vs_elite() {
+        use crate::train::generate_deals_rust;
+        let n = std::env::var("PIMC_DEALS").ok().and_then(|s| s.parse().ok()).unwrap_or(120usize);
+        let deals = generate_deals_rust(0, n, 31337);
+        let nw: usize = std::env::var("PIMC_WORLDS").ok().and_then(|s| s.parse().ok()).unwrap_or(80);
+        let depth: u8 = std::env::var("PIMC_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+
+        let mut sum_pimc = 0u64;
+        let mut wins = 0usize;
+        let mut sum_elite = 0u64;
+        let mut elite_wins = 0usize;
+        for deal in &deals {
+            // Team 0&2 = strong PIMC, Team 1&3 = Elite.
+            let pimc = crate::evaluator::SimulatorBot::Pimc { n_worlds: nw, search_depth: depth };
+            let elite = crate::evaluator::SimulatorBot::Heuristic;
+            let bots = [pimc.clone(), elite.clone(), pimc.clone(), elite.clone()];
+            let mut scratch = vec![0.0f64; 8];
+            let mut beh = crate::evaluator::WannBehavior::default();
+            let res = crate::evaluator::play_game_sim(deal.hands, deal.trump, 0, &bots, deal.seed, &mut scratch, &mut beh);
+            sum_pimc += res.team_02_score as u64;
+            if res.team_02_score > 60 { wins += 1; }
+
+            // Reference: Elite vs Elite on the same deal (positional baseline).
+            let be = [elite.clone(), elite.clone(), elite.clone(), elite.clone()];
+            let mut sc2 = vec![0.0f64; 8];
+            let mut bh2 = crate::evaluator::WannBehavior::default();
+            let r2 = crate::evaluator::play_game_sim(deal.hands, deal.trump, 0, &be, deal.seed, &mut sc2, &mut bh2);
+            sum_elite += r2.team_02_score as u64;
+            if r2.team_02_score > 60 { elite_wins += 1; }
+        }
+        println!("\n=== PIMC({},{}) vs Elite over {} deals ===", nw, depth, n);
+        println!("  PIMC team:  avg pts = {:.1}/120   win% = {:.1}%", sum_pimc as f64 / n as f64, 100.0 * wins as f64 / n as f64);
+        println!("  Elite-self: avg pts = {:.1}/120   win% = {:.1}%  (positional baseline)", sum_elite as f64 / n as f64, 100.0 * elite_wins as f64 / n as f64);
+    }
+
+    #[test]
+    #[ignore = "on-demand diagnostic; run explicitly"]
+    fn diagnostic_resolver_ceiling() {
+        use sueca_solver::heuristic::{resolve_intent, select_card_heuristic};
+        use sueca_solver::simulator::SuecaSimulatorGame;
+        use crate::train::generate_deals_rust;
+
+        let n_deals = 400;
+        let deals = generate_deals_rust(0, n_deals, 7777);
+
+        // --- Part A: static expressiveness coverage on the Elite trajectory ---
+        let mut total = 0usize;
+        let mut covered = 0usize;          // Elite card reachable by some intent
+        let mut lead_total = 0usize;
+        let mut lead_covered = 0usize;
+        let mut follow_total = 0usize;
+        let mut follow_covered = 0usize;
+        let mut distinct_hist = [0usize; 4]; // index = # distinct intent cards (1..=3)
+        let mut forced = 0usize;            // states with only one legal card
+
+        for deal in &deals {
+            let mut game = SuecaSimulatorGame::new(deal.hands, deal.trump, 0);
+            while game.state.trick_number < 10 {
+                let seat = game.state.current_player;
+                let legal = game.state.legal_moves();
+                let n_legal = legal.count_ones();
+                let leading = game.current_trick_len == 0;
+
+                let e = select_card_heuristic(&game, seat);
+                let i0 = resolve_intent(0, &game, seat);
+                let i1 = resolve_intent(1, &game, seat);
+                let i2 = resolve_intent(2, &game, seat);
+
+                if n_legal == 1 {
+                    forced += 1;
+                } else {
+                    total += 1;
+                    let hit = e == i0 || e == i1 || e == i2;
+                    if hit { covered += 1; }
+                    if leading {
+                        lead_total += 1;
+                        if hit { lead_covered += 1; }
+                    } else {
+                        follow_total += 1;
+                        if hit { follow_covered += 1; }
+                    }
+                    // distinct intent cards
+                    let mut d = 1;
+                    if i1 != i0 { d += 1; }
+                    if i2 != i0 && i2 != i1 { d += 1; }
+                    distinct_hist[d] += 1;
+                }
+
+                game.play_card(e);
+            }
+        }
+
+        let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
+        println!("\n========== RESOLVER CEILING DIAGNOSTIC ==========");
+        println!("Deals: {}  | non-forced decision states: {}  (forced single-legal: {})", n_deals, total, forced);
+        println!("Elite-move expressiveness coverage (some intent == Elite card):");
+        println!("  overall : {:.1}%  ({}/{})", pct(covered, total), covered, total);
+        println!("  leading : {:.1}%  ({}/{})", pct(lead_covered, lead_total), lead_covered, lead_total);
+        println!("  following: {:.1}%  ({}/{})", pct(follow_covered, follow_total), follow_covered, follow_total);
+        println!("Distinct intent cards among {{0,1,2}} (non-forced states):");
+        for d in 1..=3 {
+            println!("  {} distinct: {:.1}%  ({})", d, pct(distinct_hist[d], total), distinct_hist[d]);
+        }
+
+        // --- Part B: head-to-head team strength vs the Elite team ---
+        // Team 0&2 = candidate policy, Team 1&3 = Elite. Report candidate avg
+        // card points (out of 120) and win rate over deals (>60 = win).
+        let eval_team = |pol: DiagPolicy, label: &str| {
+            let mut sum = 0u64;
+            let mut wins = 0usize;
+            for deal in &deals {
+                let (t02, _t13) = diag_play(deal, [pol, DiagPolicy::Elite, pol, DiagPolicy::Elite]);
+                sum += t02 as u64;
+                if t02 > 60 { wins += 1; }
+            }
+            let avg = sum as f64 / n_deals as f64;
+            println!("  {:<22} avg pts = {:5.1} / 120   win% = {:5.1}%", label, avg, 100.0 * wins as f64 / n_deals as f64);
+        };
+
+        println!("\nHead-to-head (Team 0&2 = policy) vs Elite team (1&3), {} deals:", n_deals);
+        eval_team(DiagPolicy::Elite, "Elite (sanity~50%)");
+        eval_team(DiagPolicy::Intent(0), "always MAX_FORCE");
+        eval_team(DiagPolicy::Intent(1), "always EFFICIENT_WIN");
+        eval_team(DiagPolicy::Intent(2), "always EQUITY_BUILDER");
+        eval_team(DiagPolicy::MimicOracle, "MimicElite oracle");
+        eval_team(DiagPolicy::RolloutOracle, "Rollout best-of-3");
+
+        // --- Part C/D: WANN intent-selection quality on its own trajectory ---
+        // Walk each deal with ego=trained WANN (seats 0,2), Elite (1,3). At each
+        // ego decision: record the WANN's intent, compute the rollout (PI) score
+        // of all 3 intents, and measure agreement with the outcome-optimal intent
+        // + the regret (points the WANN leaves on the table by bad selection).
+        let champ_path = "/tmp/champ/best_genome_final.json";
+        if let Ok((Some(lead_g), Some(follow_g))) = crate::compile_rules::load_genome(champ_path) {
+            use sueca_solver::belief::encode_belief_state;
+            use sueca_solver::heuristic::{resolve_intent, select_card_heuristic};
+            use sueca_solver::rng::LcgRng;
+            use sueca_solver::simulator::SuecaSimulatorGame;
+            const OS: usize = sueca_solver::constants::OUTPUT_START;
+
+            let lead_net = lead_g.to_rust_wann();
+            let follow_net = follow_g.to_rust_wann();
+            let sweep = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0];
+            let nw = sweep.len();
+            let max_nodes = lead_net.num_nodes.max(follow_net.num_nodes);
+
+            let mut rng = LcgRng::new(99);
+            let mut scratch = vec![0.0f64; max_nodes * nw];
+
+            let mut champ_mix = [0usize; 3];      // WANN intent histogram
+            let mut opt_mix_dec = [0usize; 3];    // optimal intent on strict-unique decisive states
+            let mut ego_decisions = 0usize;
+            let mut decisive = 0usize;            // intent choice changes rollout outcome
+            let mut agree = 0usize;               // WANN picked an outcome-optimal intent
+            let mut total_regret = 0i64;          // sum of (best - wann) rollout pts
+            let mut team_pts = 0u64;
+            let mut wins = 0usize;
+
+            for deal in &deals {
+                let mut game = SuecaSimulatorGame::new(deal.hands, deal.trump, 0);
+                while game.state.trick_number < 10 {
+                    let seat = game.state.current_player;
+                    if seat % 2 == 0 {
+                        ego_decisions += 1;
+                        // --- WANN inference (mirrors SimulatorBot::Wann) ---
+                        let belief = encode_belief_state(&game, seat);
+                        let leading_flag =
+                            (belief[crate::constants::BeliefFeature::AmILeading as usize] - 1.0).abs() < 1e-9;
+                        let net = if leading_flag { &lead_net } else { &follow_net };
+                        net.forward_batched(&belief, &sweep, &mut scratch);
+                        let mut tot = [0.0f64; 3];
+                        for w in 0..nw {
+                            for k in 0..3 {
+                                tot[k] += scratch[(OS + k) * nw + w];
+                            }
+                        }
+                        let maxv = tot[0].max(tot[1]).max(tot[2]);
+                        let mut best = [0usize; 3];
+                        let mut bc = 0;
+                        for k in 0..3 {
+                            if (tot[k] - maxv).abs() < 1e-9 {
+                                best[bc] = k;
+                                bc += 1;
+                            }
+                        }
+                        let w = if bc == 1 { best[0] } else { best[rng.gen_range(0..bc)] };
+                        champ_mix[w] += 1;
+
+                        // --- rollout (PI) score of all 3 intents ---
+                        let mut sc = [-1i32; 3];
+                        for i in 0..3 {
+                            let card = resolve_intent(i, &game, seat);
+                            let mut g = game;
+                            g.play_card(card);
+                            let (t02, _t13) = diag_rollout_elite(g);
+                            sc[i] = t02 as i32;
+                        }
+                        let mx = sc[0].max(sc[1]).max(sc[2]);
+                        let mn = sc[0].min(sc[1]).min(sc[2]);
+                        total_regret += (mx - sc[w]) as i64;
+                        if mx > mn {
+                            decisive += 1;
+                            if sc[w] == mx {
+                                agree += 1;
+                            }
+                            let n_opt = (0..3).filter(|&i| sc[i] == mx).count();
+                            if n_opt == 1 {
+                                let oi = (0..3).find(|&i| sc[i] == mx).unwrap();
+                                opt_mix_dec[oi] += 1;
+                            }
+                        }
+                        let card = resolve_intent(w, &game, seat);
+                        game.play_card(card);
+                    } else {
+                        let c = select_card_heuristic(&game, seat);
+                        game.play_card(c);
+                    }
+                }
+                team_pts += game.state.team_02_score as u64;
+                if game.state.team_02_score > 60 {
+                    wins += 1;
+                }
+            }
+
+            let mixp = |a: [usize; 3]| {
+                let t = a.iter().sum::<usize>().max(1);
+                (
+                    100.0 * a[0] as f64 / t as f64,
+                    100.0 * a[1] as f64 / t as f64,
+                    100.0 * a[2] as f64 / t as f64,
+                )
+            };
+            let (c0, c1, c2) = mixp(champ_mix);
+            let (d0, d1, d2) = mixp(opt_mix_dec);
+            println!("  TRAINED champion       avg pts = {:5.1} / 120   win% = {:5.1}%", team_pts as f64 / n_deals as f64, 100.0 * wins as f64 / n_deals as f64);
+            println!("    WANN intent mix     : MAX_FORCE {:.0}%  EFFICIENT {:.0}%  EQUITY {:.0}%", c0, c1, c2);
+            println!("    OPTIMAL mix (strict-decisive only): MAX_FORCE {:.0}%  EFFICIENT {:.0}%  EQUITY {:.0}%", d0, d1, d2);
+            println!("    ego decisions: {}  | decisive (intent matters): {} ({:.0}%)", ego_decisions, decisive, pct(decisive, ego_decisions));
+            println!("    WANN picks an optimal intent on decisive states: {:.0}%  (chance ~ {:.0}%)", pct(agree, decisive), 100.0/3.0);
+            println!("    avg PI regret from intent choice: {:.1} pts / game", total_regret as f64 / n_deals as f64);
+        } else {
+            println!("  (trained champion not found at {} — skipped)", champ_path);
+        }
+        println!("=================================================\n");
+    }
 }

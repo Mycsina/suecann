@@ -530,25 +530,21 @@ fn extract_state_at(
         return RejectReason::SingleLegal;
     }
 
-    // ── Always-on pre-filter: intent uniqueness check ──
+    // ── Always-on pre-filter: drop fully-degenerate states ──
+    // Keep a state only if the intent CHOICE can change the played card. With
+    // the Elite-grade styled resolver, all three intents agree in most states
+    // (~90%); those carry no intent-selection signal. We reject only when ALL
+    // intents resolve to the same card, retaining every state where at least
+    // one intent diverges (the decision-relevant states worth training on).
     {
         let mut card_for_intent = [40u8; OUTPUT_COUNT as usize];
         for intent in 0..OUTPUT_COUNT as usize {
             card_for_intent[intent] = resolve_intent(intent, game, seat);
         }
-        let mut collision = false;
-        for i in 0..OUTPUT_COUNT as usize {
-            for j in (i + 1)..OUTPUT_COUNT as usize {
-                if card_for_intent[i] == card_for_intent[j] {
-                    collision = true;
-                    break;
-                }
-            }
-            if collision {
-                break;
-            }
-        }
-        if collision {
+        let all_same = card_for_intent
+            .iter()
+            .all(|&c| c == card_for_intent[0]);
+        if all_same {
             return RejectReason::IntentCollision;
         }
     }
@@ -603,39 +599,53 @@ fn extract_state_at(
         return RejectReason::FutilityStop;
     }
 
-    let mut sorted: Vec<&sueca_solver::pimc::PimcResult> = evs.iter().collect();
-    sorted.sort_by(|a, b| b.ev.partial_cmp(&a.ev).unwrap_or(std::cmp::Ordering::Equal));
-
-    // ── Confidence filter: reject strategically ambiguous states ──
-    let best = sorted[0];
-    let is_clear = if sorted.len() >= 2 {
-        let second = sorted[1];
-        let bypass = CARD_SUIT[best.card as usize] == CARD_SUIT[second.card as usize]
-            && CARD_POINTS[best.card as usize] == 0
-            && CARD_POINTS[second.card as usize] == 0;
-        if bypass {
-            true
-        } else {
-            let ev_delta = best.ev - second.ev;
-            let noise_floor = best.std_error;
-            ev_delta > noise_floor
+    // ── Intent labeling: best of the 3 intent-cards by PIMC EV ──
+    // The WANN can only ever play one of the 3 intents, so the supervised
+    // target is the best AVAILABLE intent, not the global PIMC-best card.
+    // We look up each intent-card's EV, label the highest-EV intent, and keep
+    // statistically-tied intents (within the best card's std_error) as a
+    // uniform multi-label. Fully-ambiguous states (all 3 tied) carry no
+    // intent-selection signal and are rejected.
+    let mut intent_ev = [f64::NEG_INFINITY; OUTPUT_COUNT as usize];
+    let mut intent_se = [0.0f64; OUTPUT_COUNT as usize];
+    for i in 0..OUTPUT_COUNT as usize {
+        let card = resolve_intent(i, game, seat);
+        if let Some(r) = evs.iter().find(|r| r.card == card) {
+            intent_ev[i] = r.ev;
+            intent_se[i] = r.std_error;
         }
-    } else {
-        true
-    };
+    }
 
-    if !is_clear {
+    let mut best_i = 0usize;
+    for i in 1..OUTPUT_COUNT as usize {
+        if intent_ev[i] > intent_ev[best_i] {
+            best_i = i;
+        }
+    }
+    if intent_ev[best_i] == f64::NEG_INFINITY {
+        // No intent-card found in the EV table (should not happen). Skip.
+        return RejectReason::Unclassifiable;
+    }
+    let best_ev = intent_ev[best_i];
+    let best_se = intent_se[best_i];
+
+    // Co-best = intents whose EV is within the best card's noise floor.
+    let mut soft_intent = [0.0f32; OUTPUT_COUNT as usize];
+    let co_best: Vec<usize> = (0..OUTPUT_COUNT as usize)
+        .filter(|&i| intent_ev[i] != f64::NEG_INFINITY && best_ev - intent_ev[i] <= best_se)
+        .collect();
+    if co_best.len() >= OUTPUT_COUNT as usize {
+        // All intents statistically tied → no preference to learn.
         return RejectReason::ConfidenceFilter;
     }
-
-    if let Some(soft_intent) = map_card_to_soft_intents(best.card, game, seat) {
-        let legal_mask = build_legal_mask(legal, game, seat);
-        let state_vec: Vec<f64> = belief.to_vec();
-        results.push((state_vec, soft_intent, legal_mask));
-        RejectReason::Accepted
-    } else {
-        RejectReason::Unclassifiable
+    let w = 1.0 / co_best.len() as f32;
+    for &i in &co_best {
+        soft_intent[i] = w;
     }
+
+    let legal_mask = build_legal_mask(legal, game, seat);
+    results.push((belief.to_vec(), soft_intent, legal_mask));
+    RejectReason::Accepted
 }
 
 pub fn map_card_to_soft_intents(card: u8, game: &SuecaSimulatorGame, seat: u8) -> Option<[f32; OUTPUT_COUNT]> {
@@ -1330,8 +1340,12 @@ mod tests {
 
     #[test]
     fn test_dataset_yield_ratio() {
+        // Exercise the REAL extraction path. With the Elite-grade styled resolver
+        // most states are non-decisive (all intents agree) and are pre-filtered
+        // out; among the decisive states that reach PIMC, a healthy fraction must
+        // yield a clear best-intent label.
         let config = DatasetConfig {
-            n_worlds: 80, // enough for meaningful SE (≈2.2 pts with σ=20)
+            n_worlds: 80,
             search_depth: 2,
             target_total: 1000,
             seed: 54321,
@@ -1341,143 +1355,34 @@ mod tests {
             soft_balance_min_ratio: 0.20,
         };
         let mut rng = Pcg64::seed_from_u64(config.seed);
-        let mut raw_tactical_states = 0;
-        let mut preserved_states = 0;
-
+        let mut tally = DealRejectCounts::default();
         for _ in 0..500 {
-            // Replicate the generation setup
-            let mut deck: Vec<u8> = (0..40).collect();
-            for i in (1..40).rev() {
-                let j = (rng.gen_range(0u64..((i + 1) as u64))) as usize;
-                deck.swap(i, j);
-            }
-
-            let mut hands = [0u64; 4];
-            for p in 0..4 {
-                for c in 0..10 {
-                    hands[p] |= 1u64 << deck[p * 10 + c];
-                }
-            }
-
-            let trump = (rng.gen_range(0u64..4)) as u8;
-            let first_player = (rng.gen_range(0u64..4)) as u8;
-
-            let max_tricks = (rng.gen_range(1u64..9)) as usize;
-            let mut game = SuecaSimulatorGame::new(hands, trump, first_player);
-
-            for _ in 0..max_tricks {
-                if game.state.trick_number >= 10 {
-                    break;
-                }
-                let legal = game.state.legal_moves();
-                if legal == 0 {
-                    break;
-                }
-                let count = legal.count_ones();
-                let idx = (rng.gen_range(0u64..(count as u64))) as usize;
-                let mut temp = legal;
-                for _ in 0..idx {
-                    temp &= temp - 1;
-                }
-                game.play_card(temp.trailing_zeros() as u8);
-            }
-
-            if game.state.trick_number >= 10 {
-                continue;
-            }
-
-            let seat = game.state.current_player;
-            let legal = game.state.legal_moves();
-            if legal.count_ones() <= 1 {
-                continue;
-            }
-
-            // This is a raw tactical state where decision is needed and PIMC is executed
-            raw_tactical_states += 1;
-
-            let current_scores = [game.state.team_02_score, game.state.team_13_score];
-            let current_trick_number = game.state.trick_number;
-            let mut current_hands = 0u64;
-            for h in &game.state.hands {
-                current_hands |= h;
-            }
-            let played_cards_mask = (!current_hands) & 0x000000FFFFFFFFFFu64;
-
-            let mut target_sizes = [0u8; 4];
-            for s in 0..4 {
-                target_sizes[s] = game.state.hands[s].count_ones() as u8;
-            }
-
-            let led_suit = if game.current_trick_len > 0 {
-                CARD_SUIT[game.current_trick[0] as usize]
-            } else {
-                4
-            };
-
-            let current_trick_cards = &game.current_trick[..game.current_trick_len];
-
-            let evs = sueca_solver::pimc::solve_pimc(
-                seat,
-                game.state.hands[seat as usize],
-                played_cards_mask,
-                game.voids,
-                target_sizes,
-                game.state.trump,
-                led_suit,
-                current_trick_cards,
-                seat,
-                game.state.current_trick_winner,
-                game.state.current_trick_best_card,
-                current_scores,
-                current_trick_number,
-                config.n_worlds,
-                config.search_depth,
-                rng.gen_range(0u64..u64::MAX),
-            false,
-                None,
-            );
-
-            let mut sorted: Vec<&sueca_solver::pimc::PimcResult> = evs.iter().collect();
-            sorted.sort_by(|a, b| b.ev.partial_cmp(&a.ev).unwrap_or(std::cmp::Ordering::Equal));
-
-            if sorted.is_empty() {
-                continue;
-            }
-
-            // Same confidence filter as generate_deal_states
-            let best = sorted[0];
-            let pass_margin = if sorted.len() >= 2 {
-                let second = sorted[1];
-                let bypass = CARD_SUIT[best.card as usize] == CARD_SUIT[second.card as usize]
-                    && CARD_POINTS[best.card as usize] == 0
-                    && CARD_POINTS[second.card as usize] == 0;
-                if bypass {
-                    true
-                } else {
-                    let ev_delta = best.ev - second.ev;
-                    ev_delta > best.std_error
-                }
-            } else {
-                true
-            };
-
-            if pass_margin {
-                if map_card_to_soft_intents(best.card, &game, seat).is_some() {
-                    preserved_states += 1;
-                }
-            }
+            let (_states, rejects) = generate_deal_states(&mut rng, &config, None);
+            tally.merge(&rejects);
         }
-
-        let ratio = preserved_states as f64 / raw_tactical_states as f64;
+        // States that actually reached PIMC (decisive, non-forced).
+        let pimc_states = tally.accepted
+            + tally.confidence_filter
+            + tally.unclassifiable
+            + tally.futility_stop;
+        let ratio = if pimc_states == 0 {
+            0.0
+        } else {
+            tally.accepted as f64 / pimc_states as f64
+        };
         println!(
-            "Dataset yield ratio: {:.2}% ({}/{} states preserved)",
-            ratio * 100.0,
-            preserved_states,
-            raw_tactical_states
+            "Dataset yield: accepted={} / pimc-reaching={} ({:.1}%)  [collision={} single={} futility={} conf={} unclass={}]",
+            tally.accepted, pimc_states, ratio * 100.0,
+            tally.intent_collision, tally.single_legal, tally.futility_stop,
+            tally.confidence_filter, tally.unclassifiable,
         );
+        // Decisive states are rare per deal (most are non-decisive, correctly
+        // pre-filtered), but among decisive PIMC-reaching states a clear
+        // best-intent label must emerge at a healthy rate.
+        assert!(tally.accepted > 40, "too few accepted states: {}", tally.accepted);
         assert!(
-            ratio >= 0.15,
-            "Yield ratio too low! Got {:.2}%, expected >= 15%. SE filter or intent-uniqueness filter may be too aggressive.",
+            ratio >= 0.30,
+            "intent-label yield too low among decisive PIMC states: {:.1}%",
             ratio * 100.0
         );
     }
@@ -1531,27 +1436,35 @@ mod tests {
     }
 
     #[test]
-    fn test_intent_demotion_leading() {
-        // Test intent demotion specifically when leading (current_trick_len == 0)
+    fn test_multi_label_equal_weights() {
+        // When several intents resolve to the same (PIMC-best) card, the soft
+        // target must be a uniform multi-label over exactly the matching intents
+        // (1/k each) — the old "intent demotion" rule was replaced by honest
+        // multi-label acceptance.
         let mut hands = [0u64; 4];
         for p in 0..4 {
             hands[p] = 0x3FFu64 << (p * 10);
         }
         let game = SuecaSimulatorGame::new(hands, 3, 0);
-        
-        // At Gen 0, seat 0 leading
         assert_eq!(game.current_trick_len, 0);
-        
-        // Let's call map_card_to_soft_intents on a card that resolved to both.
-        // If there's a card that matches both, we check that intent 0 is filtered out:
-        // Let's find if there is a card where both intents resolve to it:
+
+        // Build the matching set for whatever card intent 0 resolves to.
         let card_0 = resolve_intent(0, &game, 0);
-        let card_2 = resolve_intent(2, &game, 0);
-        if card_0 == card_2 {
-            let soft = map_card_to_soft_intents(card_0, &game, 0).unwrap();
-            // Since it matched both, intent 0 must be demoted in favor of EQUITY_BUILDER (intent 2)
-            assert_eq!(soft[0], 0.0);
-            assert_eq!(soft[2], 1.0);
+        let matching: Vec<usize> = (0..OUTPUT_COUNT as usize)
+            .filter(|&i| resolve_intent(i, &game, 0) == card_0)
+            .collect();
+        let soft = map_card_to_soft_intents(card_0, &game, 0).unwrap();
+        let k = matching.len() as f32;
+        for i in 0..OUTPUT_COUNT as usize {
+            let expected = if matching.contains(&i) { 1.0 / k } else { 0.0 };
+            assert!(
+                (soft[i] - expected).abs() < 1e-6,
+                "intent {} weight {} != expected {} (k={})",
+                i, soft[i], expected, k
+            );
         }
+        // Weights must sum to 1.0.
+        let sum: f32 = soft.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6, "soft target must sum to 1.0, got {}", sum);
     }
 }

@@ -70,12 +70,21 @@ Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topol
 
 ```bash
 ./target/release/sueca_wann generate-dataset \
-  --n-worlds 80 --search-depth 4 --target-count 10000 \
-  --output expert_states.npz
+  --n-worlds 200 --search-depth 4 --target-count 5000 \
+  --soft-balance-min-ratio 0.0 \
+  --output expert_states_v5.npz
 ```
 
-Generates class-balanced PIMC expert states for Phase 0 pretraining. Samples only the current player's turn (not all 4 seats) to ensure legal-move / perspective alignment.
+Generates PIMC expert states for Phase 0 pretraining. Samples only the current player's turn (not all 4 seats) to ensure legal-move / perspective alignment.
 Outputs 35-feature belief states with 3-intent soft targets (MAX_FORCE, EFFICIENT_WIN, EQUITY_BUILDER).
+
+**Labeling (June 14):** each decisive state is labeled with the intent whose *resolved card* has the
+best PIMC EV among the 3 (statistically-tied intents → uniform multi-label; all 3 tied → reject).
+The pre-filter rejects only fully-degenerate states (all 3 intents resolve to the same card). With
+the styled resolver the decision is effectively binary EFFICIENT-vs-EQUITY (MAX_FORCE uniquely best
+~1%, **0%** in the follow split), so generate with `--soft-balance-min-ratio 0.0` (a nonzero floor
+makes the balancer hunt the unfillable MAX_FORCE bucket forever) and set `use_class_weighting = false`
+(inverse-frequency weighting would give the ~1% bucket a huge noise weight).
 
 ### Migrating Legacy Datasets
 
@@ -152,7 +161,7 @@ Belief State (35 floats) → WANN (logical gates) → Oracle Intent (3 outputs) 
 - `benchmark.rs` — Tournament benchmarking
 - `compile_rules.rs` — Rule compiler, Graphviz DOT export, PNG rendering
 - `dataset_gen.rs` — PIMC expert dataset generation with ego-turn synchronization
-- `dataset.rs` — Expert dataset loading (NPZ reader; rejects datasets that don't match INPUT_COUNT=33)
+- `dataset.rs` — Expert dataset loading (NPZ reader; rejects datasets that don't match INPUT_COUNT=35)
 - `checkpoint.rs` — Training state serialization (Bincode)
 - `config.rs` — TOML configuration loading
 
@@ -208,9 +217,17 @@ to legacy resolver intents 0,2,3 internally.
 
 | ID | Intent | Action | Strategic Meaning |
 |----|--------|--------|-------------------|
-| 0 | MAX_FORCE | Aggressive / control | Lead high trump/master card or play max-rank card |
-| 1 | EFFICIENT_WIN | Tactical exploitation | Play min card that beats winner, or cut cheaply |
-| 2 | EQUITY_BUILDER | Partnership / voids | Lead short suit or load points / cut when partner is void |
+| 0 | MAX_FORCE | Elite + control dials | When trump-long, lead a low trump to *draw* trumps; else aggressive |
+| 1 | EFFICIENT_WIN | == EliteHeuristicBot | Strong default — delegates exactly to `select_card_heuristic` |
+| 2 | EQUITY_BUILDER | Elite + tempo dials | Lead shortest side-suit (build void); duck cheap tricks (≤2pts) when not last; preserve trump |
+
+**Styled resolver (`select_card_styled` in `heuristic.rs`, June 14).** Each intent is a styled
+deviation *around* the strong Elite policy, not a weak standalone tactic. `resolve_intent` maps WANN
+output 0/1/2 → style 0/1/2 and calls `select_card_styled` (EFFICIENT delegates to Elite; MAX_FORCE/
+EQUITY add the dials above). Because every intent shares Elite's core, each pure intent benchmarks
+≈Elite individually (48/47/46% vs Elite, up from the old 20/37/25%) — so a policy collapse merely
+*ties* Elite while good mixing exceeds it. This raised-floor design removed the Phase-1 collapse basin
+and is what let the WANN finally beat Elite (**52.7% vs Elite, n=3000**; prior champion 30.2%).
 
 All intents are resolved to legal plays contextually by the heuristic resolver, guaranteeing 100% legality.
 When WANN outputs tie, a random intent is chosen among the tied maximums (not deterministic argmax).

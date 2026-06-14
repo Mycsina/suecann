@@ -335,6 +335,222 @@ pub fn select_card_heuristic(game: &SuecaSimulatorGame, seat: u8) -> u8 {
     }
 }
 
+/// Strategy-styled card selection used by the intent resolver.
+///
+/// style 0 = MAX_FORCE (control / draw trumps / aggressive lead)
+/// style 1 = EFFICIENT_WIN (== EliteHeuristicBot, the strong default)
+/// style 2 = EQUITY_BUILDER (void-building leads, duck/preserve when cheap)
+///
+/// Each style shares Elite's tactical core (cash masters, cheapest-beat, smear
+/// onto a secure partner, protective overtrump, cheap cut) so every intent is
+/// individually competitive with Elite. They differ only at a few strategic
+/// "dials", so the WANN's choice of intent still changes play meaningfully.
+pub fn select_card_styled(game: &SuecaSimulatorGame, seat: u8, style: u8) -> u8 {
+    // EFFICIENT_WIN is exactly the Elite policy — delegate, never diverge.
+    if style != 0 && style != 2 {
+        return select_card_heuristic(game, seat);
+    }
+
+    let legal = game.state.legal_moves();
+    let trump = game.state.trump;
+    let trump_mask = 0x3FFu64 << (trump * 10);
+
+    let mut current_hands = 0u64;
+    for h in &game.state.hands {
+        current_hands |= h;
+    }
+
+    if game.current_trick_len == 0 {
+        // ── Leading ──
+        if let Some(master_card) = get_deterministic_cash_master_card(game, seat) {
+            return master_card;
+        }
+
+        // FORCE: with a long trump holding and no cashable master, lead a low
+        // trump to draw opponents' trumps (tempo / control).
+        if style == 0 {
+            let my_trumps = game.state.hands[seat as usize] & trump_mask;
+            if my_trumps.count_ones() >= 5 {
+                return my_trumps.trailing_zeros() as u8;
+            }
+        }
+
+        let mut counts = [0u32; 4];
+        let mut suit_legal = [0u64; 4];
+        for s in 0..4u8 {
+            if s != trump {
+                let mask = (0x3FFu64 << (s * 10)) & legal;
+                counts[s as usize] = mask.count_ones();
+                suit_legal[s as usize] = mask;
+            }
+        }
+
+        let mut best_suit = None;
+        if style == 2 {
+            // EQUITY: probe the SHORTEST non-trump suit to build a void to cut from.
+            let mut min_val = u32::MAX;
+            for s in 0..4u8 {
+                if s != trump {
+                    let c = counts[s as usize];
+                    if c > 0 && c < min_val {
+                        min_val = c;
+                        best_suit = Some(s);
+                    }
+                }
+            }
+        } else {
+            // FORCE: probe the LONGEST non-trump suit (same selection as Elite).
+            let mut max_val = (0u32, 0u8);
+            for s in 0..4u8 {
+                if s != trump {
+                    let c = counts[s as usize];
+                    if c > 0 && (c, s) >= max_val {
+                        max_val = (c, s);
+                        best_suit = Some(s);
+                    }
+                }
+            }
+        }
+
+        if let Some(s) = best_suit {
+            return suit_legal[s as usize].trailing_zeros() as u8;
+        }
+        let trumps = legal & trump_mask;
+        return trumps.trailing_zeros() as u8;
+    }
+
+    let led_suit = crate::engine::CARD_SUIT[game.current_trick[0] as usize];
+    let suited = legal & (0x3FFu64 << (led_suit * 10));
+    let is_last = game.current_trick_len == 3;
+
+    if suited != 0 {
+        // ── Following, holding the led suit ──
+        let winner_seat = trick_winner_seat(game).unwrap();
+        let mut winner_card = 0;
+        for i in 0..game.current_trick_len {
+            if game.current_trick_seats[i] == winner_seat {
+                winner_card = game.current_trick[i];
+                break;
+            }
+        }
+
+        if (seat % 2) == (winner_seat % 2) {
+            // Partner winning: smear if secure, else protect with our highest, else dump.
+            if is_partner_secure(game, seat, winner_card, current_hands) {
+                return select_smear_card(suited, led_suit, current_hands);
+            }
+            let win_rank = crate::engine::CARD_RANK[winner_card as usize];
+            let mut higher_protective = 0u64;
+            let mut temp = suited;
+            while temp != 0 {
+                let card = temp.trailing_zeros() as u8;
+                if crate::engine::CARD_RANK[card as usize] > win_rank {
+                    higher_protective |= 1u64 << card;
+                }
+                temp &= temp - 1;
+            }
+            if higher_protective != 0 {
+                return 63 - higher_protective.leading_zeros() as u8;
+            }
+            return suited.trailing_zeros() as u8;
+        }
+
+        // Opponent winning: find the cards in led suit that beat the winner.
+        let win_suit = crate::engine::CARD_SUIT[winner_card as usize];
+        let win_rank = crate::engine::CARD_RANK[winner_card as usize];
+        let mut beating = 0u64;
+        let mut temp = suited;
+        while temp != 0 {
+            let card = temp.trailing_zeros() as u8;
+            let rank = crate::engine::CARD_RANK[card as usize];
+            let beats = if win_suit == trump {
+                led_suit == trump && rank > win_rank
+            } else if win_suit == led_suit {
+                rank > win_rank
+            } else {
+                true
+            };
+            if beats {
+                beating |= 1u64 << card;
+            }
+            temp &= temp - 1;
+        }
+        if beating != 0 {
+            // EQUITY: on a cheap trick that we are not last to contest, duck
+            // (dump our lowest) to preserve high cards for richer tricks.
+            if style == 2 && !is_last && game.trick_points <= 2 {
+                return suited.trailing_zeros() as u8;
+            }
+            return beating.trailing_zeros() as u8; // cheapest winner
+        }
+        return suited.trailing_zeros() as u8;
+    }
+
+    // ── Void in the led suit ──
+    let winner_seat = trick_winner_seat(game).unwrap();
+    let trump_cards = legal & trump_mask;
+    let non_trump = legal & !trump_mask;
+
+    let dump_lowest_off_suit = || -> u8 {
+        if non_trump != 0 {
+            for r in 0..10 {
+                for s in 0..4u8 {
+                    if s != trump {
+                        let card = s * 10 + r;
+                        if (non_trump & (1u64 << card)) != 0 {
+                            return card;
+                        }
+                    }
+                }
+            }
+        }
+        legal.trailing_zeros() as u8
+    };
+
+    if (seat % 2) == (winner_seat % 2) {
+        // Partner winning: bleed points if secure, else dump.
+        if non_trump != 0 {
+            let mut winner_card = 0;
+            for i in 0..game.current_trick_len {
+                if game.current_trick_seats[i] == winner_seat {
+                    winner_card = game.current_trick[i];
+                    break;
+                }
+            }
+            if is_partner_secure(game, seat, winner_card, current_hands) {
+                return select_bleed_card(non_trump, current_hands);
+            }
+            return dump_lowest_off_suit();
+        }
+        return trump_cards.trailing_zeros() as u8;
+    }
+
+    // Opponent winning while we are void: cut with the cheapest sufficient trump.
+    if trump_cards != 0 {
+        let mut winner_card = 0;
+        for i in 0..game.current_trick_len {
+            if game.current_trick_seats[i] == winner_seat {
+                winner_card = game.current_trick[i];
+                break;
+            }
+        }
+        if crate::engine::CARD_SUIT[winner_card as usize] == trump {
+            let win_rank = crate::engine::CARD_RANK[winner_card as usize];
+            let higher_trumps = trump_cards & (0x3FFu64 << (trump * 10 + win_rank + 1));
+            if higher_trumps != 0 {
+                return higher_trumps.trailing_zeros() as u8;
+            }
+            return dump_lowest_off_suit();
+        }
+        // EQUITY: don't spend a trump cutting a cheap trick — preserve it.
+        if style == 2 && game.trick_points <= 2 && non_trump != 0 {
+            return dump_lowest_off_suit();
+        }
+        return trump_cards.trailing_zeros() as u8; // cut
+    }
+    dump_lowest_off_suit()
+}
+
 // ---------------------------------------------------------------------------
 // WANN Output Intent Resolver (Legal Subsystem)
 // ---------------------------------------------------------------------------
@@ -484,239 +700,14 @@ fn get_highest_ranking_card(mask: u64) -> u8 {
 }
 
 pub fn resolve_intent(intent: usize, game: &SuecaSimulatorGame, seat: u8) -> u8 {
-    let legal = game.state.legal_moves();
-    let trump = game.state.trump;
-    let leading = game.current_trick_len == 0;
-    let card;
-
-    let duck_or_dump = || {
-        let mut best_card = 40;
-        let mut best_rank = 10;
-        let mut temp = legal;
-        while temp != 0 {
-            let c = temp.trailing_zeros() as u8;
-            let rank = crate::engine::CARD_RANK[c as usize];
-            if rank < best_rank
-                || (rank == best_rank
-                    && crate::engine::CARD_SUIT[c as usize]
-                        < crate::engine::CARD_SUIT[best_card as usize])
-            {
-                best_rank = rank;
-                best_card = c;
-            }
-            temp &= temp - 1;
-        }
-        best_card
+    // WANN outputs 0=MAX_FORCE, 1=EFFICIENT_WIN, 2=EQUITY_BUILDER map directly to
+    // the styled selector. Any out-of-range index falls back to Elite (style 1).
+    let style = match intent {
+        0 => 0u8, // MAX_FORCE      — control / draw / aggressive lead
+        2 => 2u8, // EQUITY_BUILDER — void-building leads, duck/preserve when cheap
+        _ => 1u8, // EFFICIENT_WIN  — == EliteHeuristicBot
     };
-
-    // Remap 3-output WANN → legacy 4-intent resolver.
-    // WANN: 0=MAX_FORCE, 1=EFFICIENT_WIN, 2=EQUITY_BUILDER
-    // Legacy: 0=MAX_FORCE, 1=MIN_FORCE(unused), 2=EFFICIENT_WIN, 3=EQUITY_BUILDER
-    let intent = match intent {
-        1 => 2, // EFFICIENT_WIN (skip MIN_FORCE slot)
-        2 => 3, // EQUITY_BUILDER
-        _ => intent,
-    };
-
-    match intent {
-        0 => {
-            // MAX_FORCE (Aggressive / Control)
-            if leading {
-                let trump_mask = 0x3FFu64 << (trump * 10);
-                let trump_cards = legal & trump_mask;
-                if trump_cards != 0 {
-                    card = get_highest_ranking_card(trump_cards);
-                } else if let Some(master_card) = get_deterministic_cash_master_card(game, seat) {
-                    card = master_card;
-                } else {
-                    card = duck_or_dump();
-                }
-            } else {
-                let led_suit = crate::engine::CARD_SUIT[game.current_trick[0] as usize];
-                let suited = legal & (0x3FFu64 << (led_suit * 10));
-                if suited != 0 {
-                    card = get_highest_ranking_card(suited);
-                } else {
-                    let trump_mask = 0x3FFu64 << (trump * 10);
-                    let trump_cards = legal & trump_mask;
-                    if trump_cards != 0 {
-                        card = get_highest_ranking_card(trump_cards);
-                    } else {
-                        card = get_highest_ranking_card(legal);
-                    }
-                }
-            }
-        }
-        1 => {
-            // MIN_FORCE (Passive / Resource Saving)
-            if leading {
-                let mut counts = [0; 4];
-                let hand = game.state.hands[seat as usize];
-                for s in 0..4 {
-                    if s != trump {
-                        counts[s as usize] = (hand & (0x3FFu64 << (s * 10))).count_ones();
-                    }
-                }
-                let mut longest_suit = None;
-                let mut max_count = 0;
-                for s in 0..4 {
-                    if s != trump {
-                        let count = counts[s as usize];
-                        if count > 0 && count >= max_count {
-                            max_count = count;
-                            longest_suit = Some(s);
-                        }
-                    }
-                }
-                if let Some(s) = longest_suit {
-                    let suit_cards = hand & (0x3FFu64 << (s * 10));
-                    card = suit_cards.trailing_zeros() as u8;
-                } else {
-                    card = duck_or_dump();
-                }
-            } else {
-                let led_suit = crate::engine::CARD_SUIT[game.current_trick[0] as usize];
-                let suited = legal & (0x3FFu64 << (led_suit * 10));
-                if suited != 0 {
-                    card = suited.trailing_zeros() as u8;
-                } else {
-                    card = duck_or_dump();
-                }
-            }
-        }
-        2 => {
-            // EFFICIENT_WIN (Tactical Exploitation)
-            if leading {
-                let trump_mask = 0x3FFu64 << (trump * 10);
-                let trump_cards = legal & trump_mask;
-                if trump_cards.count_ones() > 1 {
-                    card = trump_cards.trailing_zeros() as u8;
-                } else {
-                    let mut counts = [0; 4];
-                    let hand = game.state.hands[seat as usize];
-                    for s in 0..4 {
-                        if s != trump {
-                            counts[s as usize] = (hand & (0x3FFu64 << (s * 10))).count_ones();
-                        }
-                    }
-                    let mut longest_suit = None;
-                    let mut max_count = 0;
-                    for s in 0..4 {
-                        if s != trump {
-                            let count = counts[s as usize];
-                            if count > 0 && count >= max_count {
-                                max_count = count;
-                                longest_suit = Some(s);
-                            }
-                        }
-                    }
-                    if let Some(s) = longest_suit {
-                        let suit_cards = hand & (0x3FFu64 << (s * 10));
-                        card = suit_cards.trailing_zeros() as u8;
-                    } else {
-                        card = duck_or_dump();
-                    }
-                }
-            } else {
-                let led_suit = crate::engine::CARD_SUIT[game.current_trick[0] as usize];
-                let suited = legal & (0x3FFu64 << (led_suit * 10));
-                if suited != 0 {
-                    let mut cheapest_winning_card = None;
-                    let mut best_rank = 10;
-                    let mut temp = suited;
-                    while temp != 0 {
-                        let c = temp.trailing_zeros() as u8;
-                        if would_beat(c, game) {
-                            let rank = crate::engine::CARD_RANK[c as usize];
-                            if rank < best_rank {
-                                best_rank = rank;
-                                cheapest_winning_card = Some(c);
-                            }
-                        }
-                        temp &= temp - 1;
-                    }
-                    if let Some(c) = cheapest_winning_card {
-                        card = c;
-                    } else {
-                        card = suited.trailing_zeros() as u8;
-                    }
-                } else {
-                    let trump_mask = 0x3FFu64 << (trump * 10);
-                    let trump_cards = legal & trump_mask;
-                    let mut cheapest_winning_trump = None;
-                    let mut best_rank = 10;
-                    let mut temp = trump_cards;
-                    while temp != 0 {
-                        let c = temp.trailing_zeros() as u8;
-                        if would_beat(c, game) {
-                            let rank = crate::engine::CARD_RANK[c as usize];
-                            if rank < best_rank {
-                                best_rank = rank;
-                                cheapest_winning_trump = Some(c);
-                            }
-                        }
-                        temp &= temp - 1;
-                    }
-                    if let Some(c) = cheapest_winning_trump {
-                        card = c;
-                    } else {
-                        card = duck_or_dump();
-                    }
-                }
-            }
-        }
-        3 => {
-            // EQUITY_BUILDER (Partnership / Voids)
-            if leading {
-                let mut counts = [0; 4];
-                let hand = game.state.hands[seat as usize];
-                for s in 0..4 {
-                    if s != trump {
-                        counts[s as usize] = (hand & (0x3FFu64 << (s * 10))).count_ones();
-                    }
-                }
-                let mut shortest_suit = None;
-                let mut min_count = u32::MAX;
-                for s in 0..4 {
-                    if s != trump {
-                        let count = counts[s as usize];
-                        if count > 0 && count <= min_count {
-                            min_count = count;
-                            shortest_suit = Some(s);
-                        }
-                    }
-                }
-                if let Some(s) = shortest_suit {
-                    let suit_cards = hand & (0x3FFu64 << (s * 10));
-                    card = suit_cards.trailing_zeros() as u8;
-                } else {
-                    card = duck_or_dump();
-                }
-            } else {
-                let partner_winning = game.state.current_trick_winner == (seat + 2) % 4;
-                let mut load_card = None;
-                if partner_winning {
-                    load_card = get_deterministic_load_points_card(game, seat);
-                }
-                if let Some(c) = load_card {
-                    card = c;
-                } else {
-                    let led_suit = crate::engine::CARD_SUIT[game.current_trick[0] as usize];
-                    let suited = legal & (0x3FFu64 << (led_suit * 10));
-                    if suited != 0 {
-                        card = suited.trailing_zeros() as u8;
-                    } else {
-                        card = duck_or_dump();
-                    }
-                }
-            }
-        }
-        _ => {
-            card = duck_or_dump();
-        }
-    }
-
-    card
+    select_card_styled(game, seat, style)
 }
 
 pub fn select_card_from_outputs(

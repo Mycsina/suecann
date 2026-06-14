@@ -14,13 +14,13 @@ Belief State (35 features) → WANN (Logical Gates) → Oracle Intent (3 outputs
 
 **WANN.** Weight-agnostic network with sign-only connections (±1), logical aggregations (SUM, MIN/AND, MAX/OR), and discrete activations (IDENTITY, NOT, THRESHOLD). No MEAN (float-precision issues at THRESHOLD boundary) and no SIGMOID (breaks IF/THEN rule extraction). Topologies are evaluated across a weight sweep W ∈ {−2.0, −1.0, −0.5, 0.5, 1.0, 2.0}.
 
-**Oracle Intents.** Three abstract play archetypes that map to legal cards in any game state (MIN_FORCE removed — subsumed by EFFICIENT_WIN):
+**Oracle Intents.** Three abstract play archetypes that map to legal cards in any game state (MIN_FORCE removed — subsumed by EFFICIENT_WIN). Each is a **styled deviation around the strong Elite policy**, not a weak standalone tactic (see Resolver below):
 
-- **MAX_FORCE (0)** — Aggressive/control. Lead high trump or cash a master card. Play max-rank when following.
-- **EFFICIENT_WIN (1)** — Tactical exploitation. Play the cheapest card that beats the current winner, or cut cheaply with trump.
-- **EQUITY_BUILDER (2)** — Partnership/voids. Lead from short suit to build voids. Load points when partner is winning. Cut when partner is void.
+- **EFFICIENT_WIN (1)** — The strong default. Delegates exactly to `EliteHeuristicBot` (cheapest winner, else cheap cut, else concede).
+- **MAX_FORCE (0)** — Elite + control dials: when trump-long, lead a low trump to *draw* opponents' trumps; otherwise aggressive.
+- **EQUITY_BUILDER (2)** — Elite + tempo dials: lead the *shortest* side-suit to build a void to cut from; *duck* cheap tricks (≤2 pts) when not last; *preserve* trump rather than cut a cheap trick.
 
-**Heuristic Resolver.** Maps each intent to a legal card contextually. All three intents always resolve to a legal move. When WANN outputs tie, a random choice is made among tied maximums (not deterministic argmax).
+**Heuristic Resolver (`select_card_styled`).** Maps each intent to a legal card contextually. Because every intent shares Elite's core and only adds dials, each pure intent benchmarks at ≈Elite individually (48/47/46% vs Elite) — so a policy that collapses to one intent merely *ties* Elite, while good situational mixing exceeds it. This raised-floor design (June 14) is what let the WANN finally beat Elite; the prior weak-intent resolver (20/37/25%) created a Phase-1 collapse basin. All three intents always resolve to a legal move. When WANN outputs tie, a random choice is made among tied maximums (not deterministic argmax).
 
 ### Belief State Layout (35 inputs, all in [0, 1])
 
@@ -67,34 +67,35 @@ Belief State (35 features) → WANN (Logical Gates) → Oracle Intent (3 outputs
 The dataset generator uses PIMC (Perfect Information Monte Carlo) with several quality filters:
 
 - **Mid-trick random walk**: plays 0-7 complete tricks + 0-3 extra cards, ending at a uniform random point within a trick (~25% lead, ~75% follow).
-- **Six-bucket per-split balance**: (Lead, Follow) × (MAX_FORCE, EFFICIENT_WIN, EQUITY_BUILDER). Each split targets `total/2` states with soft floors per intent.
-- **Multi-label acceptance**: when multiple intents map to the PIMC-best card, the state is accepted with fractional targets (1/k per intent) rather than rejected.
+- **Best-of-3-intent labeling** (June 14): each decisive state is labeled with the intent whose *resolved card* has the best PIMC EV among the 3 (statistically-tied intents → uniform multi-label; all 3 tied → reject). The old labeler kept a state only if some intent matched the *global* PIMC-best card — wrong target (the WANN can only choose among the 3 intents) and it discarded ~85% of states under the styled resolver.
+- **Degenerate-only pre-filter**: rejects only states where all 3 intents resolve to the *same* card. Keeps every state where the intent choice has any effect.
+- **Natural class distribution**: with the styled resolver the decision is effectively binary EFFICIENT-vs-EQUITY (MAX_FORCE is uniquely best ~1% of the time, **0%** in the follow split). Generate with `--soft-balance-min-ratio 0.0` (a nonzero floor makes the balancer hunt the unfillable MAX_FORCE bucket forever) and set `use_class_weighting = false` (inverse-frequency weighting would give the ~1% bucket a huge noise weight).
 - **Futility stop**: ambiguous states exit PIMC early when the EV gap cannot plausibly become significant.
 - **Exact card equivalence**: zero-point cards in the same suit with no intervening remaining cards are collapsed in alpha-beta search (provably lossless via `mask_between` test).
 - **Killer-move heuristic**: 2-slot per-ply killer table in alpha-beta for ~30% more cutoffs.
-- **Class weighting**: inverse-frequency weights in Phase 0 fitness compensate for any remaining class imbalance.
 - **Holdout set**: 10% stratified across all 6 buckets for validation accuracy tracking.
 - **Diff mode**: `--diff-mode --fixed-worlds N` for controlled label comparison between pipeline versions.
 
 Generate with:
 ```bash
 ./target/release/sueca_wann generate-dataset \
-  --n-worlds 80 --search-depth 4 --target-count 18000 \
-  --seed 42 --soft-balance-min-ratio 0.20 \
-  --output expert_states_v4.npz
+  --n-worlds 200 --search-depth 4 --target-count 5000 \
+  --seed 42 --soft-balance-min-ratio 0.0 \
+  --output expert_states_v5.npz
 ```
 
-## Benchmark Results (previous run — pre-recovery)
+## Benchmark Results (June 14 run — `checkpoints/production/2026-06-14-1`)
 
-| Bot | RandomBot | OldHeuristicBot | EliteHeuristicBot | WANN (Champion) | WANN (Optimized) |
-|---|---|---|---|---|---|
-| **RandomBot** | 50.0% | 10.8% | 6.8% | 7.8% | 13.0% |
-| **OldHeuristicBot** | 89.2% | 50.0% | 37.5% | 45.2% | 39.0% |
-| **EliteHeuristicBot** | 93.2% | 62.5% | 50.0% | 58.5% | 60.2% |
-| **WANN (Champion)** | 92.2% | 54.8% | 41.5% | 50.0% | 49.8% |
-| **WANN (Optimized)** | 87.0% | 61.0% | 39.8% | 50.2% | 50.0% |
+**The WANN beats EliteHeuristicBot** — the first time the project has done so. Win rates as the row bot vs each column bot, 300 deals (seat-rotated):
 
-> Note: These numbers are from the pre-recovery run (June 3). The June 12 recovery run regressed to 43.8% due to Follow-brain starvation (9.4% Follow split, EFFICIENT_WIN at 8.2%). The pipeline fixes above address that. Updated benchmarks will replace this table after retraining.
+| Bot | RandomBot | OldHeuristicBot | EliteHeuristicBot | WANN (Champion) |
+|---|---|---|---|---|
+| **RandomBot** | 50.0% | 10.2% | 5.5% | 5.5% |
+| **OldHeuristicBot** | 89.8% | 50.0% | 33.2% | 34.8% |
+| **EliteHeuristicBot** | 94.5% | 66.8% | 50.0% | 43.8% |
+| **WANN (Champion)** | 94.5% | 65.2% | **56.2%** | 50.0% |
+
+Head-to-head vs Elite at increasing sample sizes (to pin the margin): **52.7% ± 1.8% at n=3000** (95% CI [50.9%, 54.5%], excludes 50% — a significant win), card points 60.3 vs 59.7. The narrow margin is expected: there is no supra-Elite teacher in the pipeline (even the project's own PIMC only ties Elite, since its leaf eval is myopic), so imitation caps at ≈Elite and the edge comes from the learnable follow-side duck/preserve deviation. See `problems.md` for the full diagnosis (prior champion was 30.2% vs Elite).
 
 ## Rust Crates
 
