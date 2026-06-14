@@ -629,6 +629,8 @@ mod tests {
         Intent(usize),
         MimicOracle,
         RolloutOracle,
+        /// Flat Monte-Carlo PIMC with Elite playouts (the Stage-1 teacher).
+        RolloutPimc { worlds: usize },
     }
 
     /// Play a game-copy to completion with Elite in all four seats.
@@ -676,6 +678,15 @@ mod tests {
                     }
                 }
                 best_card
+            }
+            DiagPolicy::RolloutPimc { worlds } => {
+                // Flat MC PIMC with Elite playouts; pick the legal move with the
+                // highest ego-team EV. Fixed seed -> reproducible diagnostic.
+                let res = sueca_solver::pimc::solve_pimc_rollout(game, worlds, 0xC0FFEE);
+                res.iter()
+                    .max_by(|a, b| a.ev.partial_cmp(&b.ev).unwrap())
+                    .map(|r| r.card)
+                    .unwrap_or_else(|| select_card_heuristic(game, seat))
             }
         }
     }
@@ -779,8 +790,34 @@ mod tests {
             if r2.team_02_score > 60 { elite_wins += 1; }
         }
         println!("\n=== PIMC({},{}) vs Elite over {} deals ===", nw, depth, n);
-        println!("  PIMC team:  avg pts = {:.1}/120   win% = {:.1}%", sum_pimc as f64 / n as f64, 100.0 * wins as f64 / n as f64);
-        println!("  Elite-self: avg pts = {:.1}/120   win% = {:.1}%  (positional baseline)", sum_elite as f64 / n as f64, 100.0 * elite_wins as f64 / n as f64);
+        println!("  alpha-beta PIMC:  avg pts = {:.1}/120   win% = {:.1}%", sum_pimc as f64 / n as f64, 100.0 * wins as f64 / n as f64);
+        println!("  Elite-self:       avg pts = {:.1}/120   win% = {:.1}%  (positional baseline)", sum_elite as f64 / n as f64, 100.0 * elite_wins as f64 / n as f64);
+
+        // ── Stage-1 teacher: flat Monte-Carlo PIMC with Elite playouts ──
+        // Team 0&2 = rollout-PIMC, Team 1&3 = Elite, same deals. This is GATE 1:
+        // does the cheap rollout teacher beat Elite by a clear margin (>= ~55%,
+        // judged against the Elite-self positional baseline above)?
+        let mut sum_roll = 0u64;
+        let mut roll_wins = 0usize;
+        for deal in &deals {
+            let (t02, _t13) = diag_play(
+                deal,
+                [
+                    DiagPolicy::RolloutPimc { worlds: nw },
+                    DiagPolicy::Elite,
+                    DiagPolicy::RolloutPimc { worlds: nw },
+                    DiagPolicy::Elite,
+                ],
+            );
+            sum_roll += t02 as u64;
+            if t02 > 60 { roll_wins += 1; }
+        }
+        println!(
+            "  rollout PIMC({}):  avg pts = {:.1}/120   win% = {:.1}%  <-- GATE 1 teacher",
+            nw,
+            sum_roll as f64 / n as f64,
+            100.0 * roll_wins as f64 / n as f64
+        );
     }
 
     #[test]
