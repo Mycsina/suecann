@@ -312,3 +312,77 @@ first time the WANN has beaten EliteHeuristicBot.
   was deliberately left open.
 - Lead-brain PFS bootstrap remains seed-sensitive (Minor issues); this run bootstrapped fine at
   pop=1000.
+
+---
+
+## Chapter 2 — The rollout teacher: solving Problem 7 (and what it actually bought)
+
+Problem 7 ("no supra-Elite teacher exists") was the named next lever. We solved it — cheaply — and
+the result reframes the whole strength/interpretability story.
+
+### Problem 9 — The PIMC weakness was the leaf eval, not the search depth
+The reverted depth-rollout attempt (Problem 7) had concluded a stronger teacher needs deeper/heavier
+search. Wrong diagnosis. `search.rs` alpha-beta returns **points-captured-so-far** at the depth limit
+(`search.rs:184` and `:193`) — a *myopic* leaf with no positional estimate. Depth doesn't fix a blind
+leaf. **Fix:** a separate flat-Monte-Carlo solver `solve_pimc_rollout` (`pimc.rs`) that, per legal
+move, plays the move then rolls out the rest of the deal with **Elite in all four seats**, averaging
+the ego team's terminal score over determinized worlds. By the rollout policy-improvement theorem this
+is ≥ Elite, and it is *cheaper* than deep alpha-beta (no search tree). It does **not** touch
+`alpha_beta` (the prior attempt did, broke two tests, and was reverted). Determinization copies the
+live `SuecaSimulatorGame` and overwrites only the hidden hands (ego hand + trick/score/void state
+preserved); the stale Zobrist hash is unused by Elite playouts.
+
+**Gate-1 result (harness, 150 deals):** rollout PIMC(100) = **62.0% / 66.0 pts** vs Elite, where the
+Elite-self positional baseline is 46.0% / 58.5 and the old alpha-beta PIMC was 36.7% / 53.4. The
+first genuinely supra-Elite signal in the pipeline. Dataset generation with this teacher is also
+**~1000× faster** (the all-intents-agree pre-filter skips solving on most states): 15k labeled
+states in **11 s** vs hours for the alpha-beta pipeline.
+
+### Problem 10 — A supra-Elite teacher does NOT raise the benchmark; it raises interpretability
+Retrained with the rollout-teacher dataset (`expert_states_v6.npz`, 15k states, `phase0_gens=150`):
+run `checkpoints/production/2026-06-14-2`. Benchmark **52.1% ± 1.8% vs Elite (n=3000)**, pts 60.2 :
+59.8 — *statistically identical* to v5's 52.7%. The better teacher did **not** move strength.
+
+But the champion is **dramatically simpler at iso-strength**:
+
+| | v5 champion (`2026-06-14-1`) | v6 champion (`2026-06-14-2`) |
+|---|---|---|
+| Win vs Elite (n=3000) | 52.7% ± 1.8% | 52.1% ± 1.8% |
+| Lead brain | 68 hidden gates / 120 conns | **12 hidden / 35 conns** |
+| Follow brain | 64 hidden / 122 conns | **17 hidden / 44 conns** |
+| Total hidden logic gates | 132 | **29** (4.5× fewer) |
+| Genome size | 20.4 KB | 8.4 KB |
+
+The v5 lead brain compiled `EQUITY_BUILDER` to a 4-term sum over a **40-gate** nested DAG (unreadable).
+The v6 lead brain compiles to a **readable, strategically-sensible** policy:
+```
+EQUITY_BUILDER = THRESHOLD(NOT(Trump_Count))             # build voids when trump-poor
+EFFICIENT_WIN  = 0.0                                       # never, when leading
+MAX_FORCE      = (ahead & point-dense & partner-winning)  # press the advantage
+                 OR (no very-short side suit)
+```
+
+**Why the teacher helped simplicity but not strength.** Cleaner, more-decisive labels (the supra-Elite
+teacher commits to a single best intent instead of the noisy alpha-beta near-ties) let evolution fit
+the policy with far less structure. But the *strength* ceiling is unchanged because:
+1. **`EFFICIENT_WIN = 0.0` in both brains** — the net never outputs it; it settled on a near-constant
+   policy (lead: equity-when-trump-poor / force-when-ahead; follow: force-early / equity-late).
+2. The **styled-resolver floor** (every intent ≈ Elite) is what delivers the 52% — the win is
+   *resolver-floored*, not *selection-driven*. Phase-1 + the floor converge to the same attractor
+   regardless of how good the Phase-0 labels are (F-Val 47% vs the 70.8% RF follow ceiling).
+
+### Problem 11 — The resolver floor is a double-edged sword (the real strength ceiling)
+The styled resolver that removed the 30% collapse basin (Chapter 1) also makes the three intents
+nearly equivalent in game fitness — so there is **little gradient to learn precise intent selection**,
+and the net collapses to the simplest policy the resolver floors to Elite. The measured ceiling for
+*perfect* 3-intent selection is only **58%** (the styled best-of-3 oracle, Problem 1); we are at 52%.
+To exceed ~52% by *learned* play, the bottleneck is now belief features (follow EFFICIENT-vs-EQUITY
+separability — Problem 8) and/or **more-differentiated intents** so selection actually matters, not a
+better teacher.
+
+### Net of Chapter 2
+- ✅ Supra-Elite teacher built (62% vs Elite), cheaply; dataset gen ~1000× faster. Problem 7 closed.
+- ➖ Strength unchanged (52%): the cap is features/selection, not teacher quality.
+- ✅✅ **Interpretability: a 4.5×-smaller champion at iso-strength, with human-readable rules in both
+  brains** — a direct win for the project's core thesis. This is the headline result of Chapter 2.
+- The teacher remains valuable as a dense label source for distillation (Stage 2).
