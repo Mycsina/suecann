@@ -8,31 +8,34 @@ import numpy as np
 
 INTENT_NAMES = {
     0: "MAX_FORCE",
-    1: "MIN_FORCE",
-    2: "EFFICIENT_WIN",
-    3: "EQUITY_BUILDER",
+    1: "EFFICIENT_WIN",
+    2: "EQUITY_BUILDER",
 }
 
-EXPECTED_FEATURES = 33
+EXPECTED_FEATURES = 35
 
+# Current 35-feature belief layout (see CLAUDE.md / README belief table).
 FEATURE_NAMES = [
-    "Has_Led_Suit", "Has_Trump", "Led_Suit_Power", "Trump_Power",
+    "Has_Led_Suit", "Has_Trump", "Led_Suit_Count", "Trump_Count",
     "Hand_Point_Density", "Am_I_Leading", "Am_I_Last_To_Play",
     "Is_Partner_Winning", "Trick_Point_Value", "Has_Trick_Been_Cut",
     "Partner_Void_Led", "Partner_Void_Trump", "Any_Opp_Void_Led",
     "Any_Opp_Void_Trump", "Led_Suit_Ace_Played", "Led_Suit_7_Played",
-    "Trump_Ace_Played", "Game_Pts_Remaining", "Trick_Number",
-    "Trumps_Remaining", "Score_Delta", "Side0_Depletion",
-    "Side0_Ace_Played", "Side0_7_Played", "Side1_Depletion",
-    "Side1_Ace_Played", "Side1_7_Played", "Side2_Depletion",
-    "Side2_Ace_Played", "Side2_7_Played",
+    "Trump_Ace_Played", "Holds_Boss_Led", "Holds_Boss_Trump",
+    "Can_Beat_Winner", "Min_Winning_Cost", "Min_Sacrifice_Cost",
+    "Game_Pts_Remaining", "Trick_Number", "Trumps_Remaining", "Score_Delta",
+    "My_Void_Count", "Longest_Side_Suit", "Shortest_Side_Suit",
+    "Side0_Depletion", "Side1_Depletion", "Side2_Depletion",
     "Points_Secured_Us", "Known_Void_Suits_Count", "Depleted_Suits_Count",
 ]
 
+# Boolean (0/1) feature indices in the 35-feature layout.
 BINARY_FEATURES = {
-    0, 1, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16,
-    22, 23, 25, 26, 28, 29,
+    0, 1, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
 }
+
+# 3-intent legal mask: all three intents always resolve to a legal card -> 0b111.
+FULL_MASK = 0b111
 
 
 def load_dataset(path: str) -> dict:
@@ -66,7 +69,11 @@ def analyze(ds: dict, name: str) -> dict:
     report["n_features"] = n_features
 
     # --- Intent distribution ---
-    unique, counts = np.unique(intents, return_counts=True)
+    # `intents` is a soft (N, 3) target array; reduce to hard labels by argmax.
+    # Ties (multi-label rows) resolve to the lowest index, matching np.argmax.
+    intent_labels = intents.argmax(axis=1)
+    report["n_multi_label"] = int(np.sum(np.sum(intents > 0, axis=1) > 1))
+    unique, counts = np.unique(intent_labels, return_counts=True)
     intent_dist = {int(k): int(v) for k, v in zip(unique, counts)}
     report["intent_dist"] = intent_dist
     report["intent_pct"] = {
@@ -78,7 +85,7 @@ def analyze(ds: dict, name: str) -> dict:
     report["mask_values"] = {
         int(k): int(v) for k, v in zip(unique_masks, mask_counts)
     }
-    report["all_masks_15"] = bool(np.all(masks == 15))
+    report["all_masks_full"] = bool(np.all(masks == FULL_MASK))
 
     # --- Data quality ---
     report["has_nan"] = bool(np.any(np.isnan(states)))
@@ -106,10 +113,10 @@ def analyze(ds: dict, name: str) -> dict:
     report["n_duplicates"] = int(n_duplicates)
     report["duplicate_pct"] = round(100 * n_duplicates / n_states, 2)
 
-    # --- Per-intent feature means ---
+    # --- Per-intent feature means (by hard argmax label) ---
     per_intent_means = {}
     for intent in sorted(unique):
-        mask = intents == intent
+        mask = intent_labels == intent
         per_intent_means[int(intent)] = states[mask].mean(axis=0).tolist()
     report["per_intent_means"] = per_intent_means
 
@@ -142,8 +149,8 @@ def print_report(report: dict, name: str):
     print(f"\n  Mask Values:")
     for mask_val, count in sorted(report["mask_values"].items()):
         print(f"    0x{mask_val:02X} ({mask_val:>3})  {count:>8,}")
-    if report["all_masks_15"]:
-        print(f"    ⚠ ALL masks are 0x0F — likely HARDCODED BUG (fix not compiled)")
+    if report["all_masks_full"]:
+        print(f"    (all masks 0b111 — every intent resolves to a legal card, expected)")
 
     print(f"\n  Data Quality:")
     print(f"    NaN values:         {report['has_nan']}")
@@ -199,15 +206,16 @@ def plot_analysis(ds: dict, report: dict, name: str, out_dir: str):
     states = ds["states"]
     intents = ds["intents"]
     n_features = states.shape[1]
-    intent_labels = [INTENT_NAMES[i] for i in range(4)]
-    colors = ["#e74c3c", "#3498db", "#2ecc71", "#f39c12"]
+    intent_hard = intents.argmax(axis=1)
+    intent_labels = [INTENT_NAMES[i] for i in range(len(INTENT_NAMES))]
+    colors = ["#e74c3c", "#3498db", "#2ecc71"]
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 11))
     fig.suptitle(f"Dataset Analysis: {name}", fontsize=14, fontweight="bold")
 
     # 1. Intent distribution pie
     ax = axes[0, 0]
-    counts = [report["intent_dist"].get(i, 0) for i in range(4)]
+    counts = [report["intent_dist"].get(i, 0) for i in range(len(INTENT_NAMES))]
     wedges, texts, autotexts = ax.pie(
         counts, labels=None, colors=colors, autopct="%1.1f%%",
         startangle=90, pctdistance=0.6,
@@ -244,15 +252,15 @@ def plot_analysis(ds: dict, report: dict, name: str, out_dir: str):
     # 4. Per-intent feature heatmap (deviation from global mean)
     ax = axes[1, 0]
     global_means = np.array([
-        report["per_intent_means"][i] for i in range(4)
+        report["per_intent_means"][i] for i in range(len(INTENT_NAMES))
     ]).mean(axis=0)
     heatmap_data = np.array([
         np.array(report["per_intent_means"][i]) - global_means
-        for i in range(4)
+        for i in range(len(INTENT_NAMES))
     ])
     vmax = max(abs(heatmap_data.min()), abs(heatmap_data.max()))
     im = ax.imshow(heatmap_data, cmap="RdBu_r", aspect="auto", vmin=-vmax, vmax=vmax)
-    ax.set_yticks(range(4))
+    ax.set_yticks(range(len(INTENT_NAMES)))
     ax.set_yticklabels(intent_labels)
     ax.set_xticks(range(n_features))
     ax.set_xticklabels([f"{i}" for i in range(n_features)], fontsize=5)
@@ -293,10 +301,10 @@ def plot_analysis(ds: dict, report: dict, name: str, out_dir: str):
     fig2, axes2 = plt.subplots(2, 4, figsize=(20, 10))
     fig2.suptitle(f"Per-Intent Feature Distributions: {name}", fontsize=14, fontweight="bold")
 
-    key_features = [2, 3, 4, 17, 18, 19, 20, 5]  # Non-binary features of interest
+    key_features = [2, 3, 4, 20, 21, 26, 27, 8]  # Non-binary features of interest
     for ax, feat_idx in zip(axes2.flat, key_features):
-        for intent in range(4):
-            mask_i = intents == intent
+        for intent in range(len(INTENT_NAMES)):
+            mask_i = intent_hard == intent
             if mask_i.sum() > 0:
                 ax.hist(
                     states[mask_i, feat_idx], bins=30, alpha=0.5,
@@ -316,9 +324,8 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze expert dataset")
     parser.add_argument("npz_path", type=str, help="Path to .npz dataset file")
     parser.add_argument(
-        "--out-dir", type=str,
-        default="/home/mycsina/Projects/Uni/CAA/project/checkpoints/production/2026-05-28-2",
-        help="Output directory for plots",
+        "--out-dir", type=str, default=".",
+        help="Output directory for plots (default: current directory)",
     )
     args = parser.parse_args()
 
