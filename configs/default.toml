@@ -93,18 +93,19 @@ p_change_agg = 0.10     # Reduced from 0.15 — aggregation changes are more fre
 p_crossover = 0.50      # 0.50 is aggressive for WANNs — monitor fitness variance.
 
 [curriculum]
-# Supervised pretraining on PIMC expert dataset. Phase 0 accuracy plateaus by gen 50–100.
-phase0_gens = 100       # Reduced from 200 — the adaptive window will extend if needed.
+# Supervised pretraining on PIMC expert dataset. Extended to 150 (from 100):
+# the rollout-teacher labels are supra-Elite (62% vs Elite), so more supervised
+# bootstrap is worthwhile — it no longer just memorizes Elite-level play.
+phase0_gens = 150
 # "Bulking" = no Pareto complexity pressure for first N Phase 0 gens.
 # Lets topology grow freely before parsimony kicks in. Not traditional NEAT bulking
 # (mutation rates are NOT increased).
 bulking_gens = 50       # Reduced from 100 to match shorter Phase 0.
-# Dataset: regenerated with 35-feature belief encoder, 3-intent soft targets,
-# class-balanced (10K per intent bucket), and PIMC early termination (Welford
-# variance tracking exits when best move margin exceeds 2×SE_diff).
+# Dataset: 35-feature belief encoder, 3-intent soft targets, best-of-3-by-EV labels
+# from the flat-rollout teacher (solve_pimc_rollout, Elite playouts). 15k states.
 # Generate with:
-#   cargo run --release -- generate-dataset --n-worlds 200 --search-depth 4 --target-count 30000 --output expert_states_v3.npz
-phase0_dataset = "expert_states_v5.npz"
+#   cargo run --release -- generate-dataset --n-worlds 200 --teacher rollout --target-count 15000 --soft-balance-min-ratio 0.0 --output expert_states_v6.npz
+phase0_dataset = "expert_states_v6.npz"
 # Minimum generations per phase — prevents premature transitions from noise spikes.
 min_gens_per_phase = 20
 # Sliding window for fitness trend detection (10 gens).
