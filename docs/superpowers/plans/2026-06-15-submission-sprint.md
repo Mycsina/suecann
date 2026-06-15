@@ -125,3 +125,38 @@ Title · Problem & motivation (interpretability) · Sueca in 60s · Architecture
 - **LaTeX not compiling** → workers must iterate to a clean build; orchestrator has pdflatex/latexmk to verify.
 - **"code" naming** — criterion lists a `code` entry; our code is at repo root (`src/`, `scripts/`). Decide: keep root layout + document in README, or add a thin pointer. (Low risk; confirm with user.)
 - **Network for `llncs.cls`** — if Bash has no network, use WebFetch; fallback is a vendored copy.
+
+---
+
+## OVERNIGHT RESULTS (completed ~03:00, 2026-06-15)
+
+All four mandatory deliverables exist, compile, are committed and pushed to `origin/master`.
+
+| Deliverable | Status | Notes |
+|---|---|---|
+| README.md | ✅ | + "Reproducing the Results" section; stale recovery banner replaced with v6 status |
+| code | ✅ | Rust workspace (`src/`) + Python viz (`scripts/`); `cargo test --all` green (53 tests); top-level `Makefile` |
+| report | ✅ | `report/main.pdf`, LNCS, **11 body pages** + refs, compiles 0 errors |
+| presentation slides | ✅ | `presentation slides/slides.pdf`, Beamer/metropolis, 14 slides, 10-min split |
+
+**Workers (DeepSeek) ran:** D (figures, /semiology-of-graphics), C (README+Makefile), A (report, /scientific-writing), B (slides, both skills). All output **reviewed by orchestrator**.
+
+**Issues I caught & fixed during review (DeepSeek is not trusted on facts):**
+- Report: invented positional figure (46.0%) → softened to verified statement.
+- Report: missing `\titlerunning`/`\authorrunning` ("Title Suppressed…" header) → added.
+- Report: **technical error** — sign-edge described as `s·W·out` (negation); corrected to NOT-inversion `1−out` then ×W (matches `wann_network::forward`).
+- Verified independently: every canonical number, no undefined refs/citations, all figures present, page count in range.
+
+**Bonus fix:** real DOT-export bug (`fontname=Helvetica-Bold` unquoted) — topology graphs now render.
+
+## ⚠️ NEEDS YOU (blocking final submission)
+1. **Author names + student IDs + affiliation + course** — placeholders `TODO Author One/Two/Three`, `TODO University, TODO Course` in:
+   - `report/main.tex` lines ~39–40 (`\author`, `\institute`, and `\authorrunning`)
+   - `presentation slides/slides.tex` (title frame)
+   Then rebuild: `make report` and `make slides` (or `cd report && latexmk -pdf main.tex`).
+2. **Presenter split** — proposed in `presentation slides/OUTLINE.md` (P1 slides 1–5, P2 6–9, P3 10–13). Confirm/adjust.
+3. **"code" folder naming** — the criterion lists a `code` entry; our code lives at repo root (`src/`, `scripts/`) with README at root. Most graders read this as "the codebase," but confirm whether they want a literal `code/` folder (a restructure I did NOT do — it would churn the Cargo workspace paths; low risk to leave as-is + document).
+
+## Optional polish if time allows
+- Read `report/main.pdf` end-to-end for tone/framing once your name is on it.
+- `make bench` reproduces the 52.1% headline (a few minutes) if you want a fresh `tournament_report.csv` as evidence.
