@@ -76,26 +76,44 @@ The dataset generator uses PIMC (Perfect Information Monte Carlo) with several q
 - **Holdout set**: 10% stratified across all 6 buckets for validation accuracy tracking.
 - **Diff mode**: `--diff-mode --fixed-worlds N` for controlled label comparison between pipeline versions.
 
-Generate with:
+Generate with (the canonical v6 dataset uses the **rollout teacher** — see below):
 ```bash
 ./target/release/sueca_wann generate-dataset \
-  --n-worlds 200 --search-depth 4 --target-count 5000 \
+  --n-worlds 200 --teacher rollout --target-count 15000 \
   --seed 42 --soft-balance-min-ratio 0.0 \
-  --output expert_states_v5.npz
+  --output expert_states_v6.npz
 ```
 
-## Benchmark Results (June 14 run — `checkpoints/production/2026-06-14-1`)
+### Teacher selection (`--teacher`)
 
-**The WANN beats EliteHeuristicBot** — the first time the project has done so. Win rates as the row bot vs each column bot, 300 deals (seat-rotated):
+The `--teacher` flag chooses the EV oracle that labels each state:
+
+- `--teacher alphabeta` (default) — deep PIMC with alpha-beta + late-game minimax. Its leaf eval returns the raw team score (`state.team_02_score`), which is **myopic**: it ties Elite rather than beating it, so its labels cap imitation at ≈Elite.
+- `--teacher rollout` — flat Monte-Carlo PIMC where each determinized world is finished with **Elite playouts** (`solve_pimc_rollout`). By the rollout policy-improvement theorem (1-ply move + Elite playout ≥ Elite), this is **supra-Elite (62% vs Elite)** *and* ~1000× cheaper than deep alpha-beta — the v6 dataset (15k states) generates in ~11s. This is the canonical teacher.
+
+## Benchmark Results (June 15 — canonical champion `checkpoints/production/2026-06-14-2`, "v6")
+
+**The WANN beats EliteHeuristicBot.** Win rates as the row bot vs each column bot, **3000 deals** (seat-rotated, so the margin is statistically pinned):
 
 | Bot | RandomBot | OldHeuristicBot | EliteHeuristicBot | WANN (Champion) |
 |---|---|---|---|---|
-| **RandomBot** | 50.0% | 10.2% | 5.5% | 5.5% |
-| **OldHeuristicBot** | 89.8% | 50.0% | 33.2% | 34.8% |
-| **EliteHeuristicBot** | 94.5% | 66.8% | 50.0% | 43.8% |
-| **WANN (Champion)** | 94.5% | 65.2% | **56.2%** | 50.0% |
+| **RandomBot** | 50.0% | 10.8% | 4.7% | 5.1% |
+| **OldHeuristicBot** | 89.2% | 50.0% | 32.5% | 32.3% |
+| **EliteHeuristicBot** | 95.3% | 67.5% | 50.0% | 47.9% |
+| **WANN (Champion)** | 95.0% | 67.7% | **52.1% ± 1.8%** | 50.0% |
 
-Head-to-head vs Elite at increasing sample sizes (to pin the margin): **52.7% ± 1.8% at n=3000** (95% CI [50.9%, 54.5%], excludes 50% — a significant win), card points 60.3 vs 59.7. The narrow margin is expected: there is no supra-Elite teacher in the pipeline (even the project's own PIMC only ties Elite, since its leaf eval is myopic), so imitation caps at ≈Elite and the edge comes from the learnable follow-side duck/preserve deviation. See `problems.md` for the full diagnosis (prior champion was 30.2% vs Elite).
+Head-to-head vs Elite: **52.1% ± 1.8% at n=3000** (95% CI [50.3%, 53.9%], excludes 50% — a significant win), card points 60.2 vs 59.8.
+
+### Why this champion is the canonical one: iso-strength, 4.5× simpler
+
+The June 14 "v5" champion (`2026-06-14-1`) also beat Elite (52.7%), but it was a 132-hidden-gate tangle. The v6 champion — trained on the **rollout teacher** dataset — is **statistically the same strength** but radically smaller, and that is the headline interpretability result:
+
+| Champion | vs Elite (n=3000) | Hidden gates | Enabled connections |
+|---|---|---|---|
+| v5 (`2026-06-14-1`) | 52.7% ± 1.8% | 132 | 188 |
+| **v6 (`2026-06-14-2`)** | **52.1% ± 1.8%** | **29** (4.5× fewer) | **49** (3.8× fewer) |
+
+Both brains compile to a handful of human-readable IF/THEN steps (see `compile-rules` output). The surprising finding (full write-up in `problems.md`, Chapter 2): a **supra-Elite teacher does not raise the benchmark** — strength is *resolver-floored* (every intent resolves to an Elite-flavoured card, so the WANN can only pick *which* small deviation from Elite to apply), and the realisable headroom above the Elite floor is ≈8 points. What the stronger, cleaner teacher buys is a **simpler, genuinely interpretable champion at iso-strength**, not a stronger one. See `problems.md` for the full diagnosis (the project's first Elite-beating champion was 30.2%).
 
 ## Rust Crates
 

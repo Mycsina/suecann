@@ -69,14 +69,21 @@ Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topol
 ## Generating Expert Dataset
 
 ```bash
+# Canonical v6 dataset (rollout teacher, supra-Elite labels):
 ./target/release/sueca_wann generate-dataset \
-  --n-worlds 200 --search-depth 4 --target-count 5000 \
+  --n-worlds 200 --teacher rollout --target-count 15000 \
   --soft-balance-min-ratio 0.0 \
-  --output expert_states_v5.npz
+  --output expert_states_v6.npz
 ```
 
 Generates PIMC expert states for Phase 0 pretraining. Samples only the current player's turn (not all 4 seats) to ensure legal-move / perspective alignment.
 Outputs 35-feature belief states with 3-intent soft targets (MAX_FORCE, EFFICIENT_WIN, EQUITY_BUILDER).
+
+**Teacher (`--teacher`, June 15):** `alphabeta` (default) is the deep PIMC with a *myopic* leaf eval
+(`state.team_02_score`) — it only ties Elite, capping imitation at ≈Elite. `rollout` uses
+`solve_pimc_rollout`: flat Monte-Carlo PIMC finishing each determinized world with **Elite playouts**.
+By the rollout policy-improvement theorem (1-ply + Elite playout ≥ Elite) it is **supra-Elite (62% vs
+Elite)** and ~1000× cheaper (15k states in ~11s). The canonical v6 dataset uses `--teacher rollout`.
 
 **Labeling (June 14):** each decisive state is labeled with the intent whose *resolved card* has the
 best PIMC EV among the 3 (statistically-tied intents → uniform multi-label; all 3 tied → reject).
@@ -227,7 +234,10 @@ output 0/1/2 → style 0/1/2 and calls `select_card_styled` (EFFICIENT delegates
 EQUITY add the dials above). Because every intent shares Elite's core, each pure intent benchmarks
 ≈Elite individually (48/47/46% vs Elite, up from the old 20/37/25%) — so a policy collapse merely
 *ties* Elite while good mixing exceeds it. This raised-floor design removed the Phase-1 collapse basin
-and is what let the WANN finally beat Elite (**52.7% vs Elite, n=3000**; prior champion 30.2%).
+and is what let the WANN finally beat Elite. The canonical champion is **v6 (`2026-06-14-2`): 52.1% ±
+1.8% vs Elite, n=3000** — iso-strength with the v5 champion (52.7%) but **4.5× fewer hidden gates**
+(29 vs 132), trained on the rollout-teacher dataset (prior project champion was 30.2%). The high floor
+is double-edged: realisable headroom above Elite is only ≈8 points, so the learned overlay is small.
 
 All intents are resolved to legal plays contextually by the heuristic resolver, guaranteeing 100% legality.
 When WANN outputs tie, a random intent is chosen among the tied maximums (not deterministic argmax).
