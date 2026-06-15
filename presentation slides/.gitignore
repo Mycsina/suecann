@@ -1,0 +1,11 @@
+# LaTeX/Beamer build intermediates (keep slides.tex, slides.pdf, OUTLINE.md)
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.vrb
+*.fls
+*.fdb_latexmk
+*.synctex.gz
