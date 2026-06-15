@@ -29,45 +29,44 @@ interface Props {
 
 // ── Constants ──────────────────────────────────────────────────────
 
-const INPUT_COUNT = 33;
-const BIAS_ID = 33;
-const OUTPUT_START = 34;
-const OUTPUT_COUNT = 4;
+const INPUT_COUNT = 35;
+const BIAS_ID = 35;
+const OUTPUT_START = 36;
+const OUTPUT_COUNT = 3;
 
-const OUTPUT_LABELS = ['MAX_FORCE', 'MIN_FORCE', 'EFFICIENT_WIN', 'EQUITY_BUILDER'];
+const OUTPUT_LABELS = ['MAX_FORCE', 'EFFICIENT_WIN', 'EQUITY_BUILDER'];
 
-// Strategic meaning of each intent (shown in tooltips / hover)
+// Strategic meaning of each intent (matching the styled resolver)
 const OUTPUT_DESCRIPTIONS: string[] = [
-  'Aggressive / control: lead high trump or master card, play max-rank card to seize the trick. Favors strength and domination.',
-  'Passive / resource saving: lead your longest suit or play the lowest legal card. Conserves high cards for later tricks.',
-  'Tactical exploitation: play the minimum card that beats the current winner, or cut cheaply if void. Efficient trick-taking.',
-  'Partnership / voids: lead a short suit (signaling a void), load points onto partner\'s winner, or cut when partner is void.',
+  'MAX_FORCE — Elite + control. When trump-long: lead a low trump to draw opponents\' high trumps. Otherwise: play aggressively.',
+  'EFFICIENT_WIN — Exactly Elite. Play the cheapest winner, else cheap cut, else cheapest legal sacrifice. The strong default.',
+  'EQUITY_BUILDER — Elite + tempo. Lead shortest side-suit to build a void; duck cheap tricks (≤2 pts) when not last; preserve trump.',
 ];
 
-// Full feature names matching the Rust FEATURE_NAMES array
+// Full feature names matching the Rust FEATURE_NAMES array (35 features, redesigned)
 const FEATURE_NAMES: string[] = [
-  'Has_Led_Suit', 'Has_Trump', 'Led_Suit_Power', 'Trump_Power',
+  'Has_Led_Suit', 'Has_Trump', 'Led_Suit_Count', 'Trump_Count',
   'Hand_Point_Density', 'Am_I_Leading', 'Am_I_Last_To_Play', 'Is_Partner_Winning',
   'Trick_Point_Value', 'Has_Trick_Been_Cut', 'Partner_Void_Led', 'Partner_Void_Trump',
   'Any_Opp_Void_Led', 'Any_Opp_Void_Trump', 'Led_Suit_Ace_Played', 'Led_Suit_7_Played',
-  'Trump_Ace_Played', 'Game_Pts_Remaining', 'Trick_Number', 'Trumps_Remaining',
-  'Score_Delta', 'Side0_Depletion', 'Side0_Ace_Played', 'Side0_7_Played',
-  'Side1_Depletion', 'Side1_Ace_Played', 'Side1_7_Played', 'Side2_Depletion',
-  'Side2_Ace_Played', 'Side2_7_Played', 'Points_Secured_Us', 'Known_Void_Suits_Count',
-  'Depleted_Suits_Count',
+  'Trump_Ace_Played', 'Holds_Boss_Led', 'Holds_Boss_Trump', 'Can_Beat_Winner',
+  'Min_Winning_Cost', 'Min_Sacrifice_Cost', 'Game_Pts_Remaining', 'Trick_Number',
+  'Trumps_Remaining', 'Score_Delta', 'My_Void_Count', 'Longest_Side_Suit',
+  'Shortest_Side_Suit', 'Side0_Depletion', 'Side1_Depletion', 'Side2_Depletion',
+  'Points_Secured_Us', 'Known_Void_Suits_Count', 'Depleted_Suits_Count',
 ];
 
-// Human-readable descriptions for each belief input (matching CLAUDE.md spec)
+// Human-readable descriptions for each belief input (matching current 35-feature design)
 const FEATURE_DESCRIPTIONS: string[] = [
   'Do I hold at least one card of the led suit? (bool)',
   'Do I hold at least one trump card? (bool)',
-  'Strength of my strongest card in the led suit (max rank / 9)',
-  'Strength of my strongest trump card (max rank / 9)',
-  'Points in my hand ÷ remaining unplayed game points',
+  'Cards I hold in the led suit ÷ 10.0 (float)',
+  'Trump cards I hold ÷ 10.0 (float)',
+  'Points in my hand ÷ unplayed game points (float)',
   'Am I the first player to act in this trick? (bool)',
   'Am I the last player to act in this trick (4th seat)? (bool)',
   'Is my partner currently winning the trick? (bool)',
-  'Total point value of cards already played into this trick ÷ 44',
+  'Total point value of cards already played into this trick ÷ 44.0 (float)',
   'Has someone already played trump on a non-trump lead? (bool)',
   'Is my partner known to be void in the led suit? (bool)',
   'Is my partner known to be void in trump? (bool)',
@@ -76,22 +75,24 @@ const FEATURE_DESCRIPTIONS: string[] = [
   'Has the Ace of the led suit already been played? (bool)',
   'Has the 7 (manilha) of the led suit already been played? (bool)',
   'Has the Ace of trumps already been played? (bool)',
-  'Fraction of total game points still unplayed (unplayed / 120)',
-  'Which trick are we on? (0–9 normalized to 0–1)',
-  'How many trump cards are still unplayed? (count / 10)',
-  'Score difference: (our_pts − opp_pts + 120) / 240. 0.5 = tied',
-  'Fraction of side-suit 0 cards already played (depletion)',
-  'Has the Ace of side-suit 0 already been played? (bool)',
-  'Has the 7 (manilha) of side-suit 0 already been played? (bool)',
-  'Fraction of side-suit 1 cards already played (depletion)',
-  'Has the Ace of side-suit 1 already been played? (bool)',
-  'Has the 7 (manilha) of side-suit 1 already been played? (bool)',
-  'Fraction of side-suit 2 cards already played (depletion)',
-  'Has the Ace of side-suit 2 already been played? (bool)',
-  'Has the 7 (manilha) of side-suit 2 already been played? (bool)',
-  'Game points our team has already secured (locked in) ÷ 120',
-  'How many suits have at least one known-void player? (count / 4)',
-  'How many suits have been fully exhausted (all 10 cards played)? (count / 4)',
+  'Do I hold the highest unplayed card in the led suit? (bool)',
+  'Do I hold the highest unplayed card in trump? (bool)',
+  'Can any of my legal cards beat the current trick winner? (bool)',
+  'Points of my cheapest winning card ÷ 11.0 (0 if cannot win)',
+  'Points of my cheapest legal card ÷ 11.0 (sacrifice cost)',
+  'Unplayed card points remaining ÷ 120.0 (float)',
+  'Current trick index ÷ 9.0 (float)',
+  'Unplayed trump cards ÷ 10.0 (float)',
+  '(our pts − opp pts + 120) ÷ 240.0; 0.5 = tied (float)',
+  'Number of suits I am void in ÷ 3.0 (float)',
+  'Max cards I hold in any non-trump, non-led suit ÷ 10.0 (float)',
+  'Min cards I hold in any non-trump, non-led suit ÷ 10.0 (float)',
+  'Fraction of side-suit 0 cards already played (float)',
+  'Fraction of side-suit 1 cards already played (float)',
+  'Fraction of side-suit 2 cards already played (float)',
+  'Game points our team has already secured ÷ 120.0 (float)',
+  'Suits where any player is known void ÷ 4.0 (float)',
+  'Fully-depleted suits (all 10 cards played) ÷ 4.0 (float)',
 ];
 
 // Short labels derived from feature names for the SVG

@@ -238,7 +238,7 @@ pub fn generate_dataset(config: &DatasetConfig, resume: bool) {
 
         batch_seed += batch_size as u64;
 
-        if batches % 1 == 0 {
+        if batches % 10 == 0 {
             let total: usize = class_counts.iter().sum();
             let lead_pct = if batch_rejects.lead_primary + batch_rejects.follow_primary > 0 {
                 100.0 * batch_rejects.lead_primary as f64
