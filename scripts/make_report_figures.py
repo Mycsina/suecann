@@ -34,6 +34,8 @@ CSV = os.path.join(ROOT, "checkpoints", "production", "2026-06-14-2",
 # ── Okabe-Ito colourblind-safe palette ──────────────────────────────────
 C_WANN       = "#0072B2"   # blue          — WANN / champion (primary)
 C_WANN_ALT   = "#56B4E9"   # sky blue      — WANN (secondary)
+C_LEAD        = "#0072B2"   # blue          — LEAD brain
+C_FOLLOW      = "#D55E00"   # vermilion     — FOLLOW brain (distinct from lead)
 C_ELITE      = "#D55E00"   # vermilion     — Elite / strongest opponent
 C_BASELINE   = "#E69F00"   # orange        — mid-tier baseline
 C_GREEN      = "#009E73"   # bluish green  — weak baseline / accent
@@ -83,9 +85,9 @@ def training_curve():
              ha="left", va="top")
 
     ax0.plot(p0.generation, p0.lead_val_acc,
-             color=C_WANN, lw=1.8)
+             color=C_LEAD, lw=1.4)
     ax0.plot(p0.generation, p0.follow_val_acc,
-             color=C_WANN_ALT, lw=1.8)
+             color=C_FOLLOW, lw=1.4)
 
     # Chance reference line with label
     ax0.axhline(1/3, ls="--", color=C_REFERENCE, lw=0.8, zorder=2)
@@ -95,8 +97,8 @@ def training_curve():
 
     # Direct labels at the right edge of each curve
     for col, color, name in [
-        ("lead_val_acc",   C_WANN,     "lead"),
-        ("follow_val_acc", C_WANN_ALT, "follow"),
+        ("lead_val_acc",   C_LEAD,     "lead"),
+        ("follow_val_acc", C_FOLLOW,   "follow"),
     ]:
         y_end = p0[col].iloc[-1]
         ax0.annotate(name, xy=(p0.generation.iloc[-1], y_end),
@@ -123,9 +125,9 @@ def training_curve():
              ha="left", va="top")
 
     ax1.plot(p1.generation, p1.lead_best_fitness,
-             color=C_WANN, lw=1.8)
+             color=C_LEAD, lw=1.4)
     ax1.plot(p1.generation, p1.follow_best_fitness,
-             color=C_WANN_ALT, lw=1.8)
+             color=C_FOLLOW, lw=1.4)
 
     # Zero reference (HeuristicBot parity)
     ax1.axhline(0, ls="--", color=C_REFERENCE, lw=0.8, zorder=2)
@@ -139,8 +141,8 @@ def training_curve():
     lo, hi = sorted(ends, key=ends.get)
     dy = {lo: -8, hi: 8}
     for col, color, name in [
-        ("lead_best_fitness",   C_WANN,     "lead"),
-        ("follow_best_fitness", C_WANN_ALT, "follow"),
+        ("lead_best_fitness",   C_LEAD,     "lead"),
+        ("follow_best_fitness", C_FOLLOW,   "follow"),
     ]:
         y_end = p1[col].iloc[-1]
         ax1.annotate(name, xy=(p1.generation.iloc[-1], y_end),
@@ -191,15 +193,15 @@ def tournament():
     ax.set_ylabel("WANN Champion Win Rate  (%)")
     ax.set_title("WANN Champion vs Baselines  (n = 3000, seat-rotated)",
                  fontweight="bold", pad=10)
-    ax.set_ylim(0, 108)
+    ax.set_ylim(0, 115)
 
     # Direct labels: win rate + CI on each bar
     for bar, w, e in zip(bars, win, err):
         cx = bar.get_x() + bar.get_width() / 2
         top = bar.get_height()
-        ax.text(cx, top + e + 3.8, f"{w:.1f} %",
+        ax.text(cx, top + e + 6.0, f"{w:.1f} %",
                 ha="center", fontsize=11, fontweight="bold")
-        ax.text(cx, top + e + 1.2, f"±{e:.1f} pp",
+        ax.text(cx, top + e + 2.0, f"±{e:.1f} pp",
                 ha="center", fontsize=7.5, color=C_REFERENCE)
 
     # X-axis labels are self-explanatory → no legend needed
@@ -272,7 +274,101 @@ def complexity():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  Slide-only figures — single-panel, larger, distinct lead/follow colours
+# ══════════════════════════════════════════════════════════════════════════
+
+def training_phase0_slide():
+    """Phase 0 only — single panel, larger, for presentation slide."""
+    df = pd.read_csv(CSV)
+    p0 = df[df.generation < PHASE0_END]
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.axvspan(p0.generation.min(), p0.generation.max(),
+               facecolor="#E8F4FD", zorder=0)
+
+    ax.plot(p0.generation, p0.lead_val_acc, color=C_LEAD, lw=1.2)
+    ax.plot(p0.generation, p0.follow_val_acc, color=C_FOLLOW, lw=1.2)
+
+    ax.axhline(1/3, ls="--", color=C_REFERENCE, lw=0.8, zorder=2)
+    ax.text(p0.generation.iloc[-1] + 2, 1/3 + 0.008,
+            "chance (⅓)", fontsize=8, color=C_REFERENCE,
+            ha="right", va="bottom")
+
+    for col, color, name in [
+        ("lead_val_acc",   C_LEAD,   "lead"),
+        ("follow_val_acc", C_FOLLOW, "follow"),
+    ]:
+        y_end = p0[col].iloc[-1]
+        ax.annotate(name, xy=(p0.generation.iloc[-1], y_end),
+                     xytext=(8, 0), textcoords="offset points",
+                     fontsize=9, color=color, va="center", fontweight="bold",
+                     clip_on=False)
+
+    ax.set_title("Phase 0 — Supervised Bootstrap", fontweight="bold", pad=10,
+                 fontsize=13)
+    ax.set_xlabel("Generation", fontsize=11)
+    ax.set_ylabel("Validation Accuracy", fontsize=11)
+    ax.set_xlim(p0.generation.min(), p0.generation.max() + 18)
+    ax.set_ylim(0.18, 0.65)
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0, decimals=0))
+    ax.grid(axis="y", color=C_GRID, lw=0.4, alpha=0.6)
+
+    fig.tight_layout(pad=2.0)
+    out = os.path.join(FIG, "training_phase0.pdf")
+    fig.savefig(out)
+    plt.close(fig)
+    print("wrote", out)
+
+
+def training_phase1_slide():
+    """Phase 1 only — single panel, larger, for presentation slide."""
+    df = pd.read_csv(CSV)
+    p1 = df[df.generation >= PHASE0_END]
+
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    ax.axvspan(p1.generation.min(), p1.generation.max(),
+               facecolor="#FFF3E0", zorder=0)
+
+    ax.plot(p1.generation, p1.lead_best_fitness, color=C_LEAD, lw=1.2)
+    ax.plot(p1.generation, p1.follow_best_fitness, color=C_FOLLOW, lw=1.2)
+
+    ax.axhline(0, ls="--", color=C_REFERENCE, lw=0.8, zorder=2)
+    ax.text(p1.generation.iloc[0] + 4, 0.12,
+            "HeuristicBot parity", fontsize=8, color=C_REFERENCE,
+            ha="left", va="bottom")
+
+    ends = {"lead": p1.lead_best_fitness.iloc[-1],
+            "follow": p1.follow_best_fitness.iloc[-1]}
+    lo, hi = sorted(ends, key=ends.get)
+    dy = {lo: -10, hi: 10}
+    for col, color, name in [
+        ("lead_best_fitness",   C_LEAD,   "lead"),
+        ("follow_best_fitness", C_FOLLOW, "follow"),
+    ]:
+        y_end = p1[col].iloc[-1]
+        ax.annotate(name, xy=(p1.generation.iloc[-1], y_end),
+                     xytext=(8, dy[name]), textcoords="offset points",
+                     fontsize=9, color=color, va="center", fontweight="bold",
+                     clip_on=False)
+
+    ax.set_title("Phase 1 — Co-evolutionary Self-play", fontweight="bold",
+                 pad=10, fontsize=13)
+    ax.set_xlabel("Generation", fontsize=11)
+    ax.set_ylabel("Best Fitness  (Δ game-points vs HeuristicBot)", fontsize=11)
+    ax.set_xlim(p1.generation.min(), p1.generation.max() + 35)
+    ax.grid(axis="y", color=C_GRID, lw=0.4, alpha=0.6)
+
+    fig.tight_layout(pad=2.0)
+    out = os.path.join(FIG, "training_phase1.pdf")
+    fig.savefig(out)
+    plt.close(fig)
+    print("wrote", out)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     training_curve()
+    training_phase0_slide()
+    training_phase1_slide()
     tournament()
     complexity()

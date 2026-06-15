@@ -13,6 +13,8 @@
 \usepackage{xcolor}
 \usepackage{tikz}
 \usepackage{array}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,urlcolor=blue!60}
 
 % === lstlisting style for compiled rules ===
 \lstset{
@@ -81,6 +83,7 @@
 \begin{frame}{Sueca's distinctive rules create a rich strategic texture}
   \begin{columns}[T]
     \column{0.50\textwidth}
+      \centering
       \textbf{Table layout} {\footnotesize\textit{(4 players, 2 teams)}}\\[4pt]
       \begin{tikzpicture}[scale=0.80]
         % Table
@@ -90,8 +93,8 @@
         \node[circle,draw,fill=red!30,inner sep=0pt,minimum size=22pt] (S3) at (-2.4,0) {3};
         \node[circle,draw,fill=blue!30,inner sep=0pt,minimum size=22pt] (S2) at (0,-1.8) {2};
         \node[circle,draw,fill=red!30,inner sep=0pt,minimum size=22pt] (S1) at (2.4,0) {1};
-        \draw[<-,thick,blue!60] (S0) -- (S2) node[midway,right,blue] {team};
-        \draw[<-,thick,red!60] (S1) -- (S3) node[midway,below,red] {team};
+        \draw[<-,thick,blue!60] (S0) -- (S2) node[midway,left,blue] {team};
+        \draw[<-,thick,red!60] (S1) -- (S3) node[midway,above,red] {team};
         % Turn order
         \draw[->,dashed,gray] (S0) -- (S3) node[midway,above,font=\tiny] {ccw};
         \draw[->,dashed,gray] (S3) -- (S2);
@@ -182,30 +185,67 @@
 \end{frame}
 
 % ======================================================================
-% SLIDE 6 — Training Pipeline
+% SLIDE 5b — What each intent means in game terms
 % ======================================================================
-\begin{frame}{Training bootstraps on expert demonstrations then switches to co-evolutionary self-play}
-  \centering
-  \includegraphics[width=0.78\textwidth,height=0.42\textheight,keepaspectratio]{../report/figures/training_curve.pdf}
-  \vspace{4pt}
+\begin{frame}{Three play intents: styled deviations around a strong Elite policy}
   \begin{columns}[T]
-    \column{0.50\textwidth}
+    \column{0.33\textwidth}
       \centering
-      \textbf{Phase 0 (gens 0--149)}\\
-      \scriptsize
-      Supervised pretraining on PIMC data\\
-      PFS-NEAT from \textbf{zero} connections\\
-      Split: \textit{lead} vs.\ \textit{follow} datasets\\
-      Adaptive 2-stage mutation filter
-    \column{0.50\textwidth}
+      \begin{block}{\centering\textbf{MAX\_FORCE}}
+        \footnotesize
+        Elite + \textbf{control}.\\[4pt]
+        When trump-long: lead a \textbf{low trump} to draw opponents' high trumps.\\[4pt]
+        Otherwise: play \textbf{aggressively}.\\[4pt]
+        \textit{``I have trump length --- let me thin their trumps.''}
+      \end{block}
+    \column{0.33\textwidth}
       \centering
-      \textbf{Phase 1 (gens 150--599)}\\
-      \scriptsize
-      Co-evolutionary self-play\\
-      Dynamic per-decision brain routing\\
-      Delta-fitness with CRN\\
-      HOF + MAP-Elites opponent pools
+      \begin{block}{\centering\textbf{EFFICIENT\_WIN}}
+        \footnotesize
+        \textbf{Exactly} Elite.\\[4pt]
+        Play the \textbf{cheapest} card that wins the trick.\\[4pt]
+        If you can't win: cheapest legal sacrifice.\\[4pt]
+        \textit{``Win cheap, lose cheap.''}
+      \end{block}
+    \column{0.33\textwidth}
+      \centering
+      \begin{block}{\centering\textbf{EQUITY\_BUILDER}}
+        \footnotesize
+        Elite + \textbf{tempo}.\\[4pt]
+        Lead \textbf{shortest} side-suit (build a void for later cuts).\\[4pt]
+        \textbf{Duck} cheap tricks ($\leq$2 pts) when not last to play.\\[4pt]
+        \textit{``I'll save my points and build void threats.''}
+      \end{block}
   \end{columns}
+  \vspace{8pt}
+  \centering
+  \footnotesize
+  Each intent shares Elite's core; each benchmarks $\approx$Elite individually.\\
+  The WANN's job is to choose \textbf{when} to deviate, not \textbf{how} to play.
+\end{frame}
+
+% ======================================================================
+% SLIDE 6a — Phase 0: Supervised Bootstrap
+% ======================================================================
+\begin{frame}{Phase 0: supervised bootstrap on PIMC expert data, starting from zero connections}
+  \centering
+  \includegraphics[width=\textwidth,height=0.72\textheight,keepaspectratio]{../report/figures/training_phase0.pdf}
+
+  \vspace{2pt}
+  {\footnotesize PFS-NEAT from \textbf{zero} connections. Dataset split by \texttt{Am\_I\_Leading} into lead/follow.
+   Adaptive 2-stage mutation filter.}
+\end{frame}
+
+% ======================================================================
+% SLIDE 6b — Phase 1: Co-evolutionary Self-play
+% ======================================================================
+\begin{frame}{Phase 1: co-evolutionary self-play with dynamic per-decision brain routing}
+  \centering
+  \includegraphics[width=\textwidth,height=0.72\textheight,keepaspectratio]{../report/figures/training_phase1.pdf}
+
+  \vspace{2pt}
+  {\footnotesize Lead and follow brains co-evolve. Dynamic routing via \texttt{Am\_I\_Leading} flag.
+   Delta-fitness with CRN. HOF + MAP-Elites opponent pools.}
 \end{frame}
 
 % ======================================================================
@@ -454,7 +494,8 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
   \vspace{4pt}
   \begin{center}
     \small\textbf{React + WASM}: Rust game engine compiled to WebAssembly\\
-    Play Sueca against the WANN, watch the logic flow in real time.
+    Play Sueca against the WANN, watch the logic flow in real time.\\[2pt]
+    \scriptsize\url{https://github.com/andre-csilva/sueca-wann}
   \end{center}
 \end{frame}
 
@@ -492,7 +533,8 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
   \end{columns}
   \vspace{4pt}
   \centering
-  \textbf{Competitive, interpretable card-play AI is possible: the rules fit on one slide.}
+  \textbf{Competitive, interpretable card-play AI is possible: the rules fit on one slide.}\\[4pt]
+  {\footnotesize\url{https://github.com/andre-csilva/sueca-wann}}
 \end{frame}
 
 % ======================================================================
@@ -510,13 +552,13 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
     Reisinger et al.\ 2004 & Coevolving modular (L-NEAT)\\
     \bottomrule
   \end{tabular}
-  \vspace{12pt}
+  \vspace{14pt}
   \textbf{Reproducibility}\\[4pt]
   \scriptsize
   All commands in \texttt{README.md}\\
   Canonical champion: \texttt{checkpoints/production/2026-06-14-2/}\\
   \texttt{cargo build -p sueca\_wann --release \&\& cargo test --all}
-  \vspace{10pt}
+  \vspace{6pt}
   \begin{center}
     \normalsize André Cardoso\\
     \small DETI, Universidade de Aveiro

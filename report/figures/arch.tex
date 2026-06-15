@@ -37,13 +37,13 @@
 ]
 
 % === Stage 1: Belief State ===
-\node[widebox, belief] (belief) {
+\node[widebox, belief, minimum height=14mm] (belief) {
   \textbf{Belief State}\\[1pt]
   \footnotesize 35 public-info features $\in [0,1]$
 };
 
 % === Stage 2: WANN ===
-\node[widebox, wann, right=of belief] (wann) {
+\node[widebox, wann, right=of belief, minimum height=14mm] (wann) {
   \textbf{WANN}\\[1pt]
   \begin{minipage}{26mm}\centering\tiny
   Logic gates: SUM/AND/OR\\
@@ -53,7 +53,7 @@
 };
 
 % === Stage 3: Intents ===
-\node[narrowbox, intent, right=of wann] (intents) {
+\node[narrowbox, intent, right=of wann, minimum height=14mm] (intents) {
   \textbf{3 Intents}\\[1pt]
   \footnotesize MAX\_FORCE\\
   \footnotesize EFFICIENT\_WIN\\
@@ -79,7 +79,7 @@
 \draw[arrow] (resolver) -- (card);
 
 % === Annotation: WANN internals ===
-\node[label, below=2mm of wann.south, align=center] {
+\node[label, below=8mm of wann.south, align=center] {
   \footnotesize sign-only weights $\pm{}1$, swept at $\{-2,-1,-0.5,0.5,1,2\}$
 };
 
