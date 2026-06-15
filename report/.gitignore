@@ -1,0 +1,10 @@
+# LaTeX build intermediates (keep main.tex, main.pdf, figures, bib, cls/bst)
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.toc
