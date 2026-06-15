@@ -36,10 +36,9 @@ Logic Networks: A Neurosymbolic Agent for Sueca}
 \titlerunning{Interpretable WANN Strategies for Sueca}
 % ======================================================================
 
-% TODO: Authors and affiliation — user to fill in
-\author{TODO Author One\inst{1} \and TODO Author Two\inst{1} \and TODO Author Three\inst{1}}
-\authorrunning{TODO Author One et al.}
-\institute{TODO University, TODO Course}
+\author{André Cardoso\inst{1}}
+\authorrunning{André Cardoso}
+\institute{Departamento de Eletrónica, Telecomunicações e Informática, Universidade de Aveiro, Portugal}
 
 \maketitle
 
@@ -56,12 +55,13 @@ styled heuristic resolver maps to a legal card. Training is two-phase:
 supervised bootstrap on a Perfect-Information Monte Carlo (PIMC) expert dataset
 using PFS-NEAT starting from zero connections, then co-evolutionary self-play
 of separate \textbf{lead} and \textbf{follow} brains. A key contribution is a
-cheap \textbf{supra-Elite rollout teacher} (flat Monte-Carlo PIMC with Elite
-playouts, achieving 62\% vs.\ the strong heuristic) that labels the pretraining
-dataset $\sim$1000$\times$ faster than deep alpha-beta search. The champion
-\textbf{beats the EliteHeuristic baseline 52.1\% $\pm$ 1.8\% ($n=3000$)} and,
+cheap rollout teacher that is \textbf{stronger than our hand-crafted heuristic
+baseline} (which we call \emph{Elite}): it determinizes hidden cards and finishes
+each world with Elite playouts, reaching 62\% against Elite while labeling the
+pretraining dataset $\sim$1000$\times$ faster than a deep alpha-beta search. The champion
+\textbf{beats Elite on 52.1\% $\pm$ 1.8\% of deals ($n=3000$)} and,
 crucially, compiles to a handful of \textbf{human-readable IF/THEN rules} via
-verified constant-folding and alias inlining --- the follow brain reduces to 5
+verified constant-folding and alias inlining: the follow brain reduces to 5
 logic gates at depth 5. We give an honest analysis of the \emph{resolver-floor}
 ceiling that limits realisable strength ($\approx$58\% oracle cap) and the
 resulting interpretability-vs-strength trade-off.
@@ -90,7 +90,7 @@ Most strong card-playing AIs are black boxes. Deep PIMC solvers and neural
 policy networks achieve superhuman play in Bridge and Skat, but the resulting
 strategies are opaque matrices of floating-point weights. Our thesis is
 different: can we obtain \emph{competitive} play that is simultaneously
-\emph{human-auditable} --- extractable as short IF/THEN rules that a player can
+\emph{human-auditable}, extractable as short IF/THEN rules that a player can
 read, verify, and learn from? The agent architecture we design to test this is,
 in one line:
 
@@ -103,19 +103,36 @@ Weight-Agnostic Neural Networks~\cite{gaier2019wann} are evolved topologies
 whose connections share a single weight value swept at evaluation. We
 deliberately restrict the node primitives to \emph{logical gates} (AND, OR,
 NOT, threshold) rather than continuous activations precisely because discrete
-logic compiles to Boolean-ish rules. This neurosymbolic commitment --- logic
-gates, not learned weights --- is what makes the compiled output
+logic compiles to Boolean-ish rules. This neurosymbolic commitment, logic
+gates rather than learned weights, is what makes the compiled output
 \emph{interpretable} rather than merely inspectable.
+
+We benchmark against a ladder of three non-learned opponents of increasing
+strength: a uniform-random player (\emph{RandomBot}); an earlier rule-based bot
+(\emph{OldHeuristic}); and a strong hand-crafted heuristic we call \emph{Elite},
+which plays the cheapest card that wins the trick, cuts cheaply with trump when
+void, and otherwise discards its least valuable legal card. Elite is the bar to
+beat: it already defeats OldHeuristic roughly two times in three, and no prior
+version of our agent had matched it.
+
+Two obstacles had kept every earlier version of this agent below the Elite bar,
+and naming them up front motivates our contributions. First, the abstract intent
+vocabulary \emph{collapsed} during self-play: because the three intents were each
+individually weak, training drove the network toward one dominant intent while
+the others atrophied, leaving the best prior agent at only 30.2\% against Elite.
+Second, the natural supervised teacher, a deep alpha-beta PIMC search, itself
+only \emph{tied} Elite, so imitating it could never exceed Elite. We diagnose
+both in Sections~\ref{sec:method} and~\ref{sec:results}; the four contributions
+below are the two fixes and what they revealed.
 
 We make four contributions:
 
 \begin{enumerate}
-\item A neurosymbolic Sueca agent that \textbf{beats a strong heuristic
-  baseline} (52.1\% $\pm$ 1.8\%, $n=3000$) while remaining interpretable ---
-  the first time this project has exceeded EliteHeuristicBot (previous best:
-  30.2\%).
+\item A neurosymbolic Sueca agent that \textbf{beats Elite} (52.1\% $\pm$ 1.8\%,
+  $n=3000$) while remaining interpretable: the first agent in this project to
+  exceed Elite, up from the 30.2\% of the collapsed predecessor described above.
 \item A cheap \textbf{rollout policy-improvement teacher} achieving 62\% vs.\
-  Elite ($\sim$1000$\times$ faster than deep alpha-beta) --- and the diagnosis
+  Elite ($\sim$1000$\times$ faster than deep alpha-beta), together with the diagnosis
   that it was the deep search's \emph{myopic leaf evaluator}, not its depth,
   that capped earlier datasets at Elite-level imitation.
 \item \textbf{Verified post-hoc rule minification} (constant-folding + alias
@@ -124,7 +141,7 @@ We make four contributions:
   compiles to 5 gates at depth 5.
 \item An \textbf{honest negative result}: the styled-resolver \emph{floor} is
   the real strength ceiling ($\approx$58\% oracle cap for perfect intent
-  selection); a stronger teacher buys \emph{simplicity}, not strength --- a
+  selection); a stronger teacher buys \emph{simplicity}, not strength, a
   finding that reframes the whole strength--interpretability narrative.
 \end{enumerate}
 
@@ -173,7 +190,7 @@ controlling bloat.
 \textbf{Rule extraction.} Most neurosymbolic rule extraction operates post-hoc
 on continuous-weight networks, producing approximations. By \emph{constraining
 the network to logic gates during evolution}, our compiled rules are
-\emph{exact} --- the computation the network performs, not an approximation.
+\emph{exact}: the computation the network performs, not an approximation.
 
 % ======================================================================
 \section{Sueca and Problem Formulation}
@@ -196,7 +213,8 @@ Each seat perceives the game as a Partially Observable Markov Decision Process
 (POMDP). The true state (all four hands) is hidden; the observation consists of
 the player's own hand plus the public history of played cards, trick outcomes,
 and exposed voids. Crucially, our belief encoder \textbf{never leaks opponent
-hand data} --- it uses only information a human player at the table can observe.
+hand data}: it uses only information a human player at the table can observe, as
+Section~3.3 makes concrete for the tactical features.
 
 \subsection{Belief State}
 
@@ -208,7 +226,7 @@ fall into five categories:\smallskip
 \item \textbf{Trick context} (5--9): leading/following/last-to-play flags,
   partner-winning indicator, trick point value, whether the trick has been cut.
 \item \textbf{Void knowledge} (10--13): partner and opponent voids in led suit
-  and trump --- the public information that constrains future play.
+  and trump, the public information that constrains future play.
 \item \textbf{Tactical affordances} (14--21): boss detection (holding the
   highest unplayed card in led suit or trump), ``can I beat the current
   winner?'', minimum winning and sacrifice costs. These features, added in a
@@ -218,6 +236,20 @@ fall into five categories:\smallskip
   remaining, score delta, void count, side-suit lengths and depletion, secured
   points, and meta-features counting known voids and depleted suits.
 \end{itemize}
+
+\textbf{Why these are public.} Every feature is a deterministic function of the
+player's own hand and the public play history, so none requires knowledge of an
+opponent's cards. \emph{Boss} detection illustrates the point. A card is the
+``boss'' of a suit when it is the highest-ranked card of that suit not yet seen
+in any completed or in-progress trick. The player computes this purely from
+cards everyone at the table can see, the pile of already-played cards together
+with its own hand; an opponent could hold a higher card of the suit only if such
+a card were still unseen, which is exactly what holding the boss rules out. The
+same reasoning covers ``can I beat the current winner?'', the cheapest winning
+and sacrifice costs, and the trump- and point-remaining counts: each compares
+the player's own legal cards against the publicly known set of played cards.
+Voids (features 10--13) are public for the same reason, since failing to follow
+suit is observed by every player at the table.
 
 The full 35-feature layout is documented in the project README; we include it
 as an appendix for reference.
@@ -231,7 +263,7 @@ a strong Elite policy}:
 
 \begin{itemize}
 \item \textbf{EFFICIENT\_WIN} (intent 1): Delegates exactly to
-  EliteHeuristicBot --- play the cheapest winner, else cheap cut, else cheapest
+  Elite: play the cheapest winner, else cheap cut, else cheapest
   legal sacrifice. This is the strong default.
 \item \textbf{MAX\_FORCE} (intent 0): Elite + control dials. When trump-long,
   lead a low trump to \emph{draw} opponents' trumps; otherwise play
@@ -245,12 +277,12 @@ a strong Elite policy}:
 The \textbf{styled resolver} (\texttt{select\_card\_styled}) maps the chosen
 intent to a legal card contextually, guaranteeing 100\% legality. Because every
 intent shares Elite's core and only adds a narrow deviation, each pure intent
-benchmarks at approximately Elite individually (48/47/46\% vs.\ Elite) --- the
+benchmarks at approximately Elite individually (48/47/46\% vs.\ Elite): the
 ``raised floor'' that eliminates the Phase-1 policy-collapse basin and is the
 architectural enabler of the final win.
 
 % ======================================================================
-\section{Method}
+\section{Method}\label{sec:method}
 % ======================================================================
 
 Figure~\ref{fig:arch} shows the full pipeline from belief state to card. The
@@ -310,7 +342,7 @@ rotations; deals are re-seeded per generation (seed = gen) to prevent overfittin
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.92\textwidth]{figures/training_curve.pdf}
-\caption{Training curves for the v6 champion. Phase~0 (generations 0--149):
+\caption{Training curves for the final champion. Phase~0 (generations 0--149):
 supervised classification accuracy on lead and follow dataset splits, starting
 from zero connections. Phase~1 (generations 150--599): co-evolutionary self-play
 fitness (game-point delta vs.\ HeuristicBot). The Phase~0$\rightarrow$1
@@ -334,7 +366,7 @@ $O(1)$ innovation fingerprint hashing.
 \subsection{The Rollout Teacher}
 
 A critical finding emerged during diagnosis: the project's deep alpha-beta PIMC
-solver only \emph{ties} EliteHeuristicBot, despite searching to depth 4 with
+solver only \emph{ties} Elite, despite searching to depth 4 with
 200 worlds. The bottleneck was not the search depth but the \textbf{myopic leaf
 evaluation}: at the depth limit, alpha-beta returns the raw points-captured-so-far
 (\texttt{state.team\_02\_score}) with no positional estimate. Deeper search
@@ -343,13 +375,13 @@ cannot fix a blind leaf.
 We implemented a separate flat Monte-Carlo solver,
 \texttt{solve\_pimc\_rollout}, that avoids the search tree entirely. Per legal
 move, it determinizes the unseen cards, plays the candidate move, then finishes
-each world with \textbf{EliteHeuristicBot in all four seats}. By the rollout
+each world with \textbf{Elite in all four seats}. By the rollout
 policy-improvement theorem (a one-ply move followed by a base policy $\pi$ is
 at least as strong as $\pi$ itself), the resulting EV estimates are
 \textbf{supra-Elite}. Empirically, the rollout teacher achieves \textbf{62.0\%
 vs.\ Elite} (where Elite self-play scores below 50\% for the first team due to
 a fixed positional disadvantage). Critically, it is also \textbf{$\sim$1000$\times$ faster}: the
-v6 dataset of 15,000 labeled states generates in approximately 11 seconds
+rollout-teacher dataset of 15,000 labeled states generates in approximately 11 seconds
 versus hours for the alpha-beta pipeline.
 
 Dataset labeling follows a best-of-three-intents protocol: each decisive state
@@ -390,13 +422,13 @@ minimise the rules without altering the network's output:
 asserts: (a) every folded constant is invariant to within $10^{-9}$, and
 (b) every alias node equals its resolved source (negation parity applied) to
 within $10^{-9}$. This means the dropped symbols provably carry no information
-the network uses --- the reader can trust the rules are exact, not an
+the network uses: the reader can trust the rules are exact, not an
 approximation.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.75\textwidth]{figures/topology_follow.pdf}
-\caption{The v6 champion's follow-brain topology before minification (17 hidden
+\caption{The final champion's follow-brain topology before minification (17 hidden
 gates, 44 connections). After constant-folding and alias inlining, the active
 logic reduces to 5 gates at depth 5 (see Listing~\ref{lst:rules}).}
 \label{fig:topology}
@@ -406,10 +438,10 @@ logic reduces to 5 gates at depth 5 (see Listing~\ref{lst:rules}).}
 \centering
 \begin{minipage}{0.95\textwidth}
 \begin{lstlisting}[
-  caption={Compiled and folded rules for the v6 champion's FOLLOW brain.
+  caption={Compiled and folded rules for the final champion's FOLLOW brain.
   MAX\_FORCE is a one-feature game-phase toggle ($2 \cdot$
   Game\_Pts\_Remaining: force early, concede late).  EFFICIENT\_WIN
-  is identically zero --- the network never delegates to pure Elite.
+  is identically zero: the network never delegates to pure Elite.
   EQUITY\_BUILDER gates on boss detection, opponent voids, trump
   count, and a threshold cascade.  The LEAD brain (not shown) compiles
   to 10 gates at depth 6.},
@@ -427,7 +459,7 @@ FOLLOW brain (compiled, folded):
 \end{minipage}
 \caption{Minified FOLLOW-brain rules. Before folding: 12 steps, max depth 10
 (7 aliases, 2 dead constants, 1 single-operand AND). After: 5 active gates,
-max depth 5. The rule semantics are strategically sensible --- see
+max depth 5. The rule semantics are strategically sensible; see
 Section~\ref{sec:discussion} for interpretation.}
 \label{fig:rules}
 \end{figure}
@@ -440,7 +472,7 @@ brain reduces from 12 to 10 gates (2 aliases inlined) at depth 6.
 
 Table~\ref{tab:complexity} quantifies the post-folding complexity of both
 brains. The key metric is not total gates but \emph{active} gates after
-removing constants, aliases, and single-operand wrappers --- these represent
+removing constants, aliases, and single-operand wrappers, which represent
 the genuine, information-carrying logic.
 
 \begin{table}[t]
@@ -461,7 +493,7 @@ Total input literals         & 10          & 5 \\
 \end{table}
 
 % ======================================================================
-\section{Experiments and Results}
+\section{Experiments and Results}\label{sec:results}
 % ======================================================================
 
 \subsection{Evaluation Protocol}
@@ -492,9 +524,9 @@ EliteHeuristicBot& 95.3 & 67.5 & 50.0 & 47.9 \\
 \end{table}
 
 Table~\ref{tab:tournament} presents the full round-robin. The WANN beats
-EliteHeuristicBot \textbf{52.1\% $\pm$ 1.8\%} ($n=3000$), 95\% CI $[50.3,
-53.9]$ --- a statistically significant win excluding 50\%. The card-point
-differential is 60.2 vs.\ 59.8. Against OldHeuristicBot the WANN achieves
+Elite \textbf{52.1\% $\pm$ 1.8\%} ($n=3000$), 95\% CI $[50.3,
+53.9]$, a statistically significant win excluding 50\%. The card-point
+differential is 60.2 vs.\ 59.8. Against OldHeuristic the WANN achieves
 67.7\% (identical to Elite's 67.5\%), and against RandomBot 95.0\%.
 
 \begin{figure}[t]
@@ -505,44 +537,44 @@ small but statistically significant at $n=3000$.}
 \label{fig:tournament}
 \end{figure}
 
-\subsection{The Journey: From Collapse to Victory}
+\subsection{From Prior Failure to the Final Champion}
 
-The project's pre-diagnosis champion achieved only \textbf{30.2\% vs.\ Elite}
-(46.3\% vs.\ OldHeuristic). The root cause, diagnosed via a fast training-free
-harness, was that the WANN had \emph{collapsed to a constant policy}:
-EFFICIENT\_WIN $\sim$80\% of the time, EQUITY\_BUILDER never used, and the
-EQUITY output node structurally unreachable from any input. The three intents
-were individually weak (20/37/25\% vs.\ Elite under the old resolver), so
-Phase-1 self-play's gradient atrophied the weaker intents.
+As introduced in Section~1, the pre-diagnosis champion reached only \textbf{30.2\%
+vs.\ Elite} (46.3\% vs.\ OldHeuristic). A fast training-free harness gave the
+collapse a concrete signature: EFFICIENT\_WIN fired $\sim$80\% of the time,
+EQUITY\_BUILDER was never used, and its output node was structurally unreachable
+from any input. Under the old resolver the three intents scored just 20/37/25\%
+vs.\ Elite individually, so self-play atrophied the weaker two.
 
 The \textbf{styled resolver} (Section~3.4) raised each pure intent to
 $\approx$Elite (48/47/46\%), removing the collapse incentive. Combined with
-best-of-three-intent labelling, this produced v5: \textbf{52.7\% $\pm$ 1.8\%}
---- the first Elite-beating result. The \textbf{rollout teacher} then replaced
-the myopic alpha-beta dataset with supra-Elite labels (62\% vs.\ Elite). The
-retrained v6 champion achieved a statistically identical \textbf{52.1\% $\pm$
-1.8\%} but with \textbf{4.5$\times$ fewer hidden gates} (29 vs.\ 132) and
+best-of-three-intent labelling, this produced the earlier
+(alpha-beta-teacher) champion at \textbf{52.7\% $\pm$ 1.8\%}, the first
+Elite-beating result. The \textbf{rollout teacher} then replaced the myopic
+alpha-beta dataset with supra-Elite labels (62\% vs.\ Elite). The retrained
+final champion achieved a statistically identical \textbf{52.1\% $\pm$ 1.8\%}
+but with \textbf{4.5$\times$ fewer hidden gates} (29 vs.\ 132) and
 3.8$\times$ fewer connections (49 vs.\ 188).
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.85\textwidth]{figures/complexity.pdf}
-\caption{Complexity comparison: v5 champion (alpha-beta teacher, 132 hidden
-gates) vs.\ v6 champion (rollout teacher, 29 gates). Iso-strength, 4.5$\times$
-simpler.}
+\caption{Complexity comparison: the earlier alpha-beta-teacher champion (132
+hidden gates) against the final rollout-teacher champion (29 gates). Equal
+playing strength, 4.5$\times$ simpler.}
 \label{fig:complexity}
 \end{figure}
 
 \subsection{Diagnostic Ceilings}
 
 We established three quantitative ceilings: (i) \textbf{3-intent oracle}
-(perfect selection): \textbf{58\%} vs.\ Elite --- the absolute cap under the
+(perfect selection): \textbf{58\%} vs.\ Elite, the absolute cap under the
 current vocabulary and resolver; (ii) \textbf{RandomForest on belief features}:
 predicting EFFICIENT\_WIN vs.\ EQUITY\_BUILDER achieves \textbf{62.6\% on lead,
 70.8\% on follow} (5-fold CV), showing the features carry signal (the WANN's
 realised F-value is $\sim$47\%); (iii) \textbf{Rollout teacher}: 62.0\% vs.\
 Elite, confirming the teacher is genuinely supra-Elite, yet the champion caps
-at $\sim$52\% --- the gap is the resolver-floor headroom.
+at $\sim$52\%: the gap is the resolver-floor headroom.
 
 % ======================================================================
 \section{Discussion}
@@ -564,7 +596,7 @@ The lead brain chooses between ``press-when-ahead'' (MAX\_FORCE) and
 ``build-voids-when-trump-poor'' (EQUITY\_BUILDER). The follow brain gates
 equity on a cascade: boss-detection $\rightarrow$ opponent-void awareness
 $\rightarrow$ trump adequacy $\rightarrow$ threshold, while MAX\_FORCE is
-simply $2\cdot\text{Game\_Pts\_Remaining}$ --- a game-phase toggle (force early,
+simply $2\cdot\text{Game\_Pts\_Remaining}$, a game-phase toggle (force early,
 concede late). The rules \emph{are} strategically sensible, but their simplicity
 reflects the weakness of the selection signal, not a minimal description of
 optimal play.
@@ -572,7 +604,7 @@ optimal play.
 \textbf{Did we just learn Elite's IF/THEN?} Substantially yes. The action space
 is Elite-floored; the WANN's job is to choose \emph{when to deviate}, and it
 learned two deviations (equity-when-trump-poor, force-when-ahead). The network
-\textbf{never outputs EFFICIENT\_WIN} --- it always applies one of the two
+\textbf{never outputs EFFICIENT\_WIN}: it always applies one of the two
 overlays. The WANN did not rediscover Elite from scratch; it learned a small
 situational overlay on a strong fixed base, and that overlay turns a 50\% tie
 into 52\%.
@@ -594,7 +626,7 @@ Can a tiny logic circuit learn to \emph{infer opponent cards} from
 assumed-optimal play using only public information? The belief state encodes
 voids and depletion but not explicit opponent-hand hypotheses (e.g.\ ``partner
 probably holds the diamond Ace''). Humans routinely make such inferences; a
-WANN with richer inference features might do the same --- a path to break the
+WANN with richer inference features might do the same, a path to break the
 58\% oracle cap via better intent discrimination.
 
 % ======================================================================
@@ -602,9 +634,9 @@ WANN with richer inference features might do the same --- a path to break the
 % ======================================================================
 
 We evolved an interpretable, Elite-beating Sueca agent with a verified pipeline
-from weight-agnostic logic networks to human-readable IF/THEN rules. The v6
-champion compiles to 5 follow-brain logic gates at depth 5 --- a
-4.5$\times$ compression over v5 at iso-strength (52.1\% vs.\ Elite). The keys
+from weight-agnostic logic networks to human-readable IF/THEN rules. The final
+champion compiles to 5 follow-brain logic gates at depth 5, a 4.5$\times$
+compression over the earlier champion at equal strength (52.1\% vs.\ Elite). The keys
 were a styled resolver that raised each intent's floor to Elite and a rollout
 teacher whose supra-Elite labels produced a simpler, more interpretable
 champion without improving strength.
@@ -615,8 +647,8 @@ unseen hands; (3) \textbf{knowledge distillation} into a smaller student for the
 full strength--interpretability Pareto frontier; (4) \textbf{connection pruning}
 of the genome beyond post-hoc rule folding.
 
-The core finding --- a stronger teacher produces a \emph{simpler} model at the
-same strength, not a stronger one, when the action space is floor-bounded ---
+The core finding, that a stronger teacher produces a \emph{simpler} model at the
+same strength rather than a stronger one when the action space is floor-bounded,
 is likely to recur in neurosymbolic systems where a strong hand-authored base
 policy constrains the learned overlay: teacher quality governs
 interpretability, not performance.

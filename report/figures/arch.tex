@@ -4,7 +4,7 @@
 
 \begin{document}
 \begin{tikzpicture}[
-    node distance=6mm and 8mm,
+    node distance=6mm and 11mm,
     box/.style={
       draw, thick, rounded corners=3pt,
       minimum width=22mm, minimum height=10mm,
@@ -57,7 +57,8 @@
   \textbf{3 Intents}\\[1pt]
   \footnotesize MAX\_FORCE\\
   \footnotesize EFFICIENT\_WIN\\
-  \footnotesize EQUITY\_BUILDER
+  \footnotesize EQUITY\_BUILDER\\[2pt]
+  {\tiny\itshape each $\approx$ Elite floor}
 };
 
 % === Stage 4: Resolver ===
@@ -85,11 +86,6 @@
 % === Annotation: resolver guarantee ===
 \node[label, below=2mm of resolver.south, align=center, font=\footnotesize\sffamily] {
   100\% legality
-};
-
-% === Annotation: each intent ≈ Elite ===
-\node[label, above=0mm of intents.north, align=center] {
-  \footnotesize each $\approx$ Elite floor
 };
 
 % === Braces for phases ===

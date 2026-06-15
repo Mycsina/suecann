@@ -3,8 +3,8 @@
 
 Outputs (into report/figures/):
   - training_curve.pdf : Phase-0 supervised val-accuracy + Phase-1 self-play fitness
-  - tournament.pdf     : v6 champion win% vs each opponent (n=3000), with 95% CIs
-  - complexity.pdf     : v5 vs v6 network/rule complexity
+  - tournament.pdf     : WANN champion win% vs each opponent (n=3000), with 95% CIs
+  - complexity.pdf     : earlier vs final champion complexity
 
 All numbers are the canonical, verified results (see problems.md / README).
 Run: uv run python scripts/make_report_figures.py
@@ -78,9 +78,9 @@ def training_curve():
     # Phase-region shading (subtle, behind data)
     ax0.axvspan(p0.generation.min(), p0.generation.max(),
                 facecolor="#E8F4FD", zorder=0)
-    ax0.text(0.98, 0.92, "Phase 0", transform=ax0.transAxes,
+    ax0.text(0.03, 0.95, "Phase 0", transform=ax0.transAxes,
              fontsize=8, fontstyle="italic", color=C_REFERENCE,
-             ha="right", va="top")
+             ha="left", va="top")
 
     ax0.plot(p0.generation, p0.lead_val_acc,
              color=C_WANN, lw=1.8)
@@ -104,10 +104,10 @@ def training_curve():
                      fontsize=8, color=color, va="center", fontweight="bold",
                      clip_on=False)
 
-    ax0.set_title("Phase 0 — Supervised Bootstrap", fontweight="bold", pad=8)
+    ax0.set_title("Phase 0: Supervised Bootstrap", fontweight="bold", pad=8)
     ax0.set_xlabel("Generation")
     ax0.set_ylabel("Validation Accuracy")
-    ax0.set_xlim(p0.generation.min(), p0.generation.max() + 12)
+    ax0.set_xlim(p0.generation.min(), p0.generation.max() + 16)
     ax0.set_ylim(0.18, 0.65)
     ax0.yaxis.set_major_formatter(
         mticker.PercentFormatter(1.0, decimals=0))
@@ -118,9 +118,9 @@ def training_curve():
 
     ax1.axvspan(p1.generation.min(), p1.generation.max(),
                 facecolor="#FFF3E0", zorder=0)
-    ax1.text(0.98, 0.92, "Phase 1", transform=ax1.transAxes,
+    ax1.text(0.03, 0.95, "Phase 1", transform=ax1.transAxes,
              fontsize=8, fontstyle="italic", color=C_REFERENCE,
-             ha="right", va="top")
+             ha="left", va="top")
 
     ax1.plot(p1.generation, p1.lead_best_fitness,
              color=C_WANN, lw=1.8)
@@ -133,22 +133,26 @@ def training_curve():
              "HeuristicBot parity", fontsize=7.5, color=C_REFERENCE,
              ha="left", va="bottom")
 
-    # Direct labels
+    # Direct labels — stagger vertically so the two end labels never collide
+    ends = {"lead": p1.lead_best_fitness.iloc[-1],
+            "follow": p1.follow_best_fitness.iloc[-1]}
+    lo, hi = sorted(ends, key=ends.get)
+    dy = {lo: -8, hi: 8}
     for col, color, name in [
         ("lead_best_fitness",   C_WANN,     "lead"),
         ("follow_best_fitness", C_WANN_ALT, "follow"),
     ]:
         y_end = p1[col].iloc[-1]
         ax1.annotate(name, xy=(p1.generation.iloc[-1], y_end),
-                     xytext=(6, 0), textcoords="offset points",
+                     xytext=(6, dy[name]), textcoords="offset points",
                      fontsize=8, color=color, va="center", fontweight="bold",
                      clip_on=False)
 
-    ax1.set_title("Phase 1 — Co-evolutionary Self-play",
+    ax1.set_title("Phase 1: Co-evolutionary Self-play",
                   fontweight="bold", pad=8)
     ax1.set_xlabel("Generation")
     ax1.set_ylabel("Best Fitness  (Δ game-points vs HeuristicBot)")
-    ax1.set_xlim(p1.generation.min(), p1.generation.max() + 18)
+    ax1.set_xlim(p1.generation.min(), p1.generation.max() + 32)
     ax1.grid(axis="y", color=C_GRID, lw=0.4, alpha=0.6)
 
     # ── Save ────────────────────────────────────────────────────────────
@@ -185,7 +189,7 @@ def tournament():
             transform=ax.get_yaxis_transform())
 
     ax.set_ylabel("WANN Champion Win Rate  (%)")
-    ax.set_title("v6 Champion vs Baselines  —  n = 3 000, seat-rotated",
+    ax.set_title("WANN Champion vs Baselines  (n = 3000, seat-rotated)",
                  fontweight="bold", pad=10)
     ax.set_ylim(0, 108)
 
@@ -224,15 +228,15 @@ def complexity():
 
     b5 = ax.bar([i - w/2 for i in x], v5, w,
                 color=C_WANN_ALT, edgecolor="white", lw=0.8,
-                label="v5  (52.7 %)")
+                label="Earlier champion (52.7%)")
     b6 = ax.bar([i + w/2 for i in x], v6, w,
                 color=C_WANN, edgecolor="white", lw=0.8,
-                label="v6  (52.1 %)")
+                label="Final champion (52.1%)")
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(metrics)
     ax.set_ylabel("Count  (lead + follow)")
-    ax.set_title("Iso-strength,  4.5× Simpler", fontweight="bold", pad=10)
+    ax.set_title("Equal strength, 4.5× fewer gates", fontweight="bold", pad=10)
 
     # Direct labels on bars
     for bar in b5:
@@ -255,7 +259,7 @@ def complexity():
                     fontsize=8.5, color=C_REFERENCE,
                     ha="center", va="center", fontstyle="italic")
 
-    ax.legend(fontsize=9, loc="upper right",
+    ax.legend(fontsize=9, loc="upper left",
               handlelength=1.0, handleheight=1.0, borderpad=0.6)
     ax.grid(axis="y", color=C_GRID, lw=0.4, alpha=0.6)
     ax.set_ylim(0, 215)

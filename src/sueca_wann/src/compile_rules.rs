@@ -324,8 +324,15 @@ pub fn export_topology(genome: &Genome, output_dir: &str, _wann: &RustWannNetwor
         }
     }
 
-    // Edges
+    // Edges. Skip any edge touching an unreachable node: such endpoints are
+    // never declared in the node loop above, so graphviz would otherwise
+    // auto-create a bare numbered circle for them (the orphan-node clutter).
+    // Disabled edges between two reachable nodes are kept (dotted), as they
+    // are genuinely part of the genome.
     for c in &genome.conn_genes {
+        if !reachable.contains(&c.src) || !reachable.contains(&c.dst) {
+            continue;
+        }
         if !c.enabled {
             dot.push_str(&format!(
                 "    {} -> {} [arrowsize=0.5 color=\"#d9d9d9\" style=dotted]\n",
