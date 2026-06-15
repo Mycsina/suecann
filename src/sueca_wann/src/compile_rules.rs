@@ -308,7 +308,7 @@ pub fn export_topology(genome: &Genome, output_dir: &str, _wann: &RustWannNetwor
                 };
                 dot.push_str(&format!(
                     "    {} [label=\"{}\\n(O{})\" color=\"#de2d26\" fillcolor=\"#fee0d2\" \
-                     fontname=Helvetica-Bold shape=box style=\"filled,bold\"]\n",
+                     fontname=\"Helvetica-Bold\" shape=box style=\"filled,bold\"]\n",
                     ng.id, name, ng.id
                 ));
             }
