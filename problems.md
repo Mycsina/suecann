@@ -386,3 +386,71 @@ better teacher.
 - ✅✅ **Interpretability: a 4.5×-smaller champion at iso-strength, with human-readable rules in both
   brains** — a direct win for the project's core thesis. This is the headline result of Chapter 2.
 - The teacher remains valuable as a dense label source for distillation (Stage 2).
+
+---
+
+# Chapter 3 — Interpretability Polish (Stage 2c: post-hoc rule minification)
+
+**Date:** 2026-06-15. **Goal (user):** consolidate the win, then *polish interpretability* — the
+project's whole reason for WANNs + discrete activations. Chapter 2 produced a 4.5×-smaller champion;
+Chapter 3 makes its compiled rules genuinely *readable* and adds verified complexity metrics, without
+touching the network (no retrain, no strength change).
+
+### Problem 12 — The compiled rules were smaller but still cluttered with dead/rename gates
+Even the 29-gate v6 champion compiled to chains dominated by two kinds of non-information:
+- **Dead constant gates** — e.g. `hidden_46 = 0.0`, then `hidden_44 = NOT(hidden_46)` (a constant 1.0)
+  feeding downstream sums. These nodes carry no signal but inflate gate count and depth.
+- **Pure alias / passthrough gates** — a single-input IDENTITY node is just a rename of its source
+  (`SUM(x)=MIN(x)=MAX(x)=x` at W=1). The FOLLOW brain had a 7-deep alias chain
+  (`hidden_49=hidden_48`, `hidden_53=OR(hidden_39)`, `hidden_52=Game_Pts_Remaining`, …) that made
+  "max depth" read **10** when the real logic is 5 deep.
+
+### Fix — two behavior-preserving rewrites in `compile_rules.rs` (verified at W=1)
+1. **Constant-folding.** Propagate constants from BIAS (=1.0) and empty aggregations through the exact
+   `wann_network::forward` math; inline constant nodes as numbers and drop them from the listing.
+2. **Alias inlining.** Flatten single-input IDENTITY chains to their ultimate source, tracking negation
+   parity (NOT∘NOT cancels). Guarded to **W=1** (at W≠1 the node is `clamp(src·W)`, not an alias).
+3. **Single-operand unwrap** (`AND(x)→x`, `OR(x)→x`) and a `Rule Complexity` metrics block.
+
+### Result — the FOLLOW brain, before vs after folding
+
+```
+BEFORE (12 steps, max depth 10):          AFTER (5 steps, max depth 5):
+  hidden_46 = 0.0                            hidden_42 = NOT(Holds_Boss_Led)
+  hidden_44 = NOT(hidden_46)                 hidden_48 = (1 + Any_Opp_Void_Led)
+  hidden_51 = Any_Opp_Void_Led               hidden_41 = NOT((1 + hidden_42 + hidden_48 + hidden_48))
+  hidden_48 = (hidden_44 + hidden_51)        hidden_40 = THRESHOLD((hidden_41 + Trump_Count) > 0.5)
+  hidden_49 = hidden_48                       hidden_55 = THRESHOLD(hidden_40 > 0.5)
+  hidden_41 = NOT((1 + h_42 + h_48 + h_49))
+  hidden_39 = hidden_41                      MAX_FORCE      = Game_Pts_Remaining + Game_Pts_Remaining
+  hidden_40 = THRESHOLD((h_39 + Trump) >.5)  EFFICIENT_WIN  = 0
+  hidden_50 = hidden_40                      EQUITY_BUILDER = (1 + hidden_41 + hidden_55 + hidden_41)
+  hidden_52 = Game_Pts_Remaining
+  hidden_53 = OR(hidden_39)                 # MAX_FORCE is literally 2·Game_Pts_Remaining: force early,
+  hidden_55 = THRESHOLD(hidden_50 >.5)      # concede late — a one-feature game-phase toggle.
+  hidden_45 = AND(hidden_55)
+```
+
+### Complexity metrics (on the collapsed rule DAG)
+
+| Metric | LEAD brain | FOLLOW brain |
+|---|---|---|
+| Active hidden gates | 10 (was 12; 2 aliases inlined) | **5** (was 12; 2 constants + 7 aliases inlined) |
+| Live connections | 20 / 22 enabled | 13 / 27 enabled |
+| Max logic depth | 6 | **5** (was 10) |
+| Total input literals | 10 | 5 |
+
+### Verification (this is the point — not cosmetic)
+A property test (`champion_fold_and_alias_are_behavior_preserving`, `#[ignore]`) runs the **real
+champion** through `wann_network::forward` on **2000 random belief states at W=1** and asserts:
+every folded constant is invariant to within 1e-9, and every alias node equals its resolved source
+(parity applied) to within 1e-9. **Passes.** So the dropped symbols provably carry no information the
+network uses — the reader can trust the rules are exact, not an approximation. Four further
+deterministic unit tests cover the fold/alias/parity logic and the W≠1 guard.
+
+### Net of Chapter 3
+- ✅ Compiled rules are now genuinely human-readable: FOLLOW = 5 gates / depth 5; both intent policies
+  read as short IF/THEN logic over named features.
+- ✅ Verified behavior-preserving (no strength change — same 52.1% champion; the network is untouched).
+- ➖ Not done (deferred per user): greedy connection pruning of the genome itself, and the
+  intent-bottleneck redesign (Stage 2a/2b/2d) — "a last, if-we-have-time deliverable."
