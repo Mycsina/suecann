@@ -150,6 +150,63 @@ Creates `checkpoints/YYYY-MM-DD-N/` with training stats, checkpointed genomes, a
 cargo test --all
 ```
 
+## Reproducing the Results
+
+All commands are run from the repository root. The canonical v6 champion lives at `checkpoints/production/2026-06-14-2/genomes/best_genome_final.json`. **`checkpoints/` is gitignored** — the champion and training artifacts live on the training machine, not in the repo.
+
+### Build
+
+```bash
+cargo build -p sueca_wann --release
+```
+
+### Test
+
+```bash
+cargo test --all
+```
+
+### Benchmark the Champion
+
+Benchmarks the v6 champion against RandomBot, OldHeuristicBot, and EliteHeuristicBot over 3000 seat-rotated deals. Expect **~52.1% ± 1.8%** vs EliteHeuristicBot.
+
+```bash
+./target/release/sueca_wann benchmark \
+  --deals 3000 \
+  --genome checkpoints/production/2026-06-14-2/genomes/best_genome_final.json
+```
+
+### Compile Interpretable Rules
+
+Extracts the champion's IF/THEN rules, DOT topology graph, and PNG rendering.
+
+```bash
+./target/release/sueca_wann compile-rules \
+  --genome checkpoints/production/2026-06-14-2/genomes/best_genome_final.json \
+  --output-dir checkpoints/production/2026-06-14-2
+```
+
+Generates `compiled_rules.txt`, `topology_graph.dot`, and `topology_graph.png` in the output directory.
+
+### Regenerate the v6 Expert Dataset
+
+Generates the 15k-state PIMC expert dataset used for Phase 0 pretraining (rollout teacher, supra-Elite labels).
+
+```bash
+./target/release/sueca_wann generate-dataset \
+  --n-worlds 200 --teacher rollout --target-count 15000 \
+  --soft-balance-min-ratio 0.0 \
+  --output expert_states_v6.npz
+```
+
+### Generate Report Figures
+
+Produces three PDF figures (`training_curve.pdf`, `tournament.pdf`, `complexity.pdf`) from the canonical results, saved into `report/figures/`.
+
+```bash
+uv run python scripts/make_report_figures.py
+```
+
 ### Web Play Interface
 
 To build and run the web play interface (React + WASM game loop):
