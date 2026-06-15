@@ -94,6 +94,173 @@ fn compute_depths(genome: &Genome, reachable: &HashSet<usize>) -> HashMap<usize,
     depths
 }
 
+/// Compute the provably-constant value (at the given shared weight) of every node
+/// whose output does not depend on any *variable* input feature — i.e. it is fed
+/// only by BIAS or by empty/other-constant aggregations. Inputs 0..INPUT_COUNT are
+/// always variable, BIAS is the sole constant *source* (=1.0), and a node with no
+/// enabled incoming edges evaluates to 0.0 (matching the runtime `start == end`
+/// branch). The aggregation/activation/clamp math mirrors `wann_network::forward`
+/// exactly, so a folded constant is bit-identical to what the network computes.
+///
+/// These nodes are dead weight in the compiled rules (e.g. `hidden_46 = 0.0`,
+/// `hidden_44 = NOT(hidden_46) = 1.0`): folding inlines their value and drops them
+/// from the human-readable rule listing.
+fn fold_constants(genome: &Genome, weight: f64) -> HashMap<usize, f64> {
+    let mut consts: HashMap<usize, f64> = HashMap::new();
+    consts.insert(BIAS_ID, 1.0);
+
+    let mut incoming: HashMap<usize, Vec<(usize, i8)>> = HashMap::new();
+    for c in &genome.conn_genes {
+        if c.enabled {
+            incoming.entry(c.dst).or_default().push((c.src, c.sign));
+        }
+    }
+
+    for nid in genome.topological_order() {
+        if nid <= BIAS_ID {
+            continue; // inputs are variable; BIAS already inserted
+        }
+        let ng = match genome.get_node(nid) {
+            Some(n) => n,
+            None => continue,
+        };
+        let conns = match incoming.get(&nid) {
+            Some(v) if !v.is_empty() => v,
+            _ => {
+                consts.insert(nid, 0.0); // runtime: no incoming -> 0.0
+                continue;
+            }
+        };
+        if !conns.iter().all(|(src, _)| consts.contains_key(src)) {
+            continue; // depends transitively on a variable input
+        }
+        let signal = |src: usize, sign: i8| -> f64 {
+            let v = consts[&src];
+            let v = if sign == -1 { 1.0 - v } else { v };
+            v * weight
+        };
+        let agg_val = match ng.aggregation_fn {
+            AggregationFn::SUM => conns.iter().map(|&(s, sg)| signal(s, sg)).sum(),
+            AggregationFn::MIN => conns
+                .iter()
+                .map(|&(s, sg)| signal(s, sg))
+                .fold(f64::INFINITY, f64::min),
+            AggregationFn::MAX => conns
+                .iter()
+                .map(|&(s, sg)| signal(s, sg))
+                .fold(f64::NEG_INFINITY, f64::max),
+        };
+        let activated = match ng.activation_fn {
+            ActivationFn::IDENTITY => agg_val,
+            ActivationFn::NOT => 1.0 - agg_val.clamp(0.0, 1.0),
+            ActivationFn::THRESHOLD => {
+                let t = 0.5 * weight;
+                let fires = if weight >= 0.0 { agg_val > t } else { agg_val < t };
+                if fires {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        };
+        consts.insert(nid, activated.clamp(0.0, 1.0));
+    }
+    consts
+}
+
+/// A non-constant node is a *pure alias* of its single source when it has exactly
+/// one enabled incoming edge and IDENTITY activation: a single-operand aggregation
+/// is degenerate (`SUM(x)=MIN(x)=MAX(x)=x·W`) and IDENTITY passes it through, so at
+/// **W=1** the node equals its source (or `1−source` if the edge sign is −1). Such
+/// nodes are renames that inflate apparent depth/gate-count; we collapse them.
+///
+/// Returns `node -> (ultimate_non_alias_source, negated)`. The negation parity is
+/// accumulated along the chain (NOT∘NOT cancels). Resolution runs in topological
+/// order, so an alias of an alias is fully flattened. Only valid at W=1, so the map
+/// is empty for any other weight (callers then keep the explicit alias steps).
+fn compute_aliases(genome: &Genome, consts: &HashMap<usize, f64>, weight: f64) -> HashMap<usize, (usize, bool)> {
+    let mut aliases: HashMap<usize, (usize, bool)> = HashMap::new();
+    if (weight - 1.0).abs() > 1e-9 {
+        return aliases;
+    }
+    let mut incoming: HashMap<usize, Vec<(usize, i8)>> = HashMap::new();
+    for c in &genome.conn_genes {
+        if c.enabled {
+            incoming.entry(c.dst).or_default().push((c.src, c.sign));
+        }
+    }
+    for nid in genome.topological_order() {
+        if nid < FIRST_HIDDEN_ID || consts.contains_key(&nid) {
+            continue;
+        }
+        let ng = match genome.get_node(nid) {
+            Some(n) => n,
+            None => continue,
+        };
+        if ng.activation_fn != ActivationFn::IDENTITY {
+            continue;
+        }
+        let conns = match incoming.get(&nid) {
+            Some(v) if v.len() == 1 => v,
+            _ => continue,
+        };
+        let (src, sign) = conns[0];
+        if consts.contains_key(&src) {
+            continue; // a const single-source IDENTITY node would already be a const itself
+        }
+        let neg = sign == -1;
+        let resolved = match aliases.get(&src) {
+            Some(&(rs, rneg)) => (rs, neg ^ rneg),
+            None => (src, neg),
+        };
+        aliases.insert(nid, resolved);
+    }
+    aliases
+}
+
+/// Resolve a connection source through the alias map. Returns the rendered source
+/// string (feature/hidden/constant) with the effective sign already applied.
+fn render_src(
+    src: usize,
+    sign: i8,
+    consts: &HashMap<usize, f64>,
+    aliases: &HashMap<usize, (usize, bool)>,
+) -> String {
+    let base_neg = sign == -1;
+    // Folded constant source -> inline its numeric value (sign applied).
+    if let Some(&v) = consts.get(&src) {
+        let v = if base_neg { 1.0 - v } else { v };
+        return fmt_const(v);
+    }
+    let (target, neg) = match aliases.get(&src) {
+        Some(&(t, n)) => (t, base_neg ^ n),
+        None => (src, base_neg),
+    };
+    let feature_names = crate::constants::FEATURE_NAMES;
+    let s = if target == BIAS_ID {
+        "1.0".to_string()
+    } else if target < INPUT_COUNT {
+        feature_names[target].to_string()
+    } else {
+        format!("hidden_{}", target)
+    };
+    if neg {
+        format!("NOT({})", s)
+    } else {
+        s
+    }
+}
+
+/// Pretty-print a folded constant: `0`, `1`, or up to 4 decimals without trailing zeros.
+fn fmt_const(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        format!("{}", v.round() as i64)
+    } else {
+        let s = format!("{:.4}", v);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
 pub fn export_topology(genome: &Genome, output_dir: &str, _wann: &RustWannNetwork, prefix: &str) {
     let reachable = get_reachable_nodes(genome);
     let depths = compute_depths(genome, &reachable);
@@ -224,9 +391,16 @@ fn format_node_rhs(
     genome: &Genome,
     nid: usize,
     weight: f64,
+    consts: &HashMap<usize, f64>,
+    aliases: &HashMap<usize, (usize, bool)>,
     _reachable: &HashSet<usize>,
     _indent: &str,
 ) -> String {
+    // A constant node folds to its numeric value (e.g. `EFFICIENT_WIN = 0`).
+    if let Some(&v) = consts.get(&nid) {
+        return fmt_const(v);
+    }
+
     let ng = match genome.get_node(nid) {
         Some(n) => n,
         None => return "0.0".to_string(),
@@ -242,35 +416,21 @@ fn format_node_rhs(
         return "0.0".to_string();
     }
 
-    let feature_names = crate::constants::FEATURE_NAMES;
     let signals: Vec<String> = conns
         .iter()
-        .map(|c| {
-            let src_str = if c.src == BIAS_ID {
-                "1.0".to_string()
-            } else if c.src < INPUT_COUNT {
-                feature_names[c.src].to_string()
-            } else {
-                format!("hidden_{}", c.src)
-            };
-            if c.sign == -1 {
-                format!("NOT({})", src_str)
-            } else {
-                src_str
-            }
-        })
+        .map(|c| render_src(c.src, c.sign, consts, aliases))
         .collect();
 
-    let agg_str = match ng.aggregation_fn {
-        AggregationFn::SUM => {
-            if signals.len() > 1 {
-                format!("({})", signals.join(" + "))
-            } else {
-                signals.join(" + ")
-            }
+    // A single-operand aggregation is degenerate: SUM(x)=MIN(x)=MAX(x)=x, so drop
+    // the AND()/OR() wrapper and the parens for one operand.
+    let agg_str = if signals.len() == 1 {
+        signals[0].clone()
+    } else {
+        match ng.aggregation_fn {
+            AggregationFn::SUM => format!("({})", signals.join(" + ")),
+            AggregationFn::MIN => format!("AND({})", signals.join(", ")),
+            AggregationFn::MAX => format!("OR({})", signals.join(", ")),
         }
-        AggregationFn::MIN => format!("AND({})", signals.join(", ")),
-        AggregationFn::MAX => format!("OR({})", signals.join(", ")),
     };
 
     match ng.activation_fn {
@@ -289,6 +449,8 @@ fn format_node_rhs(
 
 pub fn compile_rules(genome: &Genome, weight: f64, output_dir: &str, prefix: &str) -> String {
     let reachable = get_reachable_nodes(genome);
+    let consts = fold_constants(genome, weight);
+    let aliases = compute_aliases(genome, &consts, weight);
     let order = genome.topological_order();
     let feature_names = crate::constants::FEATURE_NAMES;
     let output_names = crate::constants::OUTPUT_NAMES;
@@ -336,16 +498,18 @@ pub fn compile_rules(genome: &Genome, weight: f64, output_dir: &str, prefix: &st
     }
     out.push('\n');
 
+    // Live hidden gates = reachable hidden nodes that are neither folded constants
+    // nor pure aliases (both are inlined away).
     let hidden_nodes: Vec<usize> = active_nodes
         .iter()
         .cloned()
-        .filter(|&n| n >= FIRST_HIDDEN_ID)
+        .filter(|&n| n >= FIRST_HIDDEN_ID && !consts.contains_key(&n) && !aliases.contains_key(&n))
         .collect();
 
     if !hidden_nodes.is_empty() {
         out.push_str("Active Hidden Logic Steps:\n");
         for &nid in &hidden_nodes {
-            let rhs = format_node_rhs(genome, nid, weight, &reachable, "  ");
+            let rhs = format_node_rhs(genome, nid, weight, &consts, &aliases, &reachable, "  ");
             out.push_str(&format!("  hidden_{} = {}\n", nid, rhs));
         }
         out.push('\n');
@@ -360,12 +524,91 @@ pub fn compile_rules(genome: &Genome, weight: f64, output_dir: &str, prefix: &st
             "?"
         };
         if reachable.contains(&nid) {
-            let rhs = format_node_rhs(genome, nid, weight, &reachable, "  ");
+            let rhs = format_node_rhs(genome, nid, weight, &consts, &aliases, &reachable, "  ");
             out.push_str(&format!("  {} = {}\n", name, rhs));
         } else {
             out.push_str(&format!("  {} = 0.0 (Inactive)\n", name));
         }
     }
+
+    // ── Rule-complexity metrics (on the collapsed rule DAG) ────────────────────
+    // Measured over the *printed* structure after constant-folding AND alias
+    // inlining — i.e. what a human actually reads. A folded-constant source
+    // contributes nothing (it's a literal number); every other edge into a
+    // printed node is a "live connection", and one whose resolved source is a
+    // variable input feature is a "literal" (a feature mention in the rules).
+    let hidden_set: HashSet<usize> = hidden_nodes.iter().cloned().collect();
+    let printed_outputs: Vec<usize> = (OUTPUT_START..OUTPUT_START + OUTPUT_COUNT)
+        .filter(|n| reachable.contains(n))
+        .collect();
+    // Resolve a source through const/alias maps: None = folded constant (drops out),
+    // Some(target) = a variable input feature or a live gate.
+    let resolve = |src: usize| -> Option<usize> {
+        if consts.contains_key(&src) {
+            None
+        } else if let Some(&(t, _)) = aliases.get(&src) {
+            Some(t)
+        } else {
+            Some(src)
+        }
+    };
+    let folded_hidden = active_nodes
+        .iter()
+        .filter(|&&n| n >= FIRST_HIDDEN_ID && consts.contains_key(&n))
+        .count();
+    let aliased_hidden = active_nodes
+        .iter()
+        .filter(|&&n| n >= FIRST_HIDDEN_ID && aliases.contains_key(&n))
+        .count();
+    let enabled_conns = genome.conn_genes.iter().filter(|c| c.enabled).count();
+    let printed: HashSet<usize> = hidden_set.iter().cloned().chain(printed_outputs.iter().cloned()).collect();
+    let mut live_conns = 0usize;
+    let mut total_literals = 0usize;
+    for c in &genome.conn_genes {
+        if !c.enabled || !printed.contains(&c.dst) {
+            continue;
+        }
+        if let Some(t) = resolve(c.src) {
+            live_conns += 1;
+            if t < INPUT_COUNT {
+                total_literals += 1;
+            }
+        }
+    }
+    // Longest path through live gates only (inputs/constants/aliases are depth-0 leaves).
+    let mut depth: HashMap<usize, usize> = HashMap::new();
+    let mut max_depth = 0usize;
+    for &nid in &order {
+        if !printed.contains(&nid) {
+            continue;
+        }
+        let d = genome
+            .conn_genes
+            .iter()
+            .filter(|c| c.enabled && c.dst == nid)
+            .filter_map(|c| resolve(c.src))
+            .filter(|t| hidden_set.contains(t))
+            .map(|t| depth.get(&t).copied().unwrap_or(0))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        depth.insert(nid, d);
+        max_depth = max_depth.max(d);
+    }
+    out.push('\n');
+    out.push_str("Rule Complexity (after constant-folding + alias inlining):\n");
+    out.push_str(&format!(
+        "  Active hidden gates:  {}  (folded constants: {}, inlined aliases: {})\n",
+        hidden_nodes.len(),
+        folded_hidden,
+        aliased_hidden
+    ));
+    out.push_str(&format!(
+        "  Live connections:     {}  (of {} enabled)\n",
+        live_conns, enabled_conns
+    ));
+    out.push_str(&format!("  Max logic depth:      {}\n", max_depth));
+    out.push_str(&format!("  Total input literals: {}\n", total_literals));
 
     let rules_name = if prefix.is_empty() {
         "compiled_rules.txt".to_string()
@@ -380,4 +623,139 @@ pub fn compile_rules(genome: &Genome, weight: f64, output_dir: &str, prefix: &st
     export_topology(genome, output_dir, &wann, prefix);
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::genome::{ActivationFn, AggregationFn, ConnGene, Genome, NodeGene, NodeType};
+    use rand::{Rng, SeedableRng};
+    use rand_pcg::Pcg64;
+
+    /// Build a base genome (35 inputs + bias + 3 outputs) augmented with `hidden`
+    /// nodes and `conns` connections.
+    fn build(hidden: Vec<NodeGene>, conns: Vec<ConnGene>) -> Genome {
+        let mut g = Genome::initial();
+        let mut nodes = g.node_genes.clone();
+        nodes.extend(hidden);
+        let next = conns.iter().map(|c| c.innovation).max().unwrap_or(0) + 1;
+        g = Genome::new(Some(nodes), Some(conns), next);
+        g
+    }
+
+    fn hid(id: usize, act: ActivationFn, agg: AggregationFn) -> NodeGene {
+        NodeGene::make(id, NodeType::HIDDEN, act, agg)
+    }
+
+    #[test]
+    fn fold_detects_bias_only_constants_not_input_dependent_nodes() {
+        // hidden_39: fed only by BIAS -> constant 1.0
+        // hidden_42: fed by input feature 1 -> NOT constant
+        let hidden = vec![
+            hid(39, ActivationFn::IDENTITY, AggregationFn::SUM),
+            hid(42, ActivationFn::THRESHOLD, AggregationFn::SUM),
+        ];
+        let conns = vec![
+            ConnGene::make(0, BIAS_ID, 39, 1, true),
+            ConnGene::make(1, 1, 42, 1, true),
+        ];
+        let g = build(hidden, conns);
+        let consts = fold_constants(&g, 1.0);
+        assert_eq!(consts.get(&BIAS_ID), Some(&1.0));
+        assert_eq!(consts.get(&39), Some(&1.0)); // IDENTITY(BIAS) = 1.0
+        assert!(!consts.contains_key(&42)); // depends on a variable input
+    }
+
+    #[test]
+    fn fold_handles_no_input_node_as_zero() {
+        // hidden_40 has no enabled incoming -> runtime yields 0.0
+        let hidden = vec![hid(40, ActivationFn::IDENTITY, AggregationFn::SUM)];
+        let g = build(hidden, vec![]);
+        let consts = fold_constants(&g, 1.0);
+        assert_eq!(consts.get(&40), Some(&0.0));
+    }
+
+    #[test]
+    fn aliases_flatten_chains_with_negation_parity() {
+        // hidden_40 = IDENTITY(input0)            -> alias (input0, +)
+        // hidden_41 = IDENTITY(NOT hidden_40)     -> alias (input0, negated)
+        // hidden_42 = THRESHOLD(in1, in2)         -> real gate (not alias)
+        let hidden = vec![
+            hid(40, ActivationFn::IDENTITY, AggregationFn::SUM),
+            hid(41, ActivationFn::IDENTITY, AggregationFn::MAX),
+            hid(42, ActivationFn::THRESHOLD, AggregationFn::SUM),
+        ];
+        let conns = vec![
+            ConnGene::make(0, 0, 40, 1, true),
+            ConnGene::make(1, 40, 41, -1, true),
+            ConnGene::make(2, 1, 42, 1, true),
+            ConnGene::make(3, 2, 42, 1, true),
+        ];
+        let g = build(hidden, conns);
+        let consts = fold_constants(&g, 1.0);
+        let aliases = compute_aliases(&g, &consts, 1.0);
+        assert_eq!(aliases.get(&40), Some(&(0usize, false)));
+        assert_eq!(aliases.get(&41), Some(&(0usize, true))); // parity flipped
+        assert!(!aliases.contains_key(&42)); // 2 inputs -> not an alias
+    }
+
+    #[test]
+    fn aliases_disabled_off_unit_weight() {
+        // alias equivalence only holds at W=1; map must be empty otherwise.
+        let hidden = vec![hid(40, ActivationFn::IDENTITY, AggregationFn::SUM)];
+        let conns = vec![ConnGene::make(0, 0, 40, 1, true)];
+        let g = build(hidden, conns);
+        let consts = fold_constants(&g, 2.0);
+        assert!(compute_aliases(&g, &consts, 2.0).is_empty());
+    }
+
+    /// Empirical soundness on the real champion: every folded constant must be
+    /// invariant across random belief states, and every alias node must equal its
+    /// resolved source (with parity) — proving the rule transforms are exact.
+    /// `#[ignore]` because it depends on the checked-out champion genome file.
+    #[test]
+    #[ignore]
+    fn champion_fold_and_alias_are_behavior_preserving() {
+        let path = "checkpoints/production/2026-06-14-2/genomes/best_genome_final.json";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("skipping: champion genome not found at {path}");
+            return;
+        }
+        let (lead, follow) = load_genome(path).expect("load champion");
+        for (label, genome) in [("lead", lead), ("follow", follow)] {
+            let genome = genome.expect("brain present");
+            let consts = fold_constants(&genome, 1.0);
+            let aliases = compute_aliases(&genome, &consts, 1.0);
+            let wann = genome.to_rust_wann();
+            let mut rng = Pcg64::seed_from_u64(0xA11A5);
+            let mut scratch = vec![0.0f64; wann.num_nodes];
+            for _ in 0..2000 {
+                let mut inputs = [0.0f64; INPUT_COUNT];
+                for v in inputs.iter_mut() {
+                    *v = rng.gen_range(0.0..=1.0);
+                }
+                wann.forward(&inputs, 1.0, &mut scratch);
+                for (&nid, &val) in &consts {
+                    if nid <= BIAS_ID {
+                        continue;
+                    }
+                    assert!(
+                        (scratch[nid] - val).abs() < 1e-9,
+                        "{label}: const node {nid} = {} but runtime {}",
+                        val,
+                        scratch[nid]
+                    );
+                }
+                for (&nid, &(target, neg)) in &aliases {
+                    let expected = if neg { 1.0 - scratch[target] } else { scratch[target] };
+                    assert!(
+                        (scratch[nid] - expected).abs() < 1e-9,
+                        "{label}: alias node {nid} = {} but resolved {}",
+                        scratch[nid],
+                        expected
+                    );
+                }
+            }
+        }
+    }
 }
