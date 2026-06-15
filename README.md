@@ -142,7 +142,7 @@ git config core.hooksPath .githooks  # Activate WASM pre-commit hook
 ./target/release/sueca_wann train --config configs/default.toml --resume  # resume from checkpoint
 ```
 
-Creates `checkpoints/YYYY-MM-DD-N/` with training stats, checkpointed genomes, and Hall of Fame.
+Creates `code/checkpoints/YYYY-MM-DD-N/` with training stats, checkpointed genomes, and Hall of Fame.
 
 ### Tests
 
@@ -152,7 +152,7 @@ cargo test --all
 
 ## Reproducing the Results
 
-All commands are run from the repository root. The canonical v6 champion lives at `checkpoints/production/2026-06-14-2/genomes/best_genome_final.json`. **`checkpoints/` is gitignored** — the champion and training artifacts live on the training machine, not in the repo.
+All commands are run from the repository root. The canonical v6 champion lives at `code/checkpoints/production/2026-06-14-2/genomes/best_genome_final.json`. **`checkpoints/` is gitignored** — the champion and training artifacts live on the training machine, not in the repo.
 
 ### Build
 
@@ -355,7 +355,7 @@ checkpoints/
 
 ## Configuration
 
-Key hyperparameters from `configs/default.toml`:
+Key hyperparameters from `code/configs/default.toml`:
 
 | Section | Key | Value | Description |
 |---------|-----|-------|-------------|

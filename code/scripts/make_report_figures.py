@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FIG = os.path.join(ROOT, "report", "figures")
+FIG = os.path.normpath(os.path.join(ROOT, "..", "report", "figures"))
 os.makedirs(FIG, exist_ok=True)
 CSV = os.path.join(ROOT, "checkpoints", "production", "2026-06-14-2",
                    "training_stats.csv")

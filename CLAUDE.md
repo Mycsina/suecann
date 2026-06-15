@@ -4,7 +4,7 @@
 
 Neurosymbolic AI that evolves Weight-Agnostic Neural Networks (WANNs) to play **Sueca** (Portuguese trick-taking card game). Networks use logical gates instead of traditional activations, output abstract play intents (not cards), and are compiled into human-readable IF/THEN rules.
 
-The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the Rust game engine (`sueca_solver`). Python is used only for cross-run comparison visualization (`scripts/compare_runs.py`).
+The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the Rust game engine (`sueca_solver`). Python is used only for cross-run comparison visualization (`code/scripts/compare_runs.py`).
 
 ## Project Documentation
 
@@ -13,7 +13,7 @@ The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the R
 
 ## Tooling
 
-- **Rust workspace**: `src/sueca_solver` (pure game engine, rlib only), `src/sueca_wann` (training binary + CLI) and `src/sueca_wasm` (WASM + interactive frontend in `frontend` folder)
+- **Rust workspace**: `code/src/sueca_solver` (pure game engine, rlib only), `code/src/sueca_wann` (training binary + CLI) and `code/src/sueca_wasm` (WASM + interactive frontend in `frontend` folder)
 
 - **Build Training Binary**: `cargo build -p sueca_wann --release`
 - **Testing**: `cargo test --all`
@@ -28,7 +28,7 @@ A `.githooks/pre-commit` hook auto-rebuilds WASM and stages the output whenever 
 git config core.hooksPath .githooks
 ```
 
-After this, every commit that touches Rust source automatically runs `wasm-pack build --target web` and `git add`s the regenerated `frontend/src/wasm/` files. No manual WASM rebuild step needed before push.
+After this, every commit that touches Rust source automatically runs `wasm-pack build --target web` and `git add`s the regenerated `code/frontend/src/wasm/` files. No manual WASM rebuild step needed before push.
 
 ## Documentation Maintenance
 
@@ -43,11 +43,11 @@ To connect you can just use ssh arise, it also has a Projects folder, which you 
 ```bash
 cargo build -p sueca_wann --release
 
-# Run training (creates checkpoints/YYYY-MM-DD-N/)
-./target/release/sueca_wann train --config configs/default.toml
+# Run training (creates code/checkpoints/YYYY-MM-DD-N/)
+./target/release/sueca_wann train --config code/configs/default.toml
 
 # Resume from checkpoint
-./target/release/sueca_wann train --config configs/default.toml --resume
+./target/release/sueca_wann train --config code/configs/default.toml --resume
 ```
 
 Training creates dated run folders containing `training_stats.csv`, `training_state.bin`, a `data/` subdirectory (human-readable runtime snapshots — tabu lists, innovation registries, species summaries, MAP-Elites grid, population snapshots), and a `genomes/` subdirectory with `best_genome_final.json`, `hof_final.json`.
@@ -55,13 +55,13 @@ Training creates dated run folders containing `training_stats.csv`, `training_st
 ## Running Benchmarks
 
 ```bash
-./target/release/sueca_wann benchmark --deals 200 --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json
+./target/release/sueca_wann benchmark --deals 200 --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json
 ```
 
 ## Extracting Rules
 
 ```bash
-./target/release/sueca_wann compile-rules --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json --output-dir checkpoints/2026-06-03-2
+./target/release/sueca_wann compile-rules --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json --output-dir code/checkpoints/2026-06-03-2
 ```
 
 Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topology_graph.png` (via Graphviz `dot`).
@@ -99,14 +99,14 @@ Old datasets with 33-feature states and 4 intents must be regenerated (the featu
 For intent-only migration (4→3), use:
 
 ```bash
-python scripts/migrate_intents.py db_w40_d3_mar03.npz --output db_w40_d3_mar03_v2.npz
+python code/scripts/migrate_intents.py db_w40_d3_mar03.npz --output db_w40_d3_mar03_v2.npz
 ```
 
 ## Optimizing Weights
 
 ```bash
 ./target/release/sueca_wann optimize-weights \
-  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json \
   --deals 200 --generations 50
 ```
 
@@ -115,11 +115,11 @@ Uses Differential Evolution (pop=50, F=0.5, CR=0.7) to optimize independent per-
 ## Comparing Training Runs
 
 ```bash
-uv run python scripts/compare_runs.py
-uv run python scripts/compare_runs.py --runs 2026-06-03-2
+uv run python code/scripts/compare_runs.py
+uv run python code/scripts/compare_runs.py --runs 2026-06-03-2
 ```
 
-Saves `checkpoints/run_comparison.png` with 4 panels: fitness, delta vs HeuristicBot, species diversity, network complexity.
+Saves `code/checkpoints/run_comparison.png` with 4 panels: fitness, delta vs HeuristicBot, species diversity, network complexity.
 
 ## Sueca Rules (Critical)
 
@@ -285,8 +285,8 @@ When WANN outputs tie, a random intent is chosen among the tied maximums (not de
 
 ## Code Conventions
 
-- Rust source: `src/sueca_solver/src/` (engine), `src/sueca_wann/src/` (training + CLI).
-- Python is visualization-only: `scripts/compare_runs.py` (cross-run plots).
+- Rust source: `code/src/sueca_solver/src/` (engine), `code/src/sueca_wann/src/` (training + CLI).
+- Python is visualization-only: `code/scripts/compare_runs.py` (cross-run plots).
 - Tests must be thorough — test invariants (e.g., total points = 120), edge cases, and boundary values.
 - Rust functions: `#[inline(always)]` on hot-path bitboard/WANN ops.
 
