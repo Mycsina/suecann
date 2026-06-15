@@ -63,6 +63,7 @@
         Millions of floating-point weights $\rightarrow$ \textbf{opaque}.\\[6pt]
         \textit{``Why did you play that card?''}\\
         \textit{``\ldots the matrix says so.''}
+        \textit{``\ldots I saw 14 million futures, and this is the only one where we win.''}
       \end{block}
     \column{0.48\textwidth}
       \begin{block}{Our goal}
@@ -93,14 +94,17 @@
         \node[circle,draw,fill=red!30,inner sep=0pt,minimum size=22pt] (S3) at (-2.4,0) {3};
         \node[circle,draw,fill=blue!30,inner sep=0pt,minimum size=22pt] (S2) at (0,-1.8) {2};
         \node[circle,draw,fill=red!30,inner sep=0pt,minimum size=22pt] (S1) at (2.4,0) {1};
-        \draw[<-,thick,blue!60] (S0) -- (S2) node[midway,left,blue] {team};
-        \draw[<-,thick,red!60] (S1) -- (S3) node[midway,above,red] {team};
+        % Team arrows (no labels — legend below)
+        \draw[<->,thick,blue!60] (S0) -- (S2);
+        \draw[<->,thick,red!60] (S1) -- (S3);
         % Turn order
-        \draw[->,dashed,gray] (S0) -- (S3) node[midway,above,font=\tiny] {ccw};
+        \draw[->,dashed,gray] (S0) -- (S3);
         \draw[->,dashed,gray] (S3) -- (S2);
         \draw[->,dashed,gray] (S2) -- (S1);
         \draw[->,dashed,gray] (S1) -- (S0);
-      \end{tikzpicture}
+        \node[font=\tiny,gray] at (1.0,0.9) {\textit{ccw}};
+      \end{tikzpicture}\\[2pt]
+      {\footnotesize\color{blue!60}\(\bullet\) Team 0\&2 \hspace{8pt} \color{red!60}\(\bullet\) Team 1\&3}
     \column{0.50\textwidth}
       \textbf{Key rules}\\[4pt]
       \begin{itemize}
@@ -192,6 +196,7 @@
     \column{0.33\textwidth}
       \centering
       \begin{block}{\centering\textbf{MAX\_FORCE}}
+        \vspace{1em}
         \footnotesize
         Elite + \textbf{control}.\\[4pt]
         When trump-long: lead a \textbf{low trump} to draw opponents' high trumps.\\[4pt]
@@ -201,6 +206,7 @@
     \column{0.33\textwidth}
       \centering
       \begin{block}{\centering\textbf{EFFICIENT\_WIN}}
+        \vspace{1em}
         \footnotesize
         \textbf{Exactly} Elite.\\[4pt]
         Play the \textbf{cheapest} card that wins the trick.\\[4pt]
@@ -210,6 +216,7 @@
     \column{0.33\textwidth}
       \centering
       \begin{block}{\centering\textbf{EQUITY\_BUILDER}}
+        \vspace{1em}
         \footnotesize
         Elite + \textbf{tempo}.\\[4pt]
         Lead \textbf{shortest} side-suit (build a void for later cuts).\\[4pt]
@@ -283,7 +290,7 @@
       \end{tabular}
       \vspace{8pt}
       \centering
-      \small\emph{Stronger teacher $\rightarrow$ simpler champion.\\The ceiling is the resolver, not the teacher.}
+      \small\emph{Statistically identical strength $\rightarrow$ 4.5$\times$ simpler.\\The ceiling is the resolver, not the teacher.}
   \end{columns}
 \end{frame}
 
@@ -350,22 +357,25 @@
       \centering
       \textbf{Fix \#1}\\[2pt]
       \scriptsize
-      \textbf{Styled resolver}\\
+      \textbf{Styled resolver} (Fix 1)\\
       Every intent $\approx$ Elite\\
       48\% / 47\% / 46\%\\
-      Collapse $\rightarrow$ merely ties
+      Collapse $\rightarrow$ merely ties\\[2pt]
+      \textbf{Result: 52.7\%} vs.\ Elite\\
+      (132 gates, 188 conns)
     \column{0.33\textwidth}
       \centering
       \textbf{Fix \#2 \& \#3}\\[2pt]
       \scriptsize
-      Best-of-3-intent labeling\\
-      \textbf{Rollout teacher}\\
-      62\% vs.\ Elite\\
-      $\rightarrow$ 4.5$\times$ simpler
-  \end{columns}
+      \textbf{Rollout teacher} (Fix 2+3)\\
+      62\% vs.\ Elite (itself)\\
+      $\rightarrow$ 4.5$\times$ simpler champion\\[2pt]
+      \textbf{Result: 52.1\%} vs.\ Elite\\
+      (29 gates, 49 conns)\\
+      {\footnotesize\emph{equal strength}}
+    \end{columns}
   \vspace{6pt}
   \centering
-  \parbox{0.92\textwidth}{\centering\small\emph{Diagnosed with a training-free harness in seconds, not blind retraining in hours.}}
 \end{frame}
 
 % ======================================================================
@@ -418,34 +428,31 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
 % ======================================================================
 % SLIDE 11 — Honest Analysis
 % ======================================================================
-\begin{frame}{The styled resolver that enabled the win also sets the strength ceiling, and we measured it}
+\begin{frame}{The styled resolver enabled the win but also sets the ceiling: we measured four strength levels}
   \centering
   \begin{tabular}{@{}lcccc@{}}
     \toprule
-    & \textbf{Any pure intent} & \textbf{Final champion} & \textbf{3-intent oracle} & \textbf{RF ceiling} \\
+    & \textbf{Pure intent} & \textbf{Champion} & \textbf{Oracle} & \textbf{RF predictor} \\
     \midrule
-    vs.\ Elite & 47--48\% & \textbf{52.1\%} & \textbf{58\%} & 63--71\% \\
+    vs.\ Elite & 47--48\% & \textbf{52.1\%} & 58\% & 63--71\% \\
     \bottomrule
   \end{tabular}
   \vspace{6pt}
 
   \footnotesize
-  \textbf{Elite floor} \hspace{4pt} $\rightarrow$ \hspace{4pt}
-  every intent $\approx$ Elite individually $\rightarrow$ collapse merely ties\\
-  \textbf{Oracle cap} \hspace{4pt} $\rightarrow$ \hspace{4pt}
-  perfect intent selection $\approx$ 58\% $\rightarrow$ $\sim$8 pp headroom left\\[4pt]
-  \textbf{+2\% = the learned deviation overlay} on top of the fixed resolver base.
+  \textbf{Pure intent:} each of the 3 intents played alone (no WANN) \\ \hspace{14pt}$\rightarrow$ $\approx$Elite — the ``raised floor'' that prevents collapse.\\
+  \textbf{Oracle:} perfect intent selection at every decision \\ \hspace{14pt}$\rightarrow$ 58\% is the \textbf{absolute cap} of the current vocabulary.\\
+  \textbf{RF = Random Forest} trained on belief features to predict the oracle's choice. \\ \hspace{14pt}63--71\% accuracy shows the \textbf{features carry usable signal} the WANN has not yet learned.\\[4pt]
+  \textbf{The +2\% gap} (47\% floor $\rightarrow$ 52\% champion) \textbf{is the learned deviation overlay.}
 
-  \vspace{8pt}
+  \vspace{6pt}
   \begin{columns}[T]
     \column{0.50\textwidth}
       \footnotesize
       \textbf{What limits us}\\[4pt]
       \begin{itemize}
-        \item 3 intents nearly equivalent in fitness
-        \item Weak gradient for learned selection
-        \item Lead decision harder: RF $+$2.5 pp
-        \item Follow learnable: RF $+$7.9 pp
+        \item 3 intents nearly equivalent in fitness $\rightarrow$ weak learning signal
+        \item Lead decision harder: RF gap $+$2.5 pp (vs.\ follow $+$7.9 pp)
       \end{itemize}
     \column{0.50\textwidth}
       \footnotesize
@@ -454,12 +461,11 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
         \item More-differentiated intents
         \item Opponent-card inference features
         \item Knowledge distillation
-        \item Richer belief state
       \end{itemize}
   \end{columns}
-  \vspace{2pt}
+  \vspace{4pt}
   \centering
-  \parbox{0.92\textwidth}{\centering\footnotesize\emph{We measure and report our ceiling; $+2\%$ is the learned overlay.}}
+  \parbox{0.92\textwidth}{\centering\footnotesize\emph{Honest science: we measure and report our ceiling.}}
 \end{frame}
 
 % ======================================================================
@@ -495,7 +501,7 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
   \begin{center}
     \small\textbf{React + WASM}: Rust game engine compiled to WebAssembly\\
     Play Sueca against the WANN, watch the logic flow in real time.\\[2pt]
-    \scriptsize\url{https://github.com/andre-csilva/sueca-wann}
+    \scriptsize\url{sueca.mycsina.xyz}
   \end{center}
 \end{frame}
 
@@ -513,10 +519,12 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
               $\rightarrow$ raise the oracle cap above 58\%
         \item \textbf{Opponent-card inference}\\
               can a logic circuit learn to infer\\
-              hidden cards from optimal play?
+              hidden cards from presumed optimal play?
         \item \textbf{Knowledge distillation}\\
               champion $\rightarrow$ even smaller student\\
               $\rightarrow$ Pareto curve of strength vs.\ size
+        \item \textbf{Collaboration} \\
+              can a logic circuit display emergent collaboration capabilities in Sueca?
       \end{enumerate}
     \column{0.48\textwidth}
       \footnotesize
@@ -525,16 +533,14 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
         \item Evolved an \textbf{interpretable},\\Elite-beating Sueca agent
         \item Verified pipeline:\\
               logic gates $\rightarrow$ \textbf{5 readable rules}
-        \item Honest analysis of the\\resolver-floor ceiling
-        \item Supra-Elite rollout teacher\\
-              ($\sim$1000$\times$ cheaper)
+        \item Built an interactive website\\that allows to play and explore the agent in a real game environment
+        \item Created a Monte Carlo tree search algorithm to estimate the true potential of any given game position.
         \item All code, data, and rules\\are reproducible
       \end{itemize}
   \end{columns}
   \vspace{4pt}
   \centering
   \textbf{Competitive, interpretable card-play AI is possible: the rules fit on one slide.}\\[4pt]
-  {\footnotesize\url{https://github.com/andre-csilva/sueca-wann}}
 \end{frame}
 
 % ======================================================================
@@ -552,7 +558,7 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
     Reisinger et al.\ 2004 & Coevolving modular (L-NEAT)\\
     \bottomrule
   \end{tabular}
-  \vspace{14pt}
+  \vspace{10pt}
   \textbf{Reproducibility}\\[4pt]
   \scriptsize
   All commands in \texttt{README.md}\\

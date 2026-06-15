@@ -321,7 +321,7 @@ def training_phase0_slide():
 
 
 def training_phase1_slide():
-    """Phase 1 only — single panel, larger, for presentation slide."""
+    """Phase 1 only — single line (lead + follow share co-evolved fitness)."""
     df = pd.read_csv(CSV)
     p1 = df[df.generation >= PHASE0_END]
 
@@ -329,27 +329,21 @@ def training_phase1_slide():
     ax.axvspan(p1.generation.min(), p1.generation.max(),
                facecolor="#FFF3E0", zorder=0)
 
+    # Lead and follow share identical fitness values in co-evolution
+    # (they are evaluated together on the same games).
+    # Draw a single line and label it honestly.
     ax.plot(p1.generation, p1.lead_best_fitness, color=C_LEAD, lw=1.2)
-    ax.plot(p1.generation, p1.follow_best_fitness, color=C_FOLLOW, lw=1.2)
 
     ax.axhline(0, ls="--", color=C_REFERENCE, lw=0.8, zorder=2)
     ax.text(p1.generation.iloc[0] + 4, 0.12,
             "HeuristicBot parity", fontsize=8, color=C_REFERENCE,
             ha="left", va="bottom")
 
-    ends = {"lead": p1.lead_best_fitness.iloc[-1],
-            "follow": p1.follow_best_fitness.iloc[-1]}
-    lo, hi = sorted(ends, key=ends.get)
-    dy = {lo: -10, hi: 10}
-    for col, color, name in [
-        ("lead_best_fitness",   C_LEAD,   "lead"),
-        ("follow_best_fitness", C_FOLLOW, "follow"),
-    ]:
-        y_end = p1[col].iloc[-1]
-        ax.annotate(name, xy=(p1.generation.iloc[-1], y_end),
-                     xytext=(8, dy[name]), textcoords="offset points",
-                     fontsize=9, color=color, va="center", fontweight="bold",
-                     clip_on=False)
+    y_end = p1.lead_best_fitness.iloc[-1]
+    ax.annotate("lead + follow", xy=(p1.generation.iloc[-1], y_end),
+                 xytext=(8, 0), textcoords="offset points",
+                 fontsize=9, color=C_LEAD, va="center", fontweight="bold",
+                 clip_on=False)
 
     ax.set_title("Phase 1 — Co-evolutionary Self-play", fontweight="bold",
                  pad=10, fontsize=13)

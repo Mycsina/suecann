@@ -89,12 +89,13 @@
 };
 
 % === Braces for phases ===
+% Use the tallest box (intents) as the baseline so the brace is horizontal
 \draw [decorate, decoration={brace, amplitude=4pt}, black!40, thick]
-  ($(belief.north west) + (-2pt, 4pt)$) -- ($(intents.north east) + (0pt, 4pt)$)
+  ($(belief.north west |- intents.north) + (-2pt, 4pt)$) -- ($(intents.north east) + (0pt, 4pt)$)
   node[midway, above=5pt, font=\footnotesize\sffamily, black!50] {Neurosymbolic core (evolved)};
 
 \draw [decorate, decoration={brace, amplitude=4pt}, black!40, thick]
-  ($(resolver.north west) + (0pt, 4pt)$) -- ($(card.north east) + (2pt, 4pt)$)
+  ($(resolver.north west |- card.north) + (0pt, 4pt)$) -- ($(card.north east) + (2pt, 4pt)$)
   node[midway, above=5pt, font=\footnotesize\sffamily, black!50] {Heuristic (fixed)};
 
 \end{tikzpicture}
