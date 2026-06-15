@@ -280,10 +280,13 @@ aggregation (SUM, MIN/AND, MAX/OR). The 39 base nodes are: 35 inputs, one bias
 precision at the THRESHOLD boundary) and SIGMOID (breaks rule extraction). All
 outputs are clamped to $[0,1]$; THRESHOLD fires at 0.5.
 
-A connection from $i$ to $j$ with sign $s$ contributes $s \cdot W \cdot
-\text{out}_i$ to $j$'s aggregation. At inference the network is evaluated at
-all six sweep weights $\{-2.0, -1.0, -0.5, 0.5, 1.0, 2.0\}$; the argmax output
-is averaged across sweeps before intent selection.
+A connection from $i$ to $j$ carries only a sign: a positive edge passes
+$\text{out}_i$, while a negative edge \emph{inverts} the signal to
+$1-\text{out}_i$ (logical NOT, since outputs lie in $[0,1]$); the result is then
+scaled by the shared weight $W$ before $j$ aggregates it. At inference the
+network is evaluated at all six sweep weights
+$\{-2.0, -1.0, -0.5, 0.5, 1.0, 2.0\}$ and the per-intent outputs are averaged
+across the sweep before argmax intent selection.
 
 \subsection{Evolution}
 
