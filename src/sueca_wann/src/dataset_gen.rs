@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sueca_solver::belief::encode_belief_state;
 use sueca_solver::constants::{INPUT_COUNT, OUTPUT_COUNT};
-use sueca_solver::engine::{CARD_POINTS, CARD_SUIT};
+use sueca_solver::engine::CARD_SUIT;
 use sueca_solver::heuristic::{resolve_intent, select_card_heuristic};
 use sueca_solver::simulator::SuecaSimulatorGame;
 

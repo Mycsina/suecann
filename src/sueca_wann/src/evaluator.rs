@@ -727,6 +727,7 @@ mod tests {
             soft_balance_min_ratio: 0.0,
             diff_mode: false,
             fixed_worlds: None,
+            use_rollout_teacher: false,
         };
         let n_deals: u64 = std::env::var("DUMP_DEALS").ok().and_then(|s| s.parse().ok()).unwrap_or(4000);
         let mut out = String::new();
