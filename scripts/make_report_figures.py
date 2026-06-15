@@ -321,7 +321,13 @@ def training_phase0_slide():
 
 
 def training_phase1_slide():
-    """Phase 1 only — single line (lead + follow share co-evolved fitness)."""
+    """Phase 1 only — two lines drawn with distinct styles.
+
+    Lead and follow share identical fitness values (co-evolved, evaluated
+    on the same games), so the lines are superimposed. We draw both with
+    different colours and line styles so the audience can see that both
+    brains are present even when their fitness traces overlap.
+    """
     df = pd.read_csv(CSV)
     p1 = df[df.generation >= PHASE0_END]
 
@@ -329,21 +335,17 @@ def training_phase1_slide():
     ax.axvspan(p1.generation.min(), p1.generation.max(),
                facecolor="#FFF3E0", zorder=0)
 
-    # Lead and follow share identical fitness values in co-evolution
-    # (they are evaluated together on the same games).
-    # Draw a single line and label it honestly.
-    ax.plot(p1.generation, p1.lead_best_fitness, color=C_LEAD, lw=1.2)
+    # Draw both even though values are identical — different styles
+    # so the audience can see traces of both.
+    ax.plot(p1.generation, p1.lead_best_fitness,
+            color=C_LEAD, lw=1.8, linestyle='-',  zorder=5)
+    ax.plot(p1.generation, p1.follow_best_fitness,
+            color=C_FOLLOW, lw=1.8, linestyle='--', zorder=4)
 
-    ax.axhline(0, ls="--", color=C_REFERENCE, lw=0.8, zorder=2)
+    ax.axhline(0, ls=":", color=C_REFERENCE, lw=0.8, zorder=2)
     ax.text(p1.generation.iloc[0] + 4, 0.12,
             "HeuristicBot parity", fontsize=8, color=C_REFERENCE,
             ha="left", va="bottom")
-
-    y_end = p1.lead_best_fitness.iloc[-1]
-    ax.annotate("lead + follow", xy=(p1.generation.iloc[-1], y_end),
-                 xytext=(8, 0), textcoords="offset points",
-                 fontsize=9, color=C_LEAD, va="center", fontweight="bold",
-                 clip_on=False)
 
     ax.set_title("Phase 1 — Co-evolutionary Self-play", fontweight="bold",
                  pad=10, fontsize=13)

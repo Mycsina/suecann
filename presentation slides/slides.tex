@@ -62,7 +62,7 @@
         Deep PIMC and neural policy nets.\\[6pt]
         Millions of floating-point weights $\rightarrow$ \textbf{opaque}.\\[6pt]
         \textit{``Why did you play that card?''}\\
-        \textit{``\ldots the matrix says so.''}
+        \textit{``\ldots the matrix says so.''}\\
         \textit{``\ldots I saw 14 million futures, and this is the only one where we win.''}
       \end{block}
     \column{0.48\textwidth}
@@ -168,7 +168,7 @@
       \end{tabular}}
       \vspace{8pt}
       \begin{itemize}
-        \item No MEAN (precision), no SIGMOID (rules)
+        \item No MEAN, no SIGMOID (interpretability)
         \item All outputs clamped to $[0,1]$
       \end{itemize}
     \column{0.48\textwidth}
@@ -336,13 +336,11 @@
     \draw[->,thick] (0,0) -- (10.5,0) node[right] {};
     % Labels
     \node[below] at (0,0) {\scriptsize 30.2\%};
-    \node[below] at (3.5,0) {\scriptsize Fix 1};
-    \node[below] at (7.0,0) {\scriptsize Fix 2+3};
+    \node[below] at (5.0,0) {\scriptsize Fix 1};
     \node[below] at (10.5,0) {\scriptsize\textbf{52.1\%}};
     % Markers
     \fill[red!60] (0,0) circle (3pt);
-    \fill[orange!60] (3.5,0) circle (3pt);
-    \fill[green!60] (7.0,0) circle (3pt);
+    \fill[orange!60] (5.0,0) circle (3pt);
     \fill[green!60] (10.5,0) circle (3pt);
   \end{tikzpicture}
   \vspace{8pt}
@@ -372,14 +370,13 @@
       $\rightarrow$ 4.5$\times$ simpler champion\\[2pt]
       \textbf{Result: 52.1\%} vs.\ Elite\\
       (29 gates, 49 conns)\\
-      {\footnotesize\emph{equal strength}}
     \end{columns}
   \vspace{6pt}
   \centering
 \end{frame}
 
 % ======================================================================
-% SLIDE 10 — Interpretability Payoff
+% SLIDE 12 — Interpretability Payoff
 % ======================================================================
 \begin{frame}[fragile]{The follow brain compiles to 5 logic gates at depth 5 (verified behavior-preserving)}
   \centering
@@ -413,7 +410,7 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
 \end{frame}
 
 % ======================================================================
-% SLIDE 10b — Raw topology (full slide for legibility)
+% SLIDE 13 — Raw topology (full slide for legibility)
 % ======================================================================
 \begin{frame}{Before folding: the raw evolved follow-brain topology}
   \centering
@@ -426,9 +423,9 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
 \end{frame}
 
 % ======================================================================
-% SLIDE 11 — Honest Analysis
+% SLIDE 14 — Honest Analysis
 % ======================================================================
-\begin{frame}{The styled resolver enabled the win but also sets the ceiling: we measured four strength levels}
+\begin{frame}{Feature Space Analysis}
   \centering
   \begin{tabular}{@{}lcccc@{}}
     \toprule
@@ -437,33 +434,36 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
     vs.\ Elite & 47--48\% & \textbf{52.1\%} & 58\% & 63--71\% \\
     \bottomrule
   \end{tabular}
-  \vspace{6pt}
+  \vspace{8pt}
 
   \footnotesize
-  \textbf{Pure intent:} each of the 3 intents played alone (no WANN) \\ \hspace{14pt}$\rightarrow$ $\approx$Elite — the ``raised floor'' that prevents collapse.\\
-  \textbf{Oracle:} perfect intent selection at every decision \\ \hspace{14pt}$\rightarrow$ 58\% is the \textbf{absolute cap} of the current vocabulary.\\
-  \textbf{RF = Random Forest} trained on belief features to predict the oracle's choice. \\ \hspace{14pt}63--71\% accuracy shows the \textbf{features carry usable signal} the WANN has not yet learned.\\[4pt]
-  \textbf{The +2\% gap} (47\% floor $\rightarrow$ 52\% champion) \textbf{is the learned deviation overlay.}
+  \textbf{Pure intent:} each of the 3 intents played alone (no WANN)\\
+  \textbf{Champion:} the evolved WANN choosing between them \\
+  \textbf{Oracle:} perfect intent selection at every decision \\
+  \textbf{RF = Random Forest} trained on belief features to predict the oracle's choice \\ \hspace{14pt}$\rightarrow$ 63--71\% shows the \textbf{features carry usable signal} the WANN has not yet learned.
+\end{frame}
 
-  \vspace{6pt}
+% ======================================================================
+% SLIDE 11b — Limits & Future
+% ======================================================================
+\begin{frame}{What limits us, and what could raise the 58\% ceiling}
   \begin{columns}[T]
     \column{0.50\textwidth}
-      \footnotesize
-      \textbf{What limits us}\\[4pt]
+      \textbf{What limits us}\\[6pt]
       \begin{itemize}
-        \item 3 intents nearly equivalent in fitness $\rightarrow$ weak learning signal
-        \item Lead decision harder: RF gap $+$2.5 pp (vs.\ follow $+$7.9 pp)
+        \item \textbf{3 intents $\approx$ Elite individually}\\creates a weak gradient — the network converges to the simplest policy that ties Elite
+        \item \textbf{Lead decision is harder}:\\Random Forest accuracy gap $+$2.5 pp (vs.\ $+$7.9 pp for follow)
+        \item \textbf{Resolver-floor bottleneck}:\\realisable headroom above Elite is $\sim$8 pp
       \end{itemize}
     \column{0.50\textwidth}
-      \footnotesize
-      \textbf{What could raise the cap}\\[4pt]
+      \textbf{What could raise the cap}\\[6pt]
       \begin{itemize}
-        \item More-differentiated intents
-        \item Opponent-card inference features
-        \item Knowledge distillation
+        \item \textbf{More-differentiated intents}:\\wider fitness gap $\rightarrow$ stronger learning signal
+        \item \textbf{Opponent-card inference}:\\can a logic circuit learn to infer hidden cards from public information?
+        \item \textbf{Knowledge distillation}:\\champion $\rightarrow$ smaller student, Pareto curve of strength vs.\ interpretability
       \end{itemize}
   \end{columns}
-  \vspace{4pt}
+  \vspace{6pt}
   \centering
   \parbox{0.92\textwidth}{\centering\footnotesize\emph{Honest science: we measure and report our ceiling.}}
 \end{frame}
@@ -506,9 +506,9 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
 \end{frame}
 
 % ======================================================================
-% SLIDE 13 — Future Work & Conclusion
+% SLIDE 16 — Future Work & Conclusion
 % ======================================================================
-\begin{frame}{Richer intents and opponent-card inference are the path to breaking the 58\% ceiling}
+\begin{frame}{Future Work \& Conclusion}
   \begin{columns}[T]
     \column{0.52\textwidth}
       \footnotesize
@@ -533,8 +533,8 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
         \item Evolved an \textbf{interpretable},\\Elite-beating Sueca agent
         \item Verified pipeline:\\
               logic gates $\rightarrow$ \textbf{5 readable rules}
-        \item Built an interactive website\\that allows to play and explore the agent in a real game environment
-        \item Created a Monte Carlo tree search algorithm to estimate the true potential of any given game position.
+        \item Interactive website to explore the agent in a real game environment
+        \item Fused PIMC with Elite rollout to estimate the true potential of any game position.
         \item All code, data, and rules\\are reproducible
       \end{itemize}
   \end{columns}
@@ -544,7 +544,7 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
 \end{frame}
 
 % ======================================================================
-% SLIDE 14 — Q&A / Backup
+% SLIDE 17 — Q&A / Backup
 % ======================================================================
 \begin{frame}{Thank you. Questions?}
   \centering
@@ -557,8 +557,8 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
     Mouret \& Clune 2015 & MAP-Elites\\
     Reisinger et al.\ 2004 & Coevolving modular (L-NEAT)\\
     \bottomrule
-  \end{tabular}
-  \vspace{10pt}
+  \end{tabular}\\
+  \vspace{4pt}
   \textbf{Reproducibility}\\[4pt]
   \scriptsize
   All commands in \texttt{README.md}\\
