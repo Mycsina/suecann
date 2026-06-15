@@ -2,7 +2,7 @@
 
 Evolves Weight-Agnostic Neural Networks (WANNs) to play Sueca, a Portuguese four-player partnership trick-taking card game. The system evolves discrete network topologies built from logical gates. You can compile the resulting networks into human-readable IF/THEN rules.
 
-> **2026-06-12 — Pipeline recovery in progress.** The dataset pipeline has been restructured (mid-trick walks, 6-bucket per-split balance, multi-label acceptance). A new 18K-state dataset is generating. Benchmarks below are from the **previous** run; updated numbers will replace them after retraining. See `43417da` for the recovery commit.
+> **Status (2026-06-15).** The canonical champion is **v6** (`checkpoints/production/2026-06-14-2`), which **beats the strong EliteHeuristic baseline 52.1% ± 1.8% (n=3000)** while compiling to a handful of human-readable IF/THEN rules. The benchmarks below are current. See `problems.md` (Chapters 1–3) for the full diagnosis and the strength↔interpretability analysis.
 
 ## Architecture
 
