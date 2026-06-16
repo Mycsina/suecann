@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+# Pre-commit hook: rebuild WASM if Rust source changed, then stage the output.
+set -euo pipefail
+
+# Only trigger if Rust source files are in the staged changes
+RUST_FILES=$(git diff --cached --name-only --diff-filter=ACM |
+    grep -E '^code/src/(sueca_solver|sueca_wann|sueca_wasm)/' || true)
+
+if [ -z "$RUST_FILES" ]; then
+    exit 0
+fi
+
+echo "→ Rust source changed, rebuilding WASM..."
+
+cd "$(git rev-parse --show-toplevel)/code/src/sueca_wasm"
+
+RUSTFLAGS="" wasm-pack build --target web --out-dir ../../frontend/src/wasm --release
+
+# wasm-pack generates a .gitignore that ignores everything — delete it
+rm -f "$(git rev-parse --show-toplevel)/code/frontend/src/wasm/.gitignore"
+
+# Stage the regenerated WASM files so they're included in the commit
+cd "$(git rev-parse --show-toplevel)"
+git add code/frontend/src/wasm/
+
+echo "✓ WASM rebuilt and staged"

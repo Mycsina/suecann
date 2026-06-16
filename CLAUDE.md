@@ -22,10 +22,10 @@ The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the R
 
 ### WASM Pre-commit Hook
 
-A `.githooks/pre-commit` hook auto-rebuilds WASM and stages the output whenever Rust source files (`src/sueca_*`) are committed. One-time setup per clone:
+A `code/.githooks/pre-commit` hook auto-rebuilds WASM and stages the output whenever Rust source files (`code/src/sueca_*`) are committed. One-time setup per clone:
 
 ```bash
-git config core.hooksPath .githooks
+git config core.hooksPath code/.githooks
 ```
 
 After this, every commit that touches Rust source automatically runs `wasm-pack build --target web` and `git add`s the regenerated `code/frontend/src/wasm/` files. No manual WASM rebuild step needed before push.

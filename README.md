@@ -132,7 +132,7 @@ cargo build -p sueca_wann --release
 ```bash
 uv sync                              # Python deps (visualization only)
 cargo build -p sueca_wann --release  # Build training binary
-git config core.hooksPath .githooks  # Activate WASM pre-commit hook
+git config core.hooksPath code/.githooks  # Activate WASM pre-commit hook
 ```
 
 ### Training

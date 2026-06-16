@@ -11,6 +11,11 @@ wheels/
 
 **/target/**
 .*/
+# ...but DO track the committed WASM pre-commit hook. Without these negations the
+# `.*/` rule above swallows code/.githooks/, so the documented
+# `git config core.hooksPath code/.githooks` would point at an empty dir on fresh clones.
+!code/.githooks/
+!code/.githooks/pre-commit
 checkpoints/
 *.csv
 *.data
