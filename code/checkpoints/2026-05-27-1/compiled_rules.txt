@@ -1,0 +1,53 @@
+=== Evolved Sueca WANN Strategy Rules (W = 1.0) ===
+
+Active Inputs Referenced:
+  Has_Led_Suit (Node 0)
+  Has_Trump (Node 1)
+  Led_Suit_Power (Node 2)
+  Trump_Power (Node 3)
+  Hand_Point_Density (Node 4)
+  Am_I_Last_To_Play (Node 6)
+  Is_Partner_Winning (Node 7)
+  Trick_Point_Value (Node 8)
+  Has_Trick_Been_Cut (Node 9)
+  Game_Pts_Remaining (Node 17)
+  Trick_Number (Node 18)
+  Trumps_Remaining (Node 19)
+
+Active Hidden Logic Steps:
+  hidden_26 = THRESHOLD(Trumps_Remaining > 0.5000)
+  hidden_38 = (NOT(Is_Partner_Winning) + NOT(Trick_Point_Value))
+  hidden_39 = THRESHOLD(OR(Trick_Number) > 0.5000)
+  hidden_42 = NOT(OR(Has_Trick_Been_Cut))
+  hidden_44 = AND(NOT(Am_I_Last_To_Play))
+  hidden_45 = THRESHOLD(AND(hidden_39) > 0.5000)
+  hidden_48 = AND(Am_I_Last_To_Play)
+  hidden_49 = THRESHOLD(AND(Trick_Point_Value) > 0.5000)
+  hidden_50 = OR(Trump_Power)
+  hidden_51 = Game_Pts_Remaining
+  hidden_54 = OR(Is_Partner_Winning)
+  hidden_55 = NOT(AND(Hand_Point_Density))
+  hidden_47 = THRESHOLD(AND(NOT(hidden_55)) > 0.5000)
+  hidden_30 = AND(hidden_47)
+  hidden_40 = AND(hidden_30)
+  hidden_31 = NOT(OR(hidden_26, NOT(hidden_38)))
+  hidden_28 = THRESHOLD(OR(NOT(Trump_Power), NOT(hidden_31), hidden_42) > 0.5000)
+  hidden_37 = NOT((hidden_28 + hidden_45))
+  hidden_35 = NOT(AND(hidden_26, hidden_37))
+  hidden_27 = NOT(AND(hidden_35))
+  hidden_41 = THRESHOLD(hidden_27 > 0.5000)
+  hidden_32 = Led_Suit_Power
+  hidden_53 = THRESHOLD(hidden_32 > 0.5000)
+  hidden_29 = OR(NOT(hidden_53))
+  hidden_46 = NOT(AND(hidden_29))
+  hidden_43 = THRESHOLD(AND(hidden_46, hidden_50, hidden_51) > 0.5000)
+  hidden_52 = THRESHOLD(OR(NOT(hidden_43)) > 0.5000)
+  hidden_36 = OR(NOT(hidden_40), NOT(hidden_44), NOT(hidden_52))
+  hidden_33 = hidden_29
+  hidden_34 = NOT((NOT(hidden_36) + NOT(hidden_54)))
+
+Decision Rules for Play Intents:
+  MAX_FORCE = (Trick_Point_Value + Has_Led_Suit + NOT(hidden_41))
+  MIN_FORCE = (NOT(Led_Suit_Power) + hidden_31)
+  EFFICIENT_WIN = (NOT(Is_Partner_Winning) + Trick_Point_Value + NOT(hidden_33))
+  EQUITY_BUILDER = (Has_Trump + NOT(hidden_28) + hidden_34 + NOT(hidden_48) + hidden_49)

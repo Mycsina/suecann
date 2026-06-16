@@ -1,0 +1,56 @@
+=== Evolved Sueca WANN Strategy Rules (W = 1) ===
+
+Loaded genome with 64 nodes and 104 connections.
+Topology: 64 total nodes, 54 enabled connections (54)
+
+Active Inputs Referenced:
+  Has_Led_Suit (Node 0)
+  Led_Suit_Power (Node 2)
+  Trump_Power (Node 3)
+  Am_I_Leading (Node 5)
+  Is_Partner_Winning (Node 7)
+  Trick_Point_Value (Node 8)
+  Partner_Void_Trump (Node 11)
+  Any_Opp_Void_Trump (Node 13)
+  Led_Suit_7_Played (Node 15)
+  Score_Delta (Node 20)
+  Side0_Depletion (Node 21)
+  Side1_7_Played (Node 26)
+  Side2_Ace_Played (Node 28)
+
+Active Hidden Logic Steps:
+  hidden_38 = OR(Score_Delta)
+  hidden_41 = AND(NOT(Side0_Depletion))
+  hidden_43 = Any_Opp_Void_Trump
+  hidden_45 = AND(hidden_41, Trump_Power)
+  hidden_48 = THRESHOLD(AND(NOT(Has_Led_Suit)) > 0.5000)
+  hidden_44 = hidden_48
+  hidden_50 = AND(hidden_45)
+  hidden_51 = Has_Led_Suit
+  hidden_52 = AND(Side1_7_Played)
+  hidden_42 = THRESHOLD(OR(hidden_52) > 0.5000)
+  hidden_35 = (hidden_42 + hidden_43 + hidden_44)
+  hidden_53 = NOT(AND(Has_Led_Suit))
+  hidden_36 = OR(hidden_38, hidden_53)
+  hidden_49 = (hidden_36 + NOT(hidden_51))
+  hidden_54 = AND(NOT(hidden_53), NOT(Has_Led_Suit))
+  hidden_55 = THRESHOLD((hidden_35 + NOT(Am_I_Leading) + Led_Suit_7_Played) > 0.5000)
+  hidden_57 = OR(NOT(Side2_Ace_Played))
+  hidden_56 = AND(NOT(hidden_57))
+  hidden_58 = AND(hidden_50, NOT(Is_Partner_Winning))
+  hidden_40 = OR(NOT(Am_I_Leading), hidden_58)
+  hidden_60 = OR(Led_Suit_Power)
+  hidden_37 = AND(NOT(Trick_Point_Value), NOT(hidden_60))
+  hidden_59 = AND(hidden_37, NOT(Am_I_Leading))
+  hidden_61 = NOT(Partner_Void_Trump)
+  hidden_62 = NOT(AND(hidden_50))
+  hidden_46 = THRESHOLD(AND(NOT(hidden_56), hidden_61, NOT(hidden_62)) > 0.5000)
+  hidden_39 = THRESHOLD(OR(hidden_46) > 0.5000)
+  hidden_47 = AND(hidden_40, hidden_39, hidden_54)
+  hidden_63 = hidden_47
+
+Decision Rules for Play Intents:
+  MAX_FORCE = (NOT(hidden_40) + NOT(hidden_49))
+  MIN_FORCE = (hidden_59 + hidden_63)
+  EFFICIENT_WIN = (NOT(hidden_36) + NOT(Is_Partner_Winning))
+  EQUITY_BUILDER = (NOT(Side2_Ace_Played) + NOT(Any_Opp_Void_Trump) + hidden_55)

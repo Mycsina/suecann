@@ -1,0 +1,15 @@
+# Per-generation genome snapshots (huge — only keep finals)
+**/best_genome_gen*.json
+**/gen_best_genome_gen*.json
+**/hof_gen*.json
+**/champion_gen*.json
+
+# Binary training state (can be re-derived from finals + CSV)
+**/training_state.bin
+
+# Runtime data snapshots (dev-time debugging aids)
+**/data/
+
+# Re-allow CSV files in checkpoints (overridden by root *.csv)
+!*.csv
+!**/*.csv

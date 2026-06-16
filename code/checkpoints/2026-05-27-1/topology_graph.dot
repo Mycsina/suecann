@@ -1,0 +1,270 @@
+// Evolved WANN Topology
+digraph {
+	nodesep=0.4 overlap=false rankdir=LR ranksep=1.2 splines=true
+	0 [label="Has_Led_Suit
+(I0)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	1 [label="Has_Trump
+(I1)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	2 [label="Led_Suit_Power
+(I2)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	3 [label="Trump_Power
+(I3)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	4 [label="Hand_Point_Density
+(I4)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	6 [label="Am_I_Last_To_Play
+(I6)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	7 [label="Is_Partner_Winning
+(I7)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	8 [label="Trick_Point_Value
+(I8)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	9 [label="Has_Trick_Been_Cut
+(I9)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	17 [label="Game_Pts_Remaining
+(I17)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	18 [label="Trick_Number
+(I18)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	19 [label="Trumps_Remaining
+(I19)" color="#4682b4" fillcolor="#f0f8ff" fontname=Helvetica shape=ellipse style=filled]
+	22 [label="MAX_FORCE
+(O22)" color="#b22222" fillcolor="#fff0f5" fontname="Helvetica-Bold" shape=box style="filled,bold"]
+	23 [label="MIN_FORCE
+(O23)" color="#b22222" fillcolor="#fff0f5" fontname="Helvetica-Bold" shape=box style="filled,bold"]
+	24 [label="EFFICIENT_WIN
+(O24)" color="#b22222" fillcolor="#fff0f5" fontname="Helvetica-Bold" shape=box style="filled,bold"]
+	25 [label="EQUITY_BUILDER
+(O25)" color="#b22222" fillcolor="#fff0f5" fontname="Helvetica-Bold" shape=box style="filled,bold"]
+	26 [label="H26
+SUM
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	27 [label="H27
+MIN
+NOT" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	28 [label="H28
+MAX
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	29 [label="H29
+MAX
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	30 [label="H30
+MIN
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	31 [label="H31
+MAX
+NOT" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	32 [label="H32
+SUM
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	33 [label="H33
+SUM
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	34 [label="H34
+SUM
+NOT" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	35 [label="H35
+MIN
+NOT" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	36 [label="H36
+MAX
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	37 [label="H37
+SUM
+NOT" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	38 [label="H38
+SUM
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	39 [label="H39
+MAX
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	40 [label="H40
+MIN
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	41 [label="H41
+SUM
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	42 [label="H42
+MAX
+NOT" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	43 [label="H43
+MIN
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	44 [label="H44
+MIN
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	45 [label="H45
+MIN
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	46 [label="H46
+MIN
+NOT" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	47 [label="H47
+MIN
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	48 [label="H48
+MIN
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	49 [label="H49
+MIN
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	50 [label="H50
+MAX
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	51 [label="H51
+SUM
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	52 [label="H52
+MAX
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	53 [label="H53
+SUM
+THRESHOLD" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	54 [label="H54
+MAX
+IDENTITY" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	55 [label="H55
+MIN
+NOT" color="#d2691e" fillcolor="#fff5ee" fontname=Helvetica shape=box style=filled]
+	2 -> 23 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	1 -> 25 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	8 -> 22 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	0 -> 22 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	7 -> 24 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	19 -> 26 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	8 -> 24 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	28 -> 25 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	3 -> 28 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	26 -> 31 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	31 -> 23 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	31 -> 28 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	2 -> 32 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	33 -> 24 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	29 -> 33 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	34 -> 25 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	35 -> 27 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	26 -> 35 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	36 -> 34 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	38 -> 31 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	37 -> 35 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	7 -> 38 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	28 -> 37 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	8 -> 38 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	18 -> 39 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	40 -> 36 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	41 -> 22 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	27 -> 41 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	30 -> 40 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	42 -> 28 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	9 -> 42 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	44 -> 36 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	6 -> 44 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	45 -> 37 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	46 -> 43 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	29 -> 46 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	6 -> 48 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	39 -> 45 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	47 -> 30 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	48 -> 25 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	8 -> 49 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	49 -> 25 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	50 -> 43 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	3 -> 50 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	17 -> 51 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	51 -> 43 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	43 -> 52 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	52 -> 36 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	7 -> 54 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	54 -> 34 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	32 -> 53 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	53 -> 29 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	4 -> 55 [arrowsize=0.8 color="#2e8b57" penwidth=2.0 style=solid]
+	55 -> 47 [arrowsize=0.8 color="#cd5c5c" penwidth=2.0 style=dashed]
+	0 -> 1 [style=invis]
+	1 -> 2 [style=invis]
+	2 -> 3 [style=invis]
+	3 -> 4 [style=invis]
+	4 -> 6 [style=invis]
+	6 -> 7 [style=invis]
+	7 -> 8 [style=invis]
+	8 -> 9 [style=invis]
+	9 -> 17 [style=invis]
+	17 -> 18 [style=invis]
+	18 -> 19 [style=invis]
+	22 -> 23 [style=invis]
+	23 -> 24 [style=invis]
+	24 -> 25 [style=invis]
+	{
+		rank=same
+		0
+		1
+		2
+		3
+		4
+		6
+		7
+		8
+		9
+		17
+		18
+		19
+	}
+	{
+		rank=same
+		26
+		38
+		39
+		42
+		44
+		48
+		49
+		50
+		51
+		54
+		55
+		32
+	}
+	{
+		rank=same
+		45
+		47
+		31
+		53
+	}
+	{
+		rank=same
+		30
+		28
+		29
+	}
+	{
+		rank=same
+		40
+		37
+		46
+		33
+	}
+	{
+		rank=same
+		35
+		43
+	}
+	{
+		rank=same
+		27
+		52
+	}
+	{
+		rank=same
+		41
+		36
+	}
+	{
+		rank=same
+		34
+	}
+	{
+		rank=same
+		23
+		22
+		24
+		25
+	}
+}

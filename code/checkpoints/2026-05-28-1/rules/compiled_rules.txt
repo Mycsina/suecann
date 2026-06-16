@@ -1,0 +1,60 @@
+=== Evolved Sueca WANN Strategy Rules (W = 1) ===
+
+Loaded genome with 68 nodes and 122 connections.
+Topology: 68 total nodes, 63 enabled connections (63)
+
+Active Inputs Referenced:
+  Has_Led_Suit (Node 0)
+  Has_Trump (Node 1)
+  Hand_Point_Density (Node 4)
+  Am_I_Last_To_Play (Node 6)
+  Is_Partner_Winning (Node 7)
+  Trick_Point_Value (Node 8)
+  Any_Opp_Void_Led (Node 12)
+  Trump_Ace_Played (Node 16)
+  Trick_Number (Node 18)
+  Side0_Depletion (Node 21)
+  Side0_Ace_Played (Node 22)
+  Side0_7_Played (Node 23)
+  Side1_Depletion (Node 24)
+  Side1_Ace_Played (Node 25)
+
+Active Hidden Logic Steps:
+  hidden_37 = Has_Led_Suit
+  hidden_39 = THRESHOLD(Is_Partner_Winning > 0.5000)
+  hidden_42 = NOT(OR(Trick_Number, NOT(Side0_Ace_Played)))
+  hidden_43 = Side0_7_Played
+  hidden_48 = OR(hidden_37, NOT(Trump_Ace_Played))
+  hidden_49 = THRESHOLD(AND(NOT(hidden_48), NOT(Side0_Depletion), Has_Led_Suit) > 0.5000)
+  hidden_52 = NOT(OR(Hand_Point_Density))
+  hidden_55 = OR(Side0_Depletion)
+  hidden_56 = NOT(AND(Side1_Ace_Played))
+  hidden_38 = NOT(AND(Trump_Ace_Played, NOT(Side1_Ace_Played), NOT(hidden_56)))
+  hidden_47 = THRESHOLD(OR(hidden_38, hidden_43) > 0.5000)
+  hidden_58 = hidden_38
+  hidden_59 = OR(Has_Trump)
+  hidden_41 = NOT(AND(NOT(Hand_Point_Density), hidden_59))
+  hidden_60 = NOT(AND(Am_I_Last_To_Play))
+  hidden_62 = hidden_52
+  hidden_63 = THRESHOLD(AND(hidden_58) > 0.5000)
+  hidden_64 = Trick_Number
+  hidden_44 = THRESHOLD((NOT(Side1_Depletion) + NOT(hidden_55) + hidden_64) > 0.5000)
+  hidden_51 = NOT(AND(hidden_44))
+  hidden_35 = THRESHOLD(OR(hidden_39, NOT(hidden_42), NOT(hidden_51)) > 0.5000)
+  hidden_54 = NOT(hidden_35)
+  hidden_45 = AND(NOT(hidden_44), hidden_54)
+  hidden_66 = THRESHOLD(AND(hidden_41) > 0.5000)
+  hidden_67 = NOT(AND(Am_I_Last_To_Play))
+  hidden_53 = AND(hidden_67)
+  hidden_46 = AND(NOT(hidden_37), hidden_39, hidden_53, hidden_60)
+  hidden_50 = (NOT(hidden_41) + Trick_Point_Value + NOT(hidden_53) + NOT(hidden_66))
+  hidden_36 = THRESHOLD(OR(Any_Opp_Void_Led, hidden_50, NOT(hidden_63)) > 0.5000)
+  hidden_57 = NOT(OR(hidden_36, hidden_50))
+  hidden_40 = NOT(AND(NOT(hidden_37), hidden_57))
+  hidden_61 = THRESHOLD(AND(hidden_46) > 0.5000)
+
+Decision Rules for Play Intents:
+  MAX_FORCE = (NOT(hidden_40) + NOT(hidden_47))
+  MIN_FORCE = (hidden_49 + hidden_61)
+  EFFICIENT_WIN = (hidden_45 + NOT(hidden_62))
+  EQUITY_BUILDER = (Is_Partner_Winning + hidden_54)

@@ -1,0 +1,283 @@
+// Evolved WANN Topology
+digraph {
+    nodesep=0.4 overlap=false rankdir=LR ranksep=1.2 splines=true
+    0 [label="Has_Led_Suit\n(I0)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    2 [label="Led_Suit_Power\n(I2)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    3 [label="Trump_Power\n(I3)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    4 [label="Hand_Point_Density\n(I4)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    6 [label="Am_I_Last_To_Play\n(I6)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    7 [label="Is_Partner_Winning\n(I7)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    9 [label="Has_Trick_Been_Cut\n(I9)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    12 [label="Any_Opp_Void_Led\n(I12)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    14 [label="Led_Suit_Ace_Played\n(I14)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    15 [label="Led_Suit_7_Played\n(I15)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    16 [label="Trump_Ace_Played\n(I16)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    20 [label="Score_Delta\n(I20)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    24 [label="Side1_Depletion\n(I24)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    26 [label="Side1_7_Played\n(I26)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    28 [label="Side2_Ace_Played\n(I28)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    30 [label="Points_Secured_Us\n(I30)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    32 [label="Depleted_Suits_Count\n(I32)" color="#3182bd" fillcolor="#deebf7" fontname=Helvetica shape=ellipse style=filled]
+    33 [label="BIAS\n(33)" color="#636363" fillcolor="#f0f0f0" fontname=Helvetica shape=ellipse style=filled]
+    34 [label="MAX_FORCE\n(O34)" color="#de2d26" fillcolor="#fee0d2" fontname=Helvetica-Bold shape=box style="filled,bold"]
+    35 [label="MIN_FORCE\n(O35)" color="#de2d26" fillcolor="#fee0d2" fontname=Helvetica-Bold shape=box style="filled,bold"]
+    36 [label="EFFICIENT_WIN\n(O36)" color="#de2d26" fillcolor="#fee0d2" fontname=Helvetica-Bold shape=box style="filled,bold"]
+    37 [label="EQUITY_BUILDER\n(O37)" color="#de2d26" fillcolor="#fee0d2" fontname=Helvetica-Bold shape=box style="filled,bold"]
+    38 [label="H38\nMIN\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    39 [label="H39\nMIN\nNOT" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    40 [label="H40\nMAX\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    41 [label="H41\nMIN\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    42 [label="H42\nMIN\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    43 [label="H43\nMAX\nNOT" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    44 [label="H44\nMIN\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    45 [label="H45\nMAX\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    46 [label="H46\nMAX\nNOT" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    47 [label="H47\nMIN\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    48 [label="H48\nMIN\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    50 [label="H50\nMAX\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    51 [label="H51\nSUM\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    52 [label="H52\nMIN\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    53 [label="H53\nMAX\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    54 [label="H54\nMIN\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    55 [label="H55\nSUM\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    56 [label="H56\nSUM\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    57 [label="H57\nMAX\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    58 [label="H58\nMIN\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    59 [label="H59\nMAX\nNOT" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    60 [label="H60\nSUM\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    61 [label="H61\nSUM\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    62 [label="H62\nMIN\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    63 [label="H63\nMIN\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    64 [label="H64\nMIN\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    65 [label="H65\nMAX\nIDENTITY" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    66 [label="H66\nSUM\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    67 [label="H67\nMIN\nNOT" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    68 [label="H68\nSUM\nTHRESHOLD" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    69 [label="H69\nMAX\nNOT" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    71 [label="H71\nSUM\nNOT" color="#e6550d" fillcolor="#fee6ce" fontname=Helvetica shape=box style=filled]
+    7 -> 37 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    7 -> 38 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    38 -> 37 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    38 -> 40 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    40 -> 37 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    38 -> 41 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    41 -> 40 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    38 -> 42 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    43 -> 42 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    42 -> 41 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    38 -> 43 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    7 -> 44 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    44 -> 38 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    45 -> 43 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    38 -> 45 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    42 -> 46 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    44 -> 47 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    48 -> 47 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    44 -> 48 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    46 -> 41 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    50 -> 46 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    51 -> 41 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    47 -> 38 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    45 -> 53 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    39 -> 50 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    30 -> 50 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    21 -> 52 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    7 -> 51 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    32 -> 50 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    12 -> 50 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    53 -> 46 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    50 -> 40 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    7 -> 55 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    54 -> 37 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    3 -> 53 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    41 -> 54 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    45 -> 59 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    56 -> 59 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    58 -> 55 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    38 -> 61 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    61 -> 46 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    42 -> 61 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    16 -> 59 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    20 -> 52 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    53 -> 43 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    50 -> 43 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    53 -> 40 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    52 -> 46 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    54 -> 40 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    20 -> 54 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    55 -> 40 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    56 -> 46 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    54 -> 55 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    55 -> 36 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    55 -> 37 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    52 -> 56 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    51 -> 54 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    56 -> 50 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    32 -> 56 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    57 -> 40 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    57 -> 47 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    26 -> 56 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    57 -> 55 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    41 -> 58 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    48 -> 57 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    9 -> 56 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    0 -> 57 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    54 -> 58 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    1 -> 57 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    13 -> 57 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    59 -> 53 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    60 -> 57 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    2 -> 58 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    50 -> 59 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    14 -> 62 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    53 -> 62 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    62 -> 57 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    55 -> 63 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    26 -> 62 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    63 -> 40 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    60 -> 62 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    48 -> 60 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    4 -> 64 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    53 -> 64 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    64 -> 43 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    64 -> 46 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    6 -> 59 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    18 -> 60 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    30 -> 65 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    43 -> 66 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    66 -> 42 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    33 -> 60 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    24 -> 62 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    6 -> 60 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    67 -> 40 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    65 -> 67 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    63 -> 67 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    48 -> 68 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    68 -> 47 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    47 -> 69 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    69 -> 38 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    70 -> 62 [arrowsize=0.5 color="#d9d9d9" style=dotted]
+    28 -> 40 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    47 -> 71 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    71 -> 69 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    12 -> 62 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    60 -> 70 [arrowsize=0.8 color="#31a354" penwidth=2.0 style=solid]
+    44 -> 66 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    45 -> 61 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    46 -> 63 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    15 -> 57 [arrowsize=0.8 color="#de2d26" penwidth=2.0 style=dashed]
+    {
+        rank=same
+        26
+        7
+        2
+        6
+        24
+        28
+        3
+        4
+        33
+        9
+        14
+        30
+        15
+        32
+        20
+        0
+        16
+        12
+    }
+    {
+        rank=same
+        52
+        51
+        44
+        64
+        65
+        39
+    }
+    {
+        rank=same
+        56
+        48
+    }
+    {
+        rank=same
+        50
+        68
+        60
+    }
+    {
+        rank=same
+        47
+        43
+    }
+    {
+        rank=same
+        71
+        66
+    }
+    {
+        rank=same
+        42
+        69
+    }
+    {
+        rank=same
+        38
+    }
+    {
+        rank=same
+        45
+    }
+    {
+        rank=same
+        61
+        59
+    }
+    {
+        rank=same
+        53
+    }
+    {
+        rank=same
+        46
+        62
+    }
+    {
+        rank=same
+        57
+        41
+    }
+    {
+        rank=same
+        54
+    }
+    {
+        rank=same
+        58
+    }
+    {
+        rank=same
+        55
+    }
+    {
+        rank=same
+        63
+    }
+    {
+        rank=same
+        67
+    }
+    {
+        rank=same
+        40
+    }
+    {
+        rank=same
+        37
+        34
+        35
+        36
+    }
+}

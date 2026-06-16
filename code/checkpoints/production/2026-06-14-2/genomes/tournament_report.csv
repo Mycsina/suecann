@@ -1,0 +1,17 @@
+Candidate Bot,Opponent Bot,Win Rate (%),CI Margin (%),Avg Card Pts
+RandomBot,RandomBot,50.00,0.00,60.00
+RandomBot,OldHeuristicBot,10.83,1.11,47.50
+RandomBot,EliteHeuristicBot,4.65,0.75,44.33
+RandomBot,WANN (Champion),5.05,0.78,44.58
+OldHeuristicBot,RandomBot,89.17,1.11,72.50
+OldHeuristicBot,OldHeuristicBot,50.00,0.00,60.00
+OldHeuristicBot,EliteHeuristicBot,32.45,1.68,56.97
+OldHeuristicBot,WANN (Champion),32.33,1.67,56.72
+EliteHeuristicBot,RandomBot,95.35,0.75,75.67
+EliteHeuristicBot,OldHeuristicBot,67.55,1.68,63.03
+EliteHeuristicBot,EliteHeuristicBot,50.00,0.00,60.00
+EliteHeuristicBot,WANN (Champion),47.93,1.79,59.76
+WANN (Champion),RandomBot,94.95,0.78,75.42
+WANN (Champion),OldHeuristicBot,67.67,1.67,63.28
+WANN (Champion),EliteHeuristicBot,52.07,1.79,60.24
+WANN (Champion),WANN (Champion),50.00,0.00,60.00

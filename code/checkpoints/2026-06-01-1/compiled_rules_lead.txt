@@ -1,0 +1,33 @@
+=== Evolved Sueca WANN Strategy Rules (W = 1) ===
+
+Loaded genome with 67 nodes and 107 connections.
+Topology: 67 total nodes, 50 enabled connections (50)
+
+Active Inputs Referenced:
+  Hand_Point_Density (Node 4)
+  Am_I_Last_To_Play (Node 6)
+  Partner_Void_Led (Node 10)
+  Partner_Void_Trump (Node 11)
+  Side1_7_Played (Node 26)
+
+Active Hidden Logic Steps:
+  hidden_41 = OR(NOT(Side1_7_Played))
+  hidden_52 = NOT(AND(NOT(Partner_Void_Led)))
+  hidden_39 = NOT(hidden_52)
+  hidden_55 = THRESHOLD(OR(Side1_7_Played) > 0.5000)
+  hidden_60 = THRESHOLD(AND(hidden_41) > 0.5000)
+  hidden_44 = THRESHOLD(OR(hidden_60) > 0.5000)
+  hidden_45 = THRESHOLD(hidden_44 > 0.5000)
+  hidden_58 = THRESHOLD(AND(hidden_45) > 0.5000)
+  hidden_65 = NOT(hidden_58)
+  hidden_57 = NOT(AND(hidden_37))
+  hidden_38 = NOT(AND(hidden_57, hidden_58, hidden_65))
+  hidden_61 = THRESHOLD(OR(hidden_36) > 0.5000)
+  hidden_53 = THRESHOLD(hidden_61 > 0.5000)
+  hidden_42 = OR(NOT(hidden_53))
+
+Decision Rules for Play Intents:
+  MAX_FORCE = NOT(hidden_55)
+  MIN_FORCE = THRESHOLD(AND(NOT(hidden_42)) > 0.5000)
+  EFFICIENT_WIN = AND(NOT(Partner_Void_Trump), NOT(Hand_Point_Density), hidden_38, NOT(hidden_39))
+  EQUITY_BUILDER = NOT(OR(Am_I_Last_To_Play))

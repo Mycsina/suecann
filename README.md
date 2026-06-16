@@ -78,7 +78,7 @@ The dataset generator uses PIMC (Perfect Information Monte Carlo) with several q
 
 Generate with (the canonical v6 dataset uses the **rollout teacher** — see below):
 ```bash
-./target/release/sueca_wann generate-dataset \
+code/target/release/sueca_wann generate-dataset \
   --n-worlds 200 --teacher rollout --target-count 15000 \
   --seed 42 --soft-balance-min-ratio 0.0 \
   --output expert_states_v6.npz
@@ -124,22 +124,22 @@ Three Rust crates, no Python FFI, no `.so` build step.
 - **`sueca_wasm`** — WASM bindings for browser-based play. Compiled via wasm-pack, consumed by the React frontend.
 
 ```bash
-cargo build -p sueca_wann --release
+cargo build --manifest-path code/Cargo.toml -p sueca_wann --release
 ```
 
 ## Quick Start
 
 ```bash
-uv sync                              # Python deps (visualization only)
-cargo build -p sueca_wann --release  # Build training binary
-git config core.hooksPath code/.githooks  # Activate WASM pre-commit hook
+uv sync --project code                              # Python deps (visualization only)
+cargo build --manifest-path code/Cargo.toml -p sueca_wann --release  # Build training binary
+git config core.hooksPath code/.githooks                   # Activate WASM pre-commit hook
 ```
 
 ### Training
 
 ```bash
-./target/release/sueca_wann train --config configs/default.toml
-./target/release/sueca_wann train --config configs/default.toml --resume  # resume from checkpoint
+code/target/release/sueca_wann train --config code/configs/default.toml
+code/target/release/sueca_wann train --config code/configs/default.toml --resume  # resume from checkpoint
 ```
 
 Creates `code/checkpoints/YYYY-MM-DD-N/` with training stats, checkpointed genomes, and Hall of Fame.
@@ -147,23 +147,23 @@ Creates `code/checkpoints/YYYY-MM-DD-N/` with training stats, checkpointed genom
 ### Tests
 
 ```bash
-cargo test --all
+cargo test --manifest-path code/Cargo.toml --all
 ```
 
 ## Reproducing the Results
 
-All commands are run from the repository root. The canonical v6 champion lives at `code/checkpoints/production/2026-06-14-2/genomes/best_genome_final.json`. **`checkpoints/` is gitignored** — the champion and training artifacts live on the training machine, not in the repo.
+All commands are run from the repository root. The canonical v6 champion lives at `code/checkpoints/production/2026-06-14-2/genomes/best_genome_final.json`. Checkpoints are tracked in the repo (final genomes, training stats, compiled rules, and the production directory; per-generation snapshots and binary training state are excluded via `code/checkpoints/.gitignore`).
 
 ### Build
 
 ```bash
-cargo build -p sueca_wann --release
+cargo build --manifest-path code/Cargo.toml -p sueca_wann --release
 ```
 
 ### Test
 
 ```bash
-cargo test --all
+cargo test --manifest-path code/Cargo.toml --all
 ```
 
 ### Benchmark the Champion
@@ -171,9 +171,9 @@ cargo test --all
 Benchmarks the v6 champion against RandomBot, OldHeuristicBot, and EliteHeuristicBot over 3000 seat-rotated deals. Expect **~52.1% ± 1.8%** vs EliteHeuristicBot.
 
 ```bash
-./target/release/sueca_wann benchmark \
+code/target/release/sueca_wann benchmark \
   --deals 3000 \
-  --genome checkpoints/production/2026-06-14-2/genomes/best_genome_final.json
+  --genome code/checkpoints/production/2026-06-14-2/genomes/best_genome_final.json
 ```
 
 ### Compile Interpretable Rules
@@ -181,9 +181,9 @@ Benchmarks the v6 champion against RandomBot, OldHeuristicBot, and EliteHeuristi
 Extracts the champion's IF/THEN rules, DOT topology graph, and PNG rendering.
 
 ```bash
-./target/release/sueca_wann compile-rules \
-  --genome checkpoints/production/2026-06-14-2/genomes/best_genome_final.json \
-  --output-dir checkpoints/production/2026-06-14-2
+code/target/release/sueca_wann compile-rules \
+  --genome code/checkpoints/production/2026-06-14-2/genomes/best_genome_final.json \
+  --output-dir code/checkpoints/production/2026-06-14-2
 ```
 
 Generates `compiled_rules.txt`, `topology_graph.dot`, and `topology_graph.png` in the output directory.
@@ -193,7 +193,7 @@ Generates `compiled_rules.txt`, `topology_graph.dot`, and `topology_graph.png` i
 Generates the 15k-state PIMC expert dataset used for Phase 0 pretraining (rollout teacher, supra-Elite labels).
 
 ```bash
-./target/release/sueca_wann generate-dataset \
+code/target/release/sueca_wann generate-dataset \
   --n-worlds 200 --teacher rollout --target-count 15000 \
   --soft-balance-min-ratio 0.0 \
   --output expert_states_v6.npz
@@ -204,7 +204,7 @@ Generates the 15k-state PIMC expert dataset used for Phase 0 pretraining (rollou
 Produces three PDF figures (`training_curve.pdf`, `tournament.pdf`, `complexity.pdf`) from the canonical results, saved into `report/figures/`.
 
 ```bash
-uv run python scripts/make_report_figures.py
+uv run --project code python code/scripts/make_report_figures.py
 ```
 
 ### Web Play Interface
@@ -213,14 +213,14 @@ To build and run the web play interface (React + WASM game loop):
 
 1. **Build WASM game engine:**
    ```bash
-   cd src/sueca_wasm
+   cd code/src/sueca_wasm
    RUSTFLAGS="" wasm-pack build --target web --out-dir ../../frontend/src/wasm
    cd ../..
    ```
 
 2. **Run dev server:**
    ```bash
-   cd frontend
+   cd code/frontend
    bun dev
    ```
 
@@ -231,14 +231,14 @@ Open `http://localhost:5173` in your browser to play Sueca vs WANN/heuristics.
 
 ```bash
 # Full tournament with custom weight sweep
-./target/release/sueca_wann benchmark \
+code/target/release/sueca_wann benchmark \
   --deals 200 \
-  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json \
   --weights -2.0,-1.0,-0.5,0.5,1.0,2.0 \
   --seed 42
 
 # Auto-detect latest genome, use default weight sweep
-./target/release/sueca_wann benchmark --deals 200
+code/target/release/sueca_wann benchmark --deals 200
 ```
 
 Optional flags: `--output-dir <dir>` to override the report output directory, `--seed <u64>` for reproducibility. The `--weights` flag accepts a comma-separated list of shared weight values for the WANN sweep.
@@ -248,27 +248,27 @@ Optional flags: `--output-dir <dir>` to override the report output directory, `-
 Cross-run comparison with 4-panel visualization (fitness, delta vs HeuristicBot, species diversity, network complexity):
 
 ```bash
-uv run python scripts/compare_runs.py                    # all runs
-uv run python scripts/compare_runs.py --runs 2026-06-03-2  # specific run
+uv run --project code python code/scripts/compare_runs.py                    # all runs
+uv run --project code python code/scripts/compare_runs.py --runs 2026-06-03-2  # specific run
 ```
 
-Saves `checkpoints/run_comparison.png`.
+Saves `code/checkpoints/run_comparison.png`.
 
 ### Analyzing a Single Run
 
 Per-run training plots (fitness curves, species counts, network complexity over time):
 
 ```bash
-uv run python scripts/plot_training.py \
-  --stats checkpoints/2026-06-03-2/training_stats.csv \
-  --out-dir checkpoints/2026-06-03-2
+uv run --project code python code/scripts/plot_training.py \
+  --stats code/checkpoints/2026-06-03-2/training_stats.csv \
+  --out-dir code/checkpoints/2026-06-03-2
 ```
 
 ### Analyzing Expert Datasets
 
 ```bash
-uv run python scripts/analyze_dataset.py expert_states.npz      # quick stats with plots
-uv run python scripts/dataset_analysis.py expert_states.npz      # comprehensive text report
+uv run --project code python code/scripts/analyze_dataset.py expert_states.npz      # quick stats with plots
+uv run --project code python code/scripts/dataset_analysis.py expert_states.npz      # comprehensive text report
 ```
 
 ### Batch Rule Compilation
@@ -276,21 +276,21 @@ uv run python scripts/dataset_analysis.py expert_states.npz      # comprehensive
 Compile rules for all genomes across all checkpoints:
 
 ```bash
-uv run python scripts/compile_all.py
+uv run --project code python code/scripts/compile_all.py
 ```
 
 ### Extracting Rules
 
 ```bash
 # Default weight (1.0)
-./target/release/sueca_wann compile-rules \
-  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
-  --output-dir checkpoints/2026-06-03-2
+code/target/release/sueca_wann compile-rules \
+  --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --output-dir code/checkpoints/2026-06-03-2
 
 # Extract at a specific sweep weight (e.g. -1.0 for inhibitory rules)
-./target/release/sueca_wann compile-rules \
-  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
-  --output-dir checkpoints/2026-06-03-2 \
+code/target/release/sueca_wann compile-rules \
+  --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+  --output-dir code/checkpoints/2026-06-03-2 \
   --weight -1.0
 ```
 
@@ -299,7 +299,7 @@ Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topol
 ### Generating Expert Datasets
 
 ```bash
-./target/release/sueca_wann generate-dataset \
+code/target/release/sueca_wann generate-dataset \
   --n-worlds 80 --search-depth 4 --target-count 10000 \
   --output expert_states.npz
 ```
@@ -309,8 +309,8 @@ Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topol
 After evolving a topology, optimize independent continuous weights per connection using Differential Evolution:
 
 ```bash
-./target/release/sueca_wann optimize-weights \
-  --genome checkpoints/2026-06-03-2/genomes/best_genome_final.json \
+code/target/release/sueca_wann optimize-weights \
+  --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json \
   --deals 200 --generations 50
 ```
 

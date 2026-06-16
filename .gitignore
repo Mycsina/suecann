@@ -16,7 +16,6 @@ wheels/
 # `git config core.hooksPath code/.githooks` would point at an empty dir on fresh clones.
 !code/.githooks/
 !code/.githooks/pre-commit
-checkpoints/
 *.csv
 *.data
 *.log
