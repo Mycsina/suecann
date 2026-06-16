@@ -6,7 +6,7 @@ node_modules/
 .github/
 **/target/
 **/node_modules/
-frontend/dist/
+code/frontend/dist/
 pgo-data/
 *.profdata
 *.profraw

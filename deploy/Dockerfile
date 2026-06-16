@@ -1,8 +1,10 @@
 # Stage 1: Build frontend (WASM is pre-built and committed)
+# NOTE: the frontend lives at code/frontend/ since the repo restructure (c426825);
+# the build context is the repo root (see deploy/docker-compose.yml).
 FROM oven/bun:alpine AS builder
 
 WORKDIR /build
-COPY frontend/ frontend/
+COPY code/frontend/ frontend/
 RUN cd frontend && bun install && bun x vite build
 
 # Stage 2: Serve static files
