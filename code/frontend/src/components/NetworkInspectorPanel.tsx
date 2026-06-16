@@ -449,7 +449,9 @@ const NetworkInspectorPanel: React.FC<Props> = ({ genome, evalData, playerName, 
     return `rgba(60,122,137,${(0.12 + a * 0.88).toFixed(2)})`;
   };
 
-  const edgeAlpha = (srcAct: number) => 0.06 + srcAct * 0.55;
+  // Structural connectivity must stay visible regardless of activation; the
+  // activation only *emphasizes* an edge (raises opacity), never hides it.
+  const edgeAlpha = (srcAct: number) => 0.35 + srcAct * 0.5;
 
   // Count reachable edges (enabled edges between reachable nodes)
   const reachableEdges = layout.edges.filter(
@@ -569,8 +571,8 @@ const NetworkInspectorPanel: React.FC<Props> = ({ genome, evalData, playerName, 
                   <line
                     key={`dis-${i}`}
                     x1={sp.x} y1={sp.y} x2={dp.x} y2={dp.y}
-                    stroke="rgba(255,255,255,0.06)"
-                    strokeWidth={0.5}
+                    stroke="rgba(255,255,255,0.16)"
+                    strokeWidth={0.7}
                     strokeDasharray="2 4"
                     markerEnd="url(#arrowGray)"
                   />
@@ -589,8 +591,8 @@ const NetworkInspectorPanel: React.FC<Props> = ({ genome, evalData, playerName, 
                     x1={sp.x} y1={sp.y} x2={dp.x} y2={dp.y}
                     stroke={isNeg ? 'var(--accent-gold)' : 'var(--accent-cyan)'}
                     strokeOpacity={edgeAlpha(srcAct)}
-                    strokeWidth={hot ? 1.6 : 0.6}
-                    strokeDasharray={isNeg ? '4 3' : hot ? 'none' : '2 5'}
+                    strokeWidth={hot ? 2.0 : 1.1}
+                    strokeDasharray={isNeg ? '5 3' : 'none'}
                     markerEnd={isNeg ? 'url(#arrowGold)' : 'url(#arrowCyan)'}
                     className={hot ? 'edge-active' : 'edge-idle'}
                   />
