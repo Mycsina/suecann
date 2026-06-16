@@ -189,6 +189,46 @@
 \end{frame}
 
 % ======================================================================
+% SLIDE 5a — The Elite heuristic (context for the "Elite + dials" intents)
+% ======================================================================
+\begin{frame}{The Elite heuristic is a strong, partner-aware rule base --- the high floor every intent builds on}
+  \begin{columns}[T]
+    \column{0.33\textwidth}
+      \centering
+      \begin{block}{\centering\textbf{When leading}}
+        \vspace{1em}
+        \footnotesize
+        Cash a \textbf{guaranteed master} (a sure winner) first.\\[4pt]
+        Else \textbf{probe}: lead the \textbf{lowest} card of your \textbf{longest} side-suit.\\[4pt]
+        \textit{``Bank what's safe, prod with what's cheap.''}
+      \end{block}
+    \column{0.33\textwidth}
+      \centering
+      \begin{block}{\centering\textbf{When following}}
+        \vspace{1em}
+        \footnotesize
+        Take the trick with your \textbf{cheapest} winning card.\\[4pt]
+        Can't win? Throw your \textbf{lowest} --- never overspend.\\[4pt]
+        \textit{``Win cheap, lose cheap.''}
+      \end{block}
+    \column{0.33\textwidth}
+      \centering
+      \begin{block}{\centering\textbf{When void}}
+        \vspace{1em}
+        \footnotesize
+        Cut with the \textbf{cheapest} trump that wins; \textbf{hold high trumps back}.\\[4pt]
+        Partner safe or no trump? \textbf{Don't spend one}.\\[4pt]
+        \textit{``Trump just enough.''}
+      \end{block}
+  \end{columns}
+  \vspace{8pt}
+  \centering
+  \footnotesize
+  Throughout, \textbf{play for the partnership}: \emph{smear} points onto a secure partner trick, raise your \textbf{highest} to protect an unsecured one.\\
+  Expert cooperative play with \textbf{no search} --- so realistic headroom above it is only $\sim$\textbf{8 game-points}.
+\end{frame}
+
+% ======================================================================
 % SLIDE 5b — What each intent means in game terms
 % ======================================================================
 \begin{frame}{Three play intents: styled deviations around a strong Elite policy}
@@ -251,7 +291,7 @@
   \includegraphics[width=\textwidth,height=0.72\textheight,keepaspectratio]{../report/figures/training_phase1.pdf}
 
   \vspace{2pt}
-  {\footnotesize Lead and follow brains co-evolve. Dynamic routing via \texttt{Am\_I\_Leading} flag.
+  {\footnotesize Dynamic per-decision routing via \texttt{Am\_I\_Leading} flag.
    Delta-fitness with CRN. HOF + MAP-Elites opponent pools.}
 \end{frame}
 
@@ -288,9 +328,8 @@
         Teacher        & $\alpha$-$\beta$ & \textbf{rollout} \\
         \bottomrule
       \end{tabular}
-      \vspace{8pt}
       \centering
-      \small\emph{Statistically identical strength $\rightarrow$ 4.5$\times$ simpler.\\The ceiling is the resolver, not the teacher.}
+      \small\emph{Statistically identical strength $\rightarrow$ 4.5$\times$ simpler. The ceiling is the resolver, not the teacher.}
   \end{columns}
 \end{frame}
 
@@ -465,7 +504,6 @@ EQUITY_BUILDER = 1 + 2*hidden_41 + hidden_55
   \end{columns}
   \vspace{6pt}
   \centering
-  \parbox{0.92\textwidth}{\centering\footnotesize\emph{Honest science: we measure and report our ceiling.}}
 \end{frame}
 
 % ======================================================================
