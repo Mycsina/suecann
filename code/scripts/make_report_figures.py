@@ -24,6 +24,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib.lines import Line2D
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIG = os.path.normpath(os.path.join(ROOT, "..", "report", "figures"))
@@ -61,6 +62,62 @@ plt.rcParams.update({
 })
 
 PHASE0_END = 150   # gens 0..149 = supervised; 150..599 = self-play
+
+
+def _draw_phase1_fitness(ax, p1, *, end_fs=8.0, legend_fs=7.5):
+    """Layer Phase-1 self-play fitness so the *retained champion* is the subject
+    and the raw per-generation noise recedes to the background.
+
+    Why two layers:
+      * The CSV column ``*_best_fitness`` is the best individual *of each
+        generation*, re-scored on that generation's freshly-seeded deals against
+        sampled co-evolving opponents — a noisy point estimate. It is choppy and
+        drops in 224/449 generations here; plotted alone it ends low (+0.13) and
+        undersells the result.
+      * ``.cummax()`` reconstructs ``global_best_fitness`` (train.rs) — the
+        running-max champion actually kept and shipped (+2.08). Monotonic by
+        construction, so it tells the "what we retained" story honestly.
+
+    Encoding (Bertin): the cumulative line is bold + opaque (Value + Size, the
+    two dissociative variables) so it dominates as the figure's subject; the
+    per-generation trace is faint (low value) and recedes. Lead and follow are
+    bit-identical here (co-evolved on the same games), so we plot a single
+    champion series rather than two overlapping ones.
+    """
+    best = p1.lead_best_fitness          # == follow_best_fitness, bit-for-bit
+    cum = best.cummax()
+
+    # Background — raw per-generation best (noisy), faint + thin
+    ax.plot(p1.generation, best,
+            color=C_REFERENCE, lw=0.9, alpha=0.35, zorder=3)
+
+    # Foreground — cumulative best (champion retained), bold + opaque
+    ax.plot(p1.generation, cum,
+            color=C_WANN, lw=2.4, zorder=6, solid_capstyle="round")
+
+    # HeuristicBot parity reference
+    ax.axhline(0, ls="--", color=C_REFERENCE, lw=0.8, zorder=2)
+    ax.text(p1.generation.iloc[0] + 4, 0.12, "HeuristicBot parity",
+            fontsize=end_fs - 0.5, color=C_REFERENCE, ha="left", va="bottom")
+
+    # Champion callout — the result actually shipped (ends high, not at the
+    # noisy final-generation value)
+    champ = cum.iloc[-1]
+    ax.axhline(champ, ls=":", color=C_REFERENCE, lw=0.8, alpha=0.7, zorder=2)
+    ax.annotate(f"champion +{champ:.2f}",
+                xy=(p1.generation.iloc[-1], champ), xytext=(6, 0),
+                textcoords="offset points", fontsize=end_fs, color=C_WANN,
+                va="center", fontweight="bold", clip_on=False)
+
+    # Legend — bold/faint → cumulative champion vs raw per-generation best
+    handles = [
+        Line2D([0], [0], color=C_WANN, lw=2.4,
+               label="champion (running max)"),
+        Line2D([0], [0], color=C_REFERENCE, lw=0.9, alpha=0.5,
+               label="per-generation best"),
+    ]
+    ax.legend(handles=handles, loc="lower right", fontsize=legend_fs,
+              frameon=True, framealpha=0.85, facecolor="white", edgecolor="none")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -124,36 +181,12 @@ def training_curve():
              fontsize=8, fontstyle="italic", color=C_REFERENCE,
              ha="left", va="top")
 
-    ax1.plot(p1.generation, p1.lead_best_fitness,
-             color=C_LEAD, lw=1.4)
-    ax1.plot(p1.generation, p1.follow_best_fitness,
-             color=C_FOLLOW, lw=1.4)
-
-    # Zero reference (HeuristicBot parity)
-    ax1.axhline(0, ls="--", color=C_REFERENCE, lw=0.8, zorder=2)
-    ax1.text(p1.generation.iloc[0] + 4, 0.12,
-             "HeuristicBot parity", fontsize=7.5, color=C_REFERENCE,
-             ha="left", va="bottom")
-
-    # Direct labels — stagger vertically so the two end labels never collide
-    ends = {"lead": p1.lead_best_fitness.iloc[-1],
-            "follow": p1.follow_best_fitness.iloc[-1]}
-    lo, hi = sorted(ends, key=ends.get)
-    dy = {lo: -8, hi: 8}
-    for col, color, name in [
-        ("lead_best_fitness",   C_LEAD,     "lead"),
-        ("follow_best_fitness", C_FOLLOW,   "follow"),
-    ]:
-        y_end = p1[col].iloc[-1]
-        ax1.annotate(name, xy=(p1.generation.iloc[-1], y_end),
-                     xytext=(6, dy[name]), textcoords="offset points",
-                     fontsize=8, color=color, va="center", fontweight="bold",
-                     clip_on=False)
+    _draw_phase1_fitness(ax1, p1, end_fs=7.5, legend_fs=7)
 
     ax1.set_title("Phase 1: Co-evolutionary Self-play",
                   fontweight="bold", pad=8)
     ax1.set_xlabel("Generation")
-    ax1.set_ylabel("Best Fitness  (Δ game-points vs HeuristicBot)")
+    ax1.set_ylabel("Fitness  (Δ game-points vs HeuristicBot)")
     ax1.set_xlim(p1.generation.min(), p1.generation.max() + 32)
     ax1.grid(axis="y", color=C_GRID, lw=0.4, alpha=0.6)
 
@@ -321,12 +354,11 @@ def training_phase0_slide():
 
 
 def training_phase1_slide():
-    """Phase 1 only — two lines drawn with distinct styles.
+    """Phase 1 only — single panel, larger, for presentation slide.
 
-    Lead and follow share identical fitness values (co-evolved, evaluated
-    on the same games), so the lines are superimposed. We draw both with
-    different colours and line styles so the audience can see that both
-    brains are present even when their fitness traces overlap.
+    Lead and follow share bit-identical fitness (co-evolved, evaluated on the
+    same games), so a single champion series is plotted (see
+    ``_draw_phase1_fitness``).
     """
     df = pd.read_csv(CSV)
     p1 = df[df.generation >= PHASE0_END]
@@ -335,22 +367,12 @@ def training_phase1_slide():
     ax.axvspan(p1.generation.min(), p1.generation.max(),
                facecolor="#FFF3E0", zorder=0)
 
-    # Draw both even though values are identical — different styles
-    # so the audience can see traces of both.
-    ax.plot(p1.generation, p1.lead_best_fitness,
-            color=C_LEAD, lw=1.8, linestyle='-',  zorder=5)
-    ax.plot(p1.generation, p1.follow_best_fitness,
-            color=C_FOLLOW, lw=1.8, linestyle='--', zorder=4)
-
-    ax.axhline(0, ls=":", color=C_REFERENCE, lw=0.8, zorder=2)
-    ax.text(p1.generation.iloc[0] + 4, 0.12,
-            "HeuristicBot parity", fontsize=8, color=C_REFERENCE,
-            ha="left", va="bottom")
+    _draw_phase1_fitness(ax, p1, end_fs=8.5, legend_fs=8)
 
     ax.set_title("Phase 1 — Co-evolutionary Self-play", fontweight="bold",
                  pad=10, fontsize=13)
     ax.set_xlabel("Generation", fontsize=11)
-    ax.set_ylabel("Best Fitness  (Δ game-points vs HeuristicBot)", fontsize=11)
+    ax.set_ylabel("Fitness  (Δ game-points vs HeuristicBot)", fontsize=11)
     ax.set_xlim(p1.generation.min(), p1.generation.max() + 35)
     ax.grid(axis="y", color=C_GRID, lw=0.4, alpha=0.6)
 
