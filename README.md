@@ -168,13 +168,42 @@ cargo test --manifest-path code/Cargo.toml --all
 
 ### Benchmark the Champion
 
-Benchmarks the v6 champion against RandomBot, OldHeuristicBot, and EliteHeuristicBot over 3000 seat-rotated deals. Expect **~52.1% ± 1.8%** vs EliteHeuristicBot.
+Benchmarks the v6 champion against RandomBot, OldHeuristicBot, and EliteHeuristicBot in a round-robin tournament. Each matchup plays the same 3000 seat-rotated deals for a statistically-pinned result.
 
 ```bash
 code/target/release/sueca_wann benchmark \
   --deals 3000 \
   --genome code/checkpoints/production/2026-06-14-2/genomes/best_genome_final.json
 ```
+
+**Expected output** (takes ~2 minutes on a modern machine):
+
+| Bot | RandomBot | OldHeuristic | EliteHeuristic | WANN (Champion) |
+|---|---|---|---|---|
+| **RandomBot** | 50.0% | 10.8% | 4.7% | 5.1% |
+| **OldHeuristicBot** | 89.2% | 50.0% | 32.5% | 32.3% |
+| **EliteHeuristicBot** | 95.3% | 67.5% | 50.0% | 47.9% |
+| **WANN (Champion)** | 95.0% | 67.7% | **52.1% ± 1.8%** | 50.0% |
+
+The key number is **52.1% ± 1.8%** — the WANN beats the strong Elite baseline by a statistically significant margin.
+
+**Quick check** (200 deals, ~10 seconds, no `--genome` auto-detects the latest genome in `code/checkpoints/`):
+
+```bash
+code/target/release/sueca_wann benchmark --deals 200
+```
+
+**Custom weight sweep** (if you've trained your own network):
+
+```bash
+code/target/release/sueca_wann benchmark \
+  --deals 200 \
+  --genome code/checkpoints/YOUR-RUN/genomes/best_genome_final.json \
+  --weights -2.0,-1.0,-0.5,0.5,1.0,2.0 \
+  --seed 42
+```
+
+The report is saved as `tournament_report.csv` alongside the genome file.
 
 ### Compile Interpretable Rules
 
@@ -229,19 +258,15 @@ Open `http://localhost:5173` in your browser to play Sueca vs WANN/heuristics.
 
 ### Benchmarking
 
-```bash
-# Full tournament with custom weight sweep
-code/target/release/sueca_wann benchmark \
-  --deals 200 \
-  --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json \
-  --weights -2.0,-1.0,-0.5,0.5,1.0,2.0 \
-  --seed 42
+Run a round-robin tournament for any genome. If `--genome` is omitted, the latest genome under `code/checkpoints/` is auto-detected. See [Benchmark the Champion](#benchmark-the-champion) above for the canonical champion command and expected output.
 
-# Auto-detect latest genome, use default weight sweep
-code/target/release/sueca_wann benchmark --deals 200
-```
-
-Optional flags: `--output-dir <dir>` to override the report output directory, `--seed <u64>` for reproducibility. The `--weights` flag accepts a comma-separated list of shared weight values for the WANN sweep.
+| Flag | Default | Description |
+|---|---|---|
+| `--deals` | 200 | Number of duplicate deals (use 3000 for publishable CIs) |
+| `--genome` | auto-detect | Path to a `best_genome_final.json` file |
+| `--weights` | `-2.0,-1.0,-0.5,0.5,1.0,2.0` | Comma-separated shared weight sweep |
+| `--seed` | 42 | RNG seed for reproducibility |
+| `--output-dir` | genome's directory | Where to save `tournament_report.csv` |
 
 ### Comparing Runs
 
