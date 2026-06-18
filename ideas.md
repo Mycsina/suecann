@@ -1,94 +1,150 @@
 # WANN Evolution & Sueca AI Roadmap
 
-This document outlines high-impact ideas, triaged by their mathematical viability and expected return on engineering effort, along with recently completed milestones.
+This document tracks completed milestones and the live roadmap, triaged by impact vs.
+engineering effort. **Last updated 2026-06-19.**
+
+---
+
+## Status Snapshot (2026-06-19)
+
+The canonical champion **v6** (`checkpoints/production/2026-06-14-2`) beats the strong
+EliteHeuristic baseline **52.1% ± 1.8%** (n=3000) with only 29 hidden gates. Strength is
+now **resolver-floored**: every intent resolves to an Elite-flavoured card, so a collapsed
+(single-intent) policy merely *ties* Elite, and the realisable headroom above Elite is only
+**≈8 points**. The WANN effectively chooses between near-duplicate behaviours.
+
+**Strategic direction (post-presentation):** interpretability is no longer a hard
+constraint. The next major push is to **redesign the resolver / action space** so the
+network has real expressive power and a much higher ceiling (see §3). Supporting work
+(richer belief features, weight fine-tuning) is ranked in §1.
 
 ---
 
 ## Completed Milestones [IMPLEMENTED]
 
 ### 1. Phased Supervised Curriculum (WANN Warmup)
-* **Status:** `IMPLEMENTED`
-* **Implementation:** Introduced a two-phase training loop. 
-  - **Phase 0 (Generations 0 to 100):** Trains WANN topologies against a static, offline expert dataset using classification accuracy. No rollout simulations are performed, dropping fitness evaluation variance to zero and forcing the evolutionary pipeline to establish structural connectivity.
-  - **Phase 1 (Generations 100+):** Evolves WANNs via RL rollouts against HeuristicBot and HOF champions to learn game dynamics.
-* **Impact:** Drastically improves initial topology search and input/hidden node usage.
+Two-phase training: Phase 0 trains topologies against an offline PIMC expert dataset by
+classification accuracy (zero rollout variance, forces structural connectivity); Phase 1
+evolves via self-play RL rollouts. Drastically improves initial topology search.
 
-### 2. Perfect Class Balancing & Legal Intent Masking
-* **Status:** `IMPLEMENTED`
-* **Implementation:**
-  - Enforced a strict balance of exactly 10,000 states for each of the 5 play intents (total 50,000 states) in the offline dataset generator to avoid simplicity bias (e.g., over-predicting the frequent `DUCK_OR_DUMP` fallback).
-  - Saved a `legal_masks` byte vector alongside targets.
-  - Integrated legal intent masking directly into the Rust parallel Rayon loop (`evaluate_wann_accuracy`), masking out illegal actions before taking the activation argmax.
-* **Impact:** Prevents evolutionary stagnation and ensures fair evaluation of legal strategic intents.
+### 2. Legal Intent Masking & Natural Class Distribution
+Legal-intent masking integrated into the Rayon accuracy loop (illegal actions masked before
+argmax). The original "perfect 10k-per-intent balance" was **superseded** (June 14): under
+the styled resolver the decision is naturally near-binary, so we now generate with
+`--soft-balance-min-ratio 0.0` and `use_class_weighting = false` (see README dataset notes).
 
 ### 3. Adaptive Late-Game Search (Endgame Minimax Switch)
-* **Status:** `IMPLEMENTED`
-* **Implementation:** Implemented a hard-switch in the Rust PIMC engine (`solve_pimc` in `pimc.rs`): if 16 or fewer cards remain in the game (i.e. `trick_number >= 6`), the engine automatically switches to a full minimax search (40 plies lookup to the terminal states).
-* **Impact:** Late-game evaluations are 100% accurate and execute in under 5 milliseconds on a single core, boosting baseline PIMC and heuristic decision accuracy.
+PIMC hard-switches to full minimax once ≤16 cards remain (`trick_number >= 6`), giving 100%
+accurate, sub-5ms late-game evaluations.
 
-### 4. Polymorphic Oracle (4-Archetype Intent System)
-* **Status:** `IMPLEMENTED`
-* **Implementation:** Replaced the original 5 fixed intents (DUCK_OR_DUMP, TAKE_CHEAPLY, FORCE_HIGH, FEED_PARTNER, CUT_LOW) with 4 always-legal archetypes resolved contextually:
-  - **MAX_FORCE** — Aggressive/control: lead high or play max-rank card, chosen by point-value tie-breaking.
-  - **MIN_FORCE** — Passive/resource saving: lowest legal card, preserving high cards.
-  - **EFFICIENT_WIN** — Tactical exploitation: min card that beats current winner, cheapest cut when void.
-  - **EQUITY_BUILDER** — Partnership/voids: feed high-point cards when partner wins, exploit opponent voids, cut when partner is void.
-* **Impact:** Eliminates the oracle-tax penalty system entirely — all intents are always legal. The network learns *what* to do, and the resolver handles *how* to do it given the game state.
+### 4. Polymorphic Oracle → Styled Resolver (3 Archetypes)
+Replaced the original 5 penalty-based intents with always-legal archetypes resolved
+contextually. **Superseded June 14** by the *styled resolver*: MIN_FORCE was removed
+(subsumed by EFFICIENT_WIN), leaving MAX_FORCE / EFFICIENT_WIN / EQUITY_BUILDER, each a
+styled deviation *around* the Elite policy. This raised every intent to ≈Elite individually
+(48/47/46% vs 20/37/25%), removing the Phase-1 collapse basin — see §3 for the cost.
 
-### 5. Hot-Path Performance Optimizations (6x Phase 1 Speedup)
-* **Status:** `IMPLEMENTED`
-* **Implementation:** 13 targeted optimizations across the Rust codebase:
-  - **Engine layer:** `CARD_SUIT[40]`/`CARD_RANK[40]` lookup tables replacing all division/modulo; branchless team score via `(winner & 1) == 0`.
-  - **WANN inference:** BinaryHeap topological sort replacing O(n²) Vec::remove; hoisted `match agg_fn` with three separate SUM/MIN/MAX loops eliminating per-edge branch misprediction.
-  - **PIMC:** Pre-built unknown card pool shared across worlds; thread-local accumulator fold/reduce replacing Vec allocations.
-  - **Search:** TT best-move lookup for move ordering; compile-time `const fn LCG` Zobrist tables replacing `OnceLock` runtime init.
-  - **Genome:** Vec-based sorted node/conn genes with binary search; O(n+m) two-pointer merge crossover replacing HashMap set operations.
-  - **Parallelism:** Thread-local innovation registry lock scope (lock held only during `get_or_create`, not entire mutation); precomputed species max-fitness for O(1) sort comparisons.
-* **Impact:** Phase 1 generation time dropped from ~60s to ~9.7s (6x). Full 1200-gen production run completed in 4.7 hours (projected 18h+ without optimizations).
+### 5. Hot-Path Performance Optimizations (6× Phase 1 Speedup)
+13 targeted Rust optimizations (lookup tables, branchless scoring, BinaryHeap toposort, TT
+move ordering, two-pointer crossover, scoped innovation locks). Phase 1 gen time 60s → 9.7s.
 
-### 6. Deep PIMC Expert Dataset (d=4, 80 Worlds)
-* **Status:** `IMPLEMENTED`
-* **Implementation:** Generated the legacy `expert_states_w80_d4.npz` — 100k states from PIMC with depth 4 search and 80 worlds per state.
-* **Impact:** Deeper search produces higher-quality expert labels. Phase 0 accuracy reached 44.37% (up from d=2 baseline). Combined with polymorphic oracle, enabled the network to reach statistical parity with HeuristicBot (49.2% win rate, 59.9 vs 60.1 card points).
+### 6. Rollout Teacher & v6 Champion (June 14–15)
+`solve_pimc_rollout` finishes each determinized world with **Elite playouts** — supra-Elite
+labels (62% vs Elite) at ~1000× lower cost than deep alpha-beta. Training on it produced the
+v6 champion: **iso-strength with v5 (52.1% vs 52.7%) but 4.5× fewer hidden gates** (29 vs
+132). Key finding: a supra-Elite teacher does **not** raise the benchmark because strength is
+resolver-floored — it buys a *simpler* champion, not a stronger one.
 
 ### 7. Quality-Diversity Archive (MAP-Elites)
-* **Status:** `IMPLEMENTED`
-* **Implementation:** 10×10 MAP-Elites grid archiving behavioral specialists during Phase 1:
-  - **Dimension 1 (Intent Preference):** Ratio of MIN_FORCE plays to total actions (conservative vs. active).
-  - **Dimension 2 (Aggression):** Average point-value of cards played when leading tricks (normalized to [0,1]).
-  - Each cell keeps the single best genome by fitness. Non-empty cells sampled at 50% rate when selecting opponent bots during Phase 1 self-play.
-* **Impact:** Maintains a diverse pool of strategies (aggressive trumper, defensive ducker, point feeder) as training opponents, preventing mode collapse into a single dominant playstyle.
+10×10 grid archiving behavioral specialists (intent preference × aggression). Non-empty cells
+sampled as Phase-1 opponents, preventing mode collapse.
 
 ### 8. Co-Evolutionary Opponent Sampling
-* **Status:** `IMPLEMENTED`
-* **Implementation:** When evaluating genomes in Phase 1, opponents and partners are sampled from a mixed pool: 50% HeuristicBot, 25% HOF champions, 25% MAP-Elites specialists. This provides a co-evolutionary ladder — as the population improves, so do the opponents.
-* **Impact:** Prevents overfitting to a fixed baseline. The WANN must generalize against diverse historical strategies rather than exploiting HeuristicBot-specific weaknesses.
+Phase-1 opponents/partners sampled from a mixed pool (HeuristicBot / HOF / MAP-Elites),
+providing a co-evolutionary ladder and preventing baseline overfitting.
+
+### 9. Differential Evolution Weight Optimization (`optimize-weights`)
+The **DE half** of the old "Fixed-Topology Fine-Tuning" idea is shipped (`optimize.rs`):
+freeze a champion's topology, evolve independent per-connection continuous weights in
+[−2, 2] (pop=50, F=0.5, CR=0.7). The CMA-ES + soft-threshold half remains — see §2.
+
+### 10. Structural Tabu Veto List (odNEAT)  ← *was Tier 1*
+Two-level tabu filtration: static invariants (no cycles, no input→input) compiled inline;
+a dynamic FIFO queue (size 1000) of degraded mutation paths skips redundant evaluations.
+
+### 11. Modular Lead/Follow Brains (L-NEAT)  ← *was Tier 1*
+Decision space split into co-evolving Lead and Follow populations, routed per card-play slice
+by `BeliefFeature::AmILeading`. Reduces strategic entropy, accelerates search.
+
+### 12. PFS-NEAT Zero-Connection Start
+Populations begin with 0 active connections; only structural mutations trigger 2-stage PFS
+validation (quick K=25, then full sample for borderline cases). Guards against input noise.
 
 ---
 
-## 1. Structural & Architectural Ideas
+## 1. Live Roadmap (impact / effort)
 
-Tier 1
+| Tier | Item | Impact | Effort | Status |
+|------|------|--------|--------|--------|
+| **S** | **Resolver / action-space overhaul** (§3) | High (raises the ceiling) | High — uncharted | **PLANNED** |
+| **A** | Probabilistic opponent & partner belief features | Med-High | Medium | Proposed |
+| **B** | CMA-ES fixed-topology fine-tune + soft-threshold annealing (§2) | Medium | Medium | Half-done (DE shipped) |
+| **B** | SNAP-NEAT — adaptive mutation-operator probabilities | Low-Med | Medium | Proposed |
+| **C** | Cascade-NEAT — frozen incremental hidden nodes | Low-Med | Med-High | Backlog |
+| **C** | Extended modular brains (split by trick-phase / "can I win") | Low-Med | Medium | Backlog |
+| **Skip** | IFSE-NEAT | Low | Medium | Overlaps shipped PFS-NEAT |
+| **Skip** | True partner signaling / conventions | Low/uncertain | High | No comms phase; team fitness already rewards coordination — fold into belief features (Tier A) |
 
-SNAP-NEAT
-odNEAT's structural tabu list
-L-NEAT
+---
 
-Tier 2
-Cascade-NEAT
-IFSE-NEAT
+## 2. Fixed-Topology Fine-Tuning (DE shipped; CMA-ES remains)
 
-## 2. Delivery (LATER)
-### Fixed-Topology Fine-Tuning
-When we reach a good champion, freeze the topology (e.g. Gen 849) and evolve the connection weights into independent floats.
+The Differential Evolution path is implemented (`optimize-weights`, milestone §9). The
+remaining unbuilt half is **CMA-ES with soft-threshold annealing**, which is the stronger
+weight optimizer for this rugged, discrete landscape:
 
-The network can fine-tune high-precision thresholds to shift its behavior from conservative to cutthroat, giving you the exact tactical edge needed to break the parity ceiling and dominate HeuristicBot decisively.
+- Temporarily replace each hard `THRESHOLD` node with a parameterized steep sigmoid
+  `SoftThreshold(x) = 1 / (1 + e^{-k(x-0.5)})`, intercepted in the Rust inference path.
+- Initialize `k = 10` (rounds off the cliffs → continuous gradient for CMA-ES to read).
+- Run CMA-ES ~30 gens to orient the covariance matrix over the active weights, then anneal
+  `k: 10 → 50 → 100` over ~20 gens to drive the sigmoids back to razor-sharp step functions.
+- Hard-freeze weights and snap back to raw `THRESHOLD` gates for zero-latency execution.
+- Keep mutation step size small (σ ≈ 0.05) so the optimizer doesn't scramble the strategic
+  balance by tripping over the digital cliffs.
 
-If you still want to trim the fat to make your final rule extraction look as pristine as possible, do not do it during evolution. Do it during your upcoming Fixed-Topology Fine-Tuning phase.Once you freeze the Gen 849 topology and assign independent, real-valued float weights ($w_i$) to those 50 connections, your continuous optimizer will naturally drive the weights of minor, marginal connections down toward 0.0.After fine-tuning, you can apply a simple structural threshold filter
+This is a **cheap squeeze** once a topology stabilizes — most infra exists; only the
+soft-threshold node mode and a CMA-ES driver are new.
 
-When you launch your continuous Genetic Algorithm or CMA-ES pass to tune these weights, keep your initial mutation step size ($\sigma$) small (e.g., $\sigma = 0.05$). If your mutation steps are too large, the optimizer will constantly trip over these deep digital cliffs and scramble the delicate strategic balance of your EQUITY_BUILDER and MAX_FORCE archetypes.
+---
 
-Option 1: The Silver Bullet — Soft-Threshold Smooth TranslationIf you want to use CMA-ES (which you should, because its ability to learn variable correlations is unmatched), you must temporarily transform your network's activation functions into a smooth, optimization-friendly landscape.Before you pass the topology to the optimizer, intercept your THRESHOLD node calls inside your Rust engine. Replace the hard step function with a parameterized, steep sigmoid:$$\text{SoftThreshold}(x) = \frac{1}{1 + e^{-k(x - 0.5)}}$$The Optimization Loop:Initialize the scaling factor at a moderate slope, like $k = 10$. This rounds off the sharp cliffs, turning your flat plateaus into continuous slopes. Now, even a micro-mutation in weights provides a tiny shift in activation output, giving CMA-ES a pristine gradient signal to guide its covariance matrix.Run CMA-ES for 30 generations to let it rapidly scale and orient your 50 active weights.Over the final 20 generations, gradually scale $k$ up ($10 \rightarrow 50 \rightarrow 100$). This drives the sigmoids back into razor-sharp, discrete step functions.Once optimization concludes, hard-freeze the weights and snap the functions back to raw THRESHOLD gates for zero-latency execution.Option 2: Differential Evolution (DE)If you do not want to modify your low-level Rust execution nodes to handle soft sigmoids, skip CMA-ES entirely and deploy Differential Evolution (DE) (specifically the DE/rand/1/bin or DE/best/1/bin variants).Why it works here: Differential Evolution does not build a statistical distribution model like CMA-ES does. Instead, it mutates candidate vectors by taking the direct algebraic difference between other random members of the population:$$v_i = x_{\text{best}} + F \cdot (x_{r1} - x_{r2})$$The Edge: Because its step sizes are dictated by the actual distance between active individuals rather than a localized variance calculation, DE can natively "teleport" right across flat plateaus and jump over threshold cliffs. It handles rugged, discrete, and non-differentiable landscapes exceptionally well.
+## 3. Resolver / Action-Space Overhaul [PLANNED — Tier S]
 
-# NOTES
-Upon inspection, the follow brain does not use MIN_FORCE at all; even when not holding a winning card, it chooses to go Equity_builder or Efficient_win
+**Problem.** `select_card_styled` is `select_card_heuristic` (the full Elite policy) plus a
+handful of narrow conditional dials. All three intents are ~95% identical code, so the WANN
+chooses between near-duplicates; the oracle ceiling sits at only Elite+≈8. EQUITY_BUILDER is
+nearly unused in the follow split, and MAX_FORCE is uniquely best ~0–1% of the time.
+
+**Goal.** Give the network a strong, well-separated action vocabulary whose *oracle envelope*
+(best-intent-per-state) is far above Elite, so good context-dependent selection yields large
+gains. Interpretability is relaxed; the new north stars are raw strength and user-facing
+features (e.g. a trick-end teacher paradigm).
+
+**Key methodology — measure the ceiling before training.** For any candidate action set,
+compute the oracle envelope with the rollout teacher (no WANN): in each decision state, score
+every primitive's resolved card by PIMC EV and take the best. The envelope's win-rate vs
+Elite is the design's ceiling and is computable in minutes. Only train WANNs on designs whose
+envelope clears Elite by a wide margin.
+
+**Candidate directions (full plan to follow):**
+1. **Richer discrete primitives**, with separate lead-vs-follow vocabularies (leverages the
+   existing modular brains).
+2. **Continuous control dials** (aggression / risk / trump-preservation / partner-trust)
+   parametrizing one flexible resolver.
+3. **Search-backed resolver** — the network biases a 1–2 ply rollout/eval rather than picking
+   a hand-crafted tactic (strongest, most expensive).
+4. **Direct card scoring** — the network scores (state, candidate-card) pairs and we argmax
+   over legal cards, dissolving the resolver bottleneck entirely (most invasive, highest
+   ceiling, fully drops interpretability).
+
+A detailed, staged plan with hypotheses, kill/go criteria, and effort estimates is being
+developed for this milestone.

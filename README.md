@@ -343,18 +343,56 @@ This produces `optimized_weights.json` in the genome's directory. The benchmark 
 
 ## Training Pipeline
 
-The training pipeline consists of two distinct phases:
+End to end, a champion is produced in four stages: **(0)** generate an offline expert dataset,
+**(1)** supervised pretraining (Phase 0), **(2)** Phase 0→1 transfer, **(3)** co-evolutionary
+self-play (Phase 1). Two brains — **Lead** and **Follow** — are trained in parallel throughout
+and routed at play time by `BeliefFeature::AmILeading`.
 
-### Phase 0: Supervised Pretraining with Split Datasets (gens 0 to 200)
-WANNs are pretrained to match Perfect Information Monte Carlo (PIMC) expert intents.
-* **Dataset Splitting:** The input expert dataset (such as `expert_states_w20_d2.npz`) is partitioned into two subsets using the `BeliefFeature::AmILeading` flag: `lead_dataset` (low entropy, 87% concentrated on aggressive MAX_FORCE and equity actions) and `follow_dataset` (high entropy, distributed across passive and efficient actions).
-* **Zero-Connection Start (PFS-NEAT):** Both `lead_pop` and `follow_pop` populations are initialized with genomes carrying exactly 0 active connections.
-* **Online Mutational Filtering:** During connection mutations, candidates are checked against a thread-safe FIFO `TabuVetoList` of size 1000. If the path is not tabued, it is temporarily applied and evaluated on a 1000-state subset. If the mutation degrades accuracy compared to the parent, it is discarded and pushed onto the Tabu queue. Beneficial and neutral mutations are preserved; neutral mutations that fail to find a synergistic partner node are pruned by Pareto complexity domination.
-* **Training Output:** Phase 0 finishes when populations independently reach convergence, typically achieving over 60% aggregate accuracy.
+### Stage 0 — Expert Dataset Generation (offline, one-time)
 
-### Phase 1: Co-evolutionary Self-Play (gens 200+)
-* **Co-Evolution:** Lead Brains and Follow Brains co-evolve. In each duplicate matchup, a candidate Lead Brain is paired with the current champion Follow Brain, and a candidate Follow Brain is paired with the champion Lead Brain.
-* **Dynamic Routing:** During gameplay, cards are played seat-by-seat. The evaluator queries a unified `Wann` simulator bot which routes decisions dynamically at each card play slice:
+`generate-dataset` produces a `.npz` of 35-feature belief states with 3-intent soft targets,
+sampled only at the *current player's* turn (legal-move / perspective aligned). The canonical
+v6 dataset uses the **rollout teacher** (`solve_pimc_rollout`): each determinized world is
+finished with Elite playouts, yielding supra-Elite labels (62% vs Elite) ~1000× cheaper than
+deep alpha-beta. Each decisive state is labeled with the intent whose *resolved card* has the
+best PIMC EV; states where all 3 intents resolve to the same card are rejected. See the
+[Dataset Pipeline](#dataset-pipeline-2026-06-recovery) section for the filters and flags.
+
+### Stage 1 — Phase 0: Supervised Pretraining (gens 0 → `phase0_gens`)
+
+WANNs are pretrained to match the expert intents by **classification accuracy** — no game
+simulation, so fitness variance is zero and the search focuses purely on establishing
+structural connectivity.
+
+* **Dataset split.** The expert dataset is partitioned by the `AmILeading` flag into a
+  `lead_dataset` and a `follow_dataset`; the Lead and Follow populations train on their own
+  split. Lead states are lower-entropy (concentrated on aggressive/equity leads); follow states
+  spread across efficient/equity actions.
+* **Zero-connection start (PFS-NEAT).** Both populations begin with genomes carrying exactly
+  **0 active connections**. The topology is grown only by mutations that prove their worth.
+* **PFS validation (structural mutations only).** Mutations are classified as `Structural`
+  (add-node, add-conn) or `NonStructural` (toggle, flip-sign, change-act, change-agg); only
+  structural ones trigger validation. Adaptive 2-stage sampling: a quick **K=25** accuracy
+  check first, and only borderline cases (within 2% of the parent) run the full
+  `pfs_sample_size` (default **100**). Degraded mutations are pushed onto a FIFO
+  `TabuVetoList` (size 1000) so the identical bad path is never re-evaluated. A single
+  pre-allocated scratchpad is reused per child to avoid hot-path allocations.
+* **Bloat control.** Neutral mutations that find no synergistic partner node are pruned by
+  Pareto complexity domination.
+
+### Stage 2 — Phase 0→1 Transfer (at `phase0_gens`)
+
+HOF entries from Phase 0 are **re-evaluated under Phase 1 fitness** at the transition, so
+supervised knowledge carries into self-play instead of being discarded. Uniqueness filtering
+uses O(1) innovation-fingerprint hashing (`Genome::innovation_fingerprint()`), not O(pop²·E)
+pairwise compatibility distance.
+
+### Stage 3 — Phase 1: Co-evolutionary Self-Play (gens `phase0_gens` → `generations`)
+
+* **Co-evolution.** Lead and Follow brains co-evolve: candidate Lead WANNs are paired with
+  reference Follow champions and vice versa.
+* **Dynamic routing.** Games are played card-by-card; a unified `Wann` simulator bot routes
+  each decision slice to the correct brain:
   ```rust
   let network = if belief[BeliefFeature::AmILeading as usize] == 1.0 {
       lead_brain
@@ -362,7 +400,19 @@ WANNs are pretrained to match Perfect Information Monte Carlo (PIMC) expert inte
       follow_brain
   };
   ```
-* **Duplicate Matching:** Delta-fitness is computed using Common Random Numbers (CRN) over seat rotations on duplicate deals to isolate pure strategic skill from card luck.
+* **Fitness.** Raw game-point **delta vs HeuristicBot**, computed with Common Random Numbers
+  (same deal, seat, and opponents) over seat rotations to isolate strategic skill from card
+  luck. Partners/opponents are sampled from a mixed pool (HeuristicBot / HOF / MAP-Elites).
+* **Selection.** Rank-based tournament selection; 50% of generations rank by
+  (performance, simplicity) Pareto front to prevent bloat. Deals are re-seeded each generation
+  to prevent memorization.
+
+### Outputs
+
+Each run writes a dated `code/checkpoints/YYYY-MM-DD-N/` containing `training_stats.csv`,
+`training_state.bin` (Bincode, resumable), a `data/` directory of human-readable runtime
+snapshots, and `genomes/` with `best_genome_final.json` and `hof_final.json`. See
+[Checkpoint Structure](#checkpoint-structure).
 
 ## Checkpoint Structure
 

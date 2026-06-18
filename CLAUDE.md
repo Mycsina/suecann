@@ -254,6 +254,11 @@ When WANN outputs tie, a random intent is chosen among the tied maximums (not de
 
 ### Training Pipeline
 
+End to end: **Stage 0** generate the offline expert dataset (`generate-dataset`, rollout
+teacher — see "Generating Expert Dataset" above) → **Stage 1** Phase 0 supervised pretraining
+→ **Stage 2** Phase 0→1 HOF transfer → **Stage 3** Phase 1 self-play. Lead and Follow brains
+are trained in parallel throughout and routed at play time by `BeliefFeature::AmILeading`.
+
 **Phase 0 (gens 0–`phase0_gens`): Supervised pretraining.**
 * **Dataset Split:** Expert PIMC dataset is split into `lead_dataset` and `follow_dataset` using the `BeliefFeature::AmILeading` flag.
 * **PFS-NEAT:** Populations start with exactly 0 active connections. Mutations are classified as `Structural` (add_node, add_conn) or `NonStructural` (toggle, flip_sign, change_act, change_agg). Only structural mutations trigger PFS validation. Adaptive 2-stage sampling: quick K=25 check first; only borderline cases (within 2% accuracy) run the full configurable `pfs_sample_size` (default 100, down from original 1000). Degraded mutations are logged into a FIFO `TabuVetoList` of size 1000.
