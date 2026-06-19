@@ -360,6 +360,123 @@ pub fn solve_pimc_rollout(
     out
 }
 
+/// Serial twin of [`solve_pimc_rollout`] with identical semantics, iterating worlds
+/// with a plain loop instead of `into_par_iter`. Use this when calling from inside an
+/// already-parallel rayon region (e.g. the benchmark's per-game `par_iter`), where a
+/// nested parallel iterator on the same global pool deadlocks (all workers park waiting
+/// on each other). Outer parallelism still provides throughput.
+pub fn solve_pimc_rollout_serial(
+    game: &crate::simulator::SuecaSimulatorGame,
+    n_worlds: usize,
+    seed: u64,
+) -> Vec<PimcResult> {
+    use crate::heuristic::select_card_heuristic;
+
+    let my_seat = game.state.current_player;
+    let my_hand = game.state.hands[my_seat as usize];
+
+    let legal_mask = game.state.legal_moves();
+    let mut legal_moves = [0u8; 10];
+    let mut legal_count = 0usize;
+    let mut t = legal_mask;
+    while t != 0 {
+        legal_moves[legal_count] = t.trailing_zeros() as u8;
+        legal_count += 1;
+        t &= t - 1;
+    }
+    if legal_count == 0 {
+        return Vec::new();
+    }
+    if legal_count == 1 {
+        return vec![PimcResult {
+            card: legal_moves[0],
+            ev: 0.0,
+            std_error: 0.0,
+        }];
+    }
+
+    let all_hands =
+        game.state.hands[0] | game.state.hands[1] | game.state.hands[2] | game.state.hands[3];
+    let unknown_mask = all_hands & !my_hand;
+    let mut unknown_cards = [0u8; 40];
+    let mut num_unknowns = 0usize;
+    let mut u = unknown_mask;
+    while u != 0 {
+        unknown_cards[num_unknowns] = u.trailing_zeros() as u8;
+        num_unknowns += 1;
+        u &= u - 1;
+    }
+    let unknown_slice = &unknown_cards[..num_unknowns];
+
+    let mut target_sizes = [0u8; 4];
+    for i in 0..4 {
+        target_sizes[i] = game.state.hands[i].count_ones() as u8;
+    }
+    let voids = game.voids;
+    let ego_team = my_seat % 2;
+
+    let mut stats: [RolloutWelford; 40] = [RolloutWelford::default(); 40];
+    for world_idx in 0..n_worlds {
+        let mut local_hands = [0u64; 4];
+        let mut local_seed =
+            seed.wrapping_add((world_idx as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15));
+        let mut ok = false;
+        for _ in 0..10 {
+            if sample_world(
+                my_seat,
+                my_hand,
+                unknown_slice,
+                voids,
+                target_sizes,
+                &mut local_hands,
+                &mut local_seed,
+            ) {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+
+        for i in 0..legal_count {
+            let m = legal_moves[i];
+            let mut g = *game;
+            g.state.hands = local_hands; // determinize hidden hands (ego unchanged)
+            g.play_card(m);
+            while g.state.trick_number < 10 {
+                let s = g.state.current_player;
+                let c = select_card_heuristic(&g, s);
+                g.play_card(c);
+            }
+            let score = if ego_team == 0 {
+                g.state.team_02_score
+            } else {
+                g.state.team_13_score
+            };
+            stats[m as usize].update(score as f64);
+        }
+    }
+
+    let mut out = Vec::with_capacity(legal_count);
+    for i in 0..legal_count {
+        let m = legal_moves[i];
+        let w = &stats[m as usize];
+        let n = w.count.max(1) as f64;
+        let var = if w.count > 1 {
+            w.m2 / (w.count as f64 - 1.0)
+        } else {
+            0.0
+        };
+        out.push(PimcResult {
+            card: m,
+            ev: w.mean,
+            std_error: (var / n).sqrt(),
+        });
+    }
+    out
+}
+
 /// Evaluates the Expected Value (EV) of each legal move using PIMC.
 /// Returns per-move EV scores with standard errors from Welford variance tracking.
 /// Thread-safe and parallelized using Rayon.

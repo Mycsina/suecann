@@ -6,6 +6,12 @@ use sueca_solver::heuristic::{
 };
 use sueca_solver::rng::LcgRng;
 use sueca_solver::simulator::SuecaSimulatorGame;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// OracleEnvelope statistics counters (accessible from tests).
+pub static ORACLE_STATS_SINGLE: AtomicU64 = AtomicU64::new(0);
+pub static ORACLE_STATS_CONVERGED: AtomicU64 = AtomicU64::new(0);
+pub static ORACLE_STATS_ROLLOUT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default)]
 pub struct WannBehavior {
@@ -38,6 +44,42 @@ pub enum SimulatorBot<'a> {
         n_worlds: usize,
         search_depth: u8,
     },
+    /// Oracle that picks the best of the 3 intents via determinized Elite rollouts.
+    /// Measures the strength ceiling of the current action vocabulary.
+    OracleEnvelope {
+        n_worlds: usize,
+    },
+    /// Oracle that picks the best of ALL legal moves via determinized Elite rollouts.
+    /// Measures the free-card ceiling; gap to OracleEnvelope = cost of the 3-intent vocabulary.
+    OracleFreeCard {
+        n_worlds: usize,
+    },
+    /// Oracle that restricts card choice to the reachable set of a continuous linear
+    /// utility over 6 hand-designed features. Measures the "feature expressiveness
+    /// ceiling" — how good play can get when restricted to phi-linear-expressible
+    /// choices. Gap to OracleFreeCard = cost of the phi representation.
+    PhiUtilityOracle {
+        n_worlds: usize,
+    },
+}
+
+/// Replica of heuristic.rs:would_beat — determines if `card` would beat the
+/// current best card in the trick. Returns true when leading (trick empty).
+#[inline(always)]
+fn would_beat_card(card: u8, game: &SuecaSimulatorGame) -> bool {
+    if game.current_trick_len == 0 {
+        return true;
+    }
+    let trump = game.state.trump;
+    let led_suit = sueca_solver::engine::CARD_SUIT[game.current_trick[0] as usize];
+    let mut best_card = game.current_trick[0];
+    for i in 1..game.current_trick_len {
+        let c = game.current_trick[i];
+        if sueca_solver::engine::GameState::beats_card(c, best_card, trump, led_suit) {
+            best_card = c;
+        }
+    }
+    sueca_solver::engine::GameState::beats_card(card, best_card, trump, led_suit)
 }
 
 impl<'a> SimulatorBot<'a> {
@@ -254,6 +296,160 @@ impl<'a> SimulatorBot<'a> {
                 }
                 best_card
             }
+            SimulatorBot::OracleEnvelope { n_worlds } => {
+                let legal = game.state.legal_moves();
+                if legal.count_ones() == 1 {
+                    ORACLE_STATS_SINGLE.fetch_add(1, Ordering::Relaxed);
+                    return legal.trailing_zeros() as u8;
+                }
+
+                // Resolve each of the 3 intents to a concrete card.
+                let cards = [
+                    resolve_intent(0, game, seat),
+                    resolve_intent(1, game, seat),
+                    resolve_intent(2, game, seat),
+                ];
+
+                // If all 3 intents resolve to the same card, play it immediately.
+                if cards[0] == cards[1] && cards[0] == cards[2] {
+                    ORACLE_STATS_CONVERGED.fetch_add(1, Ordering::Relaxed);
+                    return cards[0];
+                }
+
+                // Multiple distinct intent-resolved cards — use PIMC rollout to
+                // estimate the EV of every legal move, then pick the intent card
+                // with the highest EV. Tie-break by lowest intent index (0..2).
+                ORACLE_STATS_ROLLOUT.fetch_add(1, Ordering::Relaxed);
+                // Serial rollout: this runs inside the benchmark's rayon par_iter, so a
+                // nested parallel rollout would deadlock the global pool.
+                let evs =
+                    sueca_solver::pimc::solve_pimc_rollout_serial(game, *n_worlds, rng.next_u64());
+
+                let mut best_card = cards[0];
+                let mut best_ev = f64::NEG_INFINITY;
+                for i in 0..3 {
+                    let card = cards[i];
+                    for r in &evs {
+                        if r.card == card && r.ev > best_ev {
+                            best_ev = r.ev;
+                            best_card = card;
+                            break;
+                        }
+                    }
+                }
+                best_card
+            }
+            SimulatorBot::OracleFreeCard { n_worlds } => {
+                let legal = game.state.legal_moves();
+                if legal.count_ones() == 1 {
+                    return legal.trailing_zeros() as u8;
+                }
+                // Best over ALL legal moves (not just the 3 intent cards) by rollout EV.
+                // Serial rollout: runs inside the benchmark's rayon par_iter.
+                let evs =
+                    sueca_solver::pimc::solve_pimc_rollout_serial(game, *n_worlds, rng.next_u64());
+                let mut best_card = legal.trailing_zeros() as u8;
+                let mut best_ev = f64::NEG_INFINITY;
+                for r in &evs {
+                    if r.ev > best_ev {
+                        best_ev = r.ev;
+                        best_card = r.card;
+                    }
+                }
+                best_card
+            }
+            SimulatorBot::PhiUtilityOracle { n_worlds } => {
+                let legal = game.state.legal_moves();
+                if legal.count_ones() == 1 {
+                    return legal.trailing_zeros() as u8;
+                }
+
+                // Collect legal cards.
+                let mut legal_cards = [40u8; 10];
+                let mut legal_count = 0;
+                let mut l = legal;
+                while l != 0 {
+                    legal_cards[legal_count] = l.trailing_zeros() as u8;
+                    legal_count += 1;
+                    l &= l - 1;
+                }
+                let legal_slice = &legal_cards[..legal_count];
+
+                // Compute 6-D feature vector phi(c) for each legal card.
+                let mut phis = [[0.0f64; 6]; 10];
+                for i in 0..legal_count {
+                    let c = legal_slice[i];
+                    let suit = sueca_solver::engine::CARD_SUIT[c as usize];
+                    let beats = would_beat_card(c, game);
+                    let is_last_in_suit = (game.state.hands[seat as usize]
+                        & (0x3FFu64 << (suit as u64 * 10)))
+                    .count_ones()
+                        == 1;
+
+                    phis[i][0] = sueca_solver::engine::CARD_RANK[c as usize] as f64 / 9.0;
+                    phis[i][1] = sueca_solver::engine::CARD_POINTS[c as usize] as f64 / 11.0;
+                    phis[i][2] = if suit == game.state.trump { 1.0 } else { 0.0 };
+                    phis[i][3] = if beats { 1.0 } else { 0.0 };
+                    phis[i][4] = if beats {
+                        game.trick_points as f64 / 30.0
+                    } else {
+                        0.0
+                    };
+                    phis[i][5] = if is_last_in_suit { 1.0 } else { 0.0 };
+                }
+
+                // Build reachable set: sample 64 random w ∈ [-1,1]^6,
+                // each picks the legal card maximizing dot(w, phi(c)).
+                let mut reachable = [false; 40];
+                for _ in 0..64 {
+                    let w: [f64; 6] = [
+                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
+                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
+                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
+                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
+                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
+                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
+                    ];
+                    let mut best_dot = f64::NEG_INFINITY;
+                    let mut best_c = legal_slice[0];
+                    for i in 0..legal_count {
+                        let phi = &phis[i];
+                        let dot = w[0] * phi[0]
+                            + w[1] * phi[1]
+                            + w[2] * phi[2]
+                            + w[3] * phi[3]
+                            + w[4] * phi[4]
+                            + w[5] * phi[5];
+                        if dot > best_dot {
+                            best_dot = dot;
+                            best_c = legal_slice[i];
+                        }
+                    }
+                    reachable[best_c as usize] = true;
+                }
+
+                // Compute per-card EV via rollout, then pick the reachable card
+                // with the highest EV. Tie-break by lowest card index.
+                let evs = sueca_solver::pimc::solve_pimc_rollout_serial(
+                    game,
+                    *n_worlds,
+                    rng.next_u64(),
+                );
+                let mut best_card = legal_slice[0];
+                let mut best_ev = f64::NEG_INFINITY;
+                for &c in legal_slice {
+                    if reachable[c as usize] {
+                        for r in &evs {
+                            if r.card == c && r.ev > best_ev {
+                                best_ev = r.ev;
+                                best_card = c;
+                                break;
+                            }
+                        }
+                    }
+                }
+                best_card
+            }
         }
     }
 }
@@ -359,6 +555,24 @@ pub fn get_bot_from_type<'a>(
         1 => SimulatorBot::OldHeuristic,
         2 => SimulatorBot::Heuristic,
         3 => SimulatorBot::Heuristic,
+        4 => SimulatorBot::OracleEnvelope {
+            n_worlds: std::env::var("ORACLE_WORLDS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
+        },
+        5 => SimulatorBot::OracleFreeCard {
+            n_worlds: std::env::var("ORACLE_WORLDS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
+        },
+        6 => SimulatorBot::PhiUtilityOracle {
+            n_worlds: std::env::var("ORACLE_WORLDS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
+        },
         t if t >= 10 => {
             let idx = (t - 10) as usize;
             SimulatorBot::Wann {
@@ -819,6 +1033,159 @@ mod tests {
             sum_roll as f64 / n as f64,
             100.0 * roll_wins as f64 / n as f64
         );
+    }
+
+    /// OracleEnvelope vs Elite: measures the strength ceiling of the 3-intent
+    /// action vocabulary when intent is chosen perfectly by multi-world PIMC
+    /// rollouts (no neural network). Also reports Elite vs Elite as sanity.
+    ///   cargo test -p sueca_wann --release diagnostic_oracle_envelope -- --nocapture --test-threads=1
+    #[test]
+    #[ignore = "on-demand diagnostic; run explicitly"]
+    fn diagnostic_oracle_envelope() {
+        use super::{play_game_sim, SimulatorBot, WannBehavior, ORACLE_STATS_SINGLE, ORACLE_STATS_CONVERGED, ORACLE_STATS_ROLLOUT};
+        use crate::train::generate_deals_rust;
+        use std::sync::atomic::Ordering;
+        // Reset stats
+        ORACLE_STATS_SINGLE.store(0, Ordering::Relaxed);
+        ORACLE_STATS_CONVERGED.store(0, Ordering::Relaxed);
+        ORACLE_STATS_ROLLOUT.store(0, Ordering::Relaxed);
+        let n: usize = std::env::var("OE_DEALS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(80);
+        let nw: usize = std::env::var("OE_WORLDS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
+        let deals = generate_deals_rust(0, n, 31337);
+
+        let start = std::time::Instant::now();
+
+        // --- OracleEnvelope (seats 0&2) vs Elite (seats 1&3) ---
+        let mut sum_oracle = 0u64;
+        let mut oracle_wins = 0usize;
+        let mut sum_oracle_opp = 0u64;
+        for deal in &deals {
+            let oracle = SimulatorBot::OracleEnvelope { n_worlds: nw };
+            let elite = SimulatorBot::Heuristic;
+            let bots = [
+                oracle.clone(),
+                elite.clone(),
+                oracle.clone(),
+                elite.clone(),
+            ];
+            let mut scratch = vec![0.0f64; 8];
+            let mut beh = WannBehavior::default();
+            let res = play_game_sim(
+                deal.hands,
+                deal.trump,
+                0,
+                &bots,
+                deal.seed,
+                &mut scratch,
+                &mut beh,
+            );
+            sum_oracle += res.team_02_score as u64;
+            sum_oracle_opp += res.team_13_score as u64;
+            if res.team_02_score > 60 {
+                oracle_wins += 1;
+            }
+        }
+
+        // --- Elite vs Elite sanity baseline on the same deals ---
+        let mut sum_elite = 0u64;
+        let mut elite_wins = 0usize;
+        for deal in &deals {
+            let elite = SimulatorBot::Heuristic;
+            let bots = [
+                elite.clone(),
+                elite.clone(),
+                elite.clone(),
+                elite.clone(),
+            ];
+            let mut scratch = vec![0.0f64; 8];
+            let mut beh = WannBehavior::default();
+            let res = play_game_sim(
+                deal.hands,
+                deal.trump,
+                0,
+                &bots,
+                deal.seed,
+                &mut scratch,
+                &mut beh,
+            );
+            sum_elite += res.team_02_score as u64;
+            if res.team_02_score > 60 {
+                elite_wins += 1;
+            }
+        }
+
+        let elapsed = start.elapsed().as_secs_f64();
+
+        let single = ORACLE_STATS_SINGLE.load(Ordering::Relaxed);
+        let converged = ORACLE_STATS_CONVERGED.load(Ordering::Relaxed);
+        let rollout = ORACLE_STATS_ROLLOUT.load(Ordering::Relaxed);
+        let total_decisions = single + converged + rollout;
+
+        println!();
+        println!("========== ORACLE ENVELOPE CEILING ==========");
+        println!(
+            "OracleEnvelope(W={}) vs Elite  over {} deals:",
+            nw, n
+        );
+        println!(
+            "  win-rate = {:.1}%  ({}/{})",
+            100.0 * oracle_wins as f64 / n as f64,
+            oracle_wins,
+            n
+        );
+        println!(
+            "  card pts = {:.1} vs {:.1}",
+            sum_oracle as f64 / n as f64,
+            sum_oracle_opp as f64 / n as f64
+        );
+        println!("  decisions: {} total  |  single-legal: {}  |  all-intents-same: {}  |  rollout: {}",
+            total_decisions, single, converged, rollout);
+        println!(
+            "Elite vs Elite (sanity ~50%) over {} deals:",
+            n
+        );
+        println!(
+            "  win-rate = {:.1}%  ({}/{})",
+            100.0 * elite_wins as f64 / n as f64,
+            elite_wins,
+            n
+        );
+        println!(
+            "  card pts = {:.1} vs {:.1}",
+            sum_elite as f64 / n as f64,
+            (n as u64 * 120 - sum_elite) as f64 / n as f64
+        );
+        println!(
+            "Wall-clock: {:.2} s  (deals={}, W={})",
+            elapsed, n, nw
+        );
+        println!("==============================================");
+        println!();
+
+        // Machine-readable block
+        println!("RESULT_BEGIN");
+        println!(
+            "ORACLE_ENVELOPE_VS_ELITE_WINRATE = {:.1}",
+            100.0 * oracle_wins as f64 / n as f64
+        );
+        println!(
+            "ELITE_VS_ELITE_WINRATE = {:.1}",
+            100.0 * elite_wins as f64 / n as f64
+        );
+        println!(
+            "ORACLE_CARD_POINTS = {:.1} vs {:.1}",
+            sum_oracle as f64 / n as f64,
+            sum_oracle_opp as f64 / n as f64
+        );
+        println!("DEALS = {}   W_WORLDS = {}   WALLCLOCK_SEC = {:.2}", n, nw, elapsed);
+        println!("FILES_CHANGED = code/src/sueca_wann/src/evaluator.rs,code/src/sueca_wann/src/main.rs");
+        println!("RESULT_END");
     }
 
     #[test]

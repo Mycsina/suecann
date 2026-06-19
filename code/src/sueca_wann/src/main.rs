@@ -242,6 +242,13 @@ fn run_benchmark(
             follow_weights: None,
         },
         benchmark::BotEntry {
+            name: "OracleEnvelope".into(),
+            bot_type: 4,
+            genome_path: None,
+            lead_weights: None,
+            follow_weights: None,
+        },
+        benchmark::BotEntry {
             name: "WANN (Champion)".into(),
             bot_type: 10,
             genome_path: Some(genome_path.clone()),
@@ -249,6 +256,37 @@ fn run_benchmark(
             follow_weights: None,
         },
     ];
+
+    // Free-card ceiling: best over ALL legal moves by rollout EV (bot_type 5).
+    bots.push(benchmark::BotEntry {
+        name: "OracleFreeCard".into(),
+        bot_type: 5,
+        genome_path: None,
+        lead_weights: None,
+        follow_weights: None,
+    });
+
+    // Phi-utility ceiling: best within the reachable set of a continuous
+    // linear utility over 6 hand-designed features (bot_type 6).
+    bots.push(benchmark::BotEntry {
+        name: "PhiUtilityOracle".into(),
+        bot_type: 6,
+        genome_path: None,
+        lead_weights: None,
+        follow_weights: None,
+    });
+
+    // CEILING_SWEEP=1 trims to {Elite, OracleEnvelope, OracleFreeCard} so the worlds
+    // sweep skips wasteful PIMC-vs-{Random,Old,WANN} matchups.
+    if std::env::var("CEILING_SWEEP").is_ok() {
+        bots.retain(|b| {
+            matches!(
+                b.name.as_str(),
+                "EliteHeuristicBot" | "OracleEnvelope" | "OracleFreeCard"
+                    | "PhiUtilityOracle"
+            )
+        });
+    }
 
     if let (Some(lead_w), Some(follow_w)) = (opt_lead, opt_follow) {
         bots.push(benchmark::BotEntry {
