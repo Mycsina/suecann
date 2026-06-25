@@ -19,13 +19,6 @@ pub const RESEED_ADD_CONN_PROB: f64 = 0.10;
 // Partner / opponent seat offsets (partner = (seat + 2) % 4).
 pub const PARTNER_OFFSET: usize = 2;
 
-// Differential Evolution hyperparameters for weight optimization.
-pub const DE_POP_SIZE: usize = 50;
-pub const DE_F_SCALING: f64 = 0.5;
-pub const DE_CR_CROSSOVER: f64 = 0.7;
-pub const DE_WEIGHT_MIN: f64 = -2.0;
-pub const DE_WEIGHT_MAX: f64 = 2.0;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum BeliefFeature {

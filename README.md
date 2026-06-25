@@ -335,17 +335,19 @@ code/target/release/sueca_wann generate-dataset \
   --output expert_states.npz
 ```
 
-### Optimizing Weights
+### Removed: Optimize Weights
 
-After evolving a topology, optimize independent continuous weights per connection using Differential Evolution:
+The old `optimize-weights` command was removed. Differential Evolution over independent per-connection continuous weights collapsed the Stage-B THRESHOLD champion (27.9% vs Elite) compared with the sweep-averaged sign-only champion (55.2% vs Elite, 1000 deals). Production evaluation uses the shared weight sweep.
+
+### Pruning Champions
 
 ```bash
-code/target/release/sueca_wann optimize-weights \
-  --genome code/checkpoints/2026-06-03-2/genomes/best_genome_final.json \
-  --deals 200 --generations 50
+code/target/release/sueca_wann prune \
+  --genome code/checkpoints/stageb/2026-06-25-1/genomes/best_genome_final.json \
+  --deals 64 --seed 42 --tolerance 0.0 --passes 2
 ```
 
-This produces `optimized_weights.json` in the genome's directory. The benchmark command auto-detects this file and adds a "WANN (Optimized)" bot to the tournament.
+Pruning is game-delta-gated: Lead+Follow are evaluated jointly on fixed duplicate deals against a HeuristicBot baseline. A connection removal is kept only if average game-point delta stays within `--tolerance`; then disabled connections and dead-end hidden nodes are structurally compacted. Writes `<genome>_pruned.json`.
 
 ## Training Pipeline
 
@@ -482,7 +484,7 @@ src/
     rng.rs                  # Shared LCG RNG
     constants.rs            # WANN dimension constants
   sueca_wann/src/           # Training binary + CLI
-    main.rs                 # CLI (train, benchmark, compile-rules, generate-dataset, optimize-weights)
+    main.rs                 # CLI (train, benchmark, compile-rules, generate-dataset, prune)
     train.rs                # Training loop, Phase 0/1 dispatch
     evaluator.rs            # Bot simulation, delta-fitness evaluation
     wann_network.rs         # CSR-format WANN inference
@@ -492,7 +494,7 @@ src/
     mutations.rs            # NEAT mutation operators, innovation registry
     hall_of_fame.rs         # HOF with sampling
     map_elites.rs           # MAP-Elites quality-diversity archive
-    optimize.rs             # Differential Evolution weight optimization
+    prune.rs                # Game-delta-gated + structural genome pruning
     config.rs               # TOML config deserialization
     checkpoint.rs           # Training state save/load
     compile_rules.rs        # Rule compiler, DOT export, PNG rendering
@@ -525,4 +527,3 @@ WANNs are evolved from an empty starting footprint (0 active connections). Onlin
 ### 2. SNAP-NEAT + Tabu search + Multi-Brain Partitioning
 * **Two-Level Tabu Veto:** Compiles hardcoded static structural constraints (self-loops, bias/inputs as targets, and cycles) with a dynamic FIFO lock-free queue that stores degraded mutation paths to bypass redundant evaluation.
 * **Modular Multi-Brain co-evolution:** Evolve modular Lead Brain (leading hand) and Follow Brain (following hand) populations. Game actions route decisions dynamically per play using `BeliefFeature::AmILeading`. Split brains reduce strategic entropy, accelerating search accuracy.
-

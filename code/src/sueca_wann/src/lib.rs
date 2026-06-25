@@ -24,8 +24,6 @@ pub mod map_elites;
 #[cfg(feature = "training")]
 pub mod mutations;
 #[cfg(feature = "training")]
-pub mod optimize;
-#[cfg(feature = "training")]
 pub mod prune;
 #[cfg(feature = "training")]
 pub mod population;

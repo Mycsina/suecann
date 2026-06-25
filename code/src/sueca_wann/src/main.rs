@@ -1,6 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 
-use sueca_wann::{benchmark, checkpoint, compile_rules, config, constants, dataset, dataset_gen, evaluator, genome, hall_of_fame, map_elites, mutations, optimize, population, prune, species, train, wann_network};
+use sueca_wann::{benchmark, checkpoint, compile_rules, config, constants, dataset, dataset_gen, evaluator, genome, hall_of_fame, map_elites, mutations, population, prune, species, train, wann_network};
 
 use clap::{Parser, Subcommand};
 
@@ -71,26 +71,18 @@ enum Command {
         #[arg(long, default_value_t = false)]
         resume: bool,
     },
-    /// Optimize independent continuous weights using Differential Evolution
-    OptimizeWeights {
-        #[arg(long)]
-        genome: String,
-        #[arg(long, default_value = "200")]
-        deals: usize,
-        #[arg(long, default_value = "50")]
-        generations: usize,
-        #[arg(long, default_value = "42")]
-        seed: u64,
-    },
-    /// Prune a champion: remove connections that don't affect card-match, then
-    /// compact structurally. Writes <genome>_pruned.json next to the input.
+    /// Prune a champion: remove connections that do not affect fixed-deal game
+    /// delta, then compact structurally. Writes <genome>_pruned.json.
     Prune {
         #[arg(long)]
         genome: String,
-        #[arg(long, default_value = "expert_states_v7.npz")]
-        dataset: String,
-        /// Max card-match drop tolerated when removing a connection.
-        #[arg(long, default_value_t = 0.005)]
+        /// Fixed duplicate deals used for the game-delta retention gate.
+        #[arg(long, default_value_t = 64)]
+        deals: usize,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        /// Max average game-point delta drop tolerated when removing a connection.
+        #[arg(long, default_value_t = 0.0)]
         tolerance: f64,
         /// Behavioural-pruning passes (each re-scans all enabled connections).
         #[arg(long, default_value_t = 2)]
@@ -164,22 +156,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             dataset_gen::generate_dataset(&config, resume);
         }
-        Command::OptimizeWeights {
-            genome,
-            deals,
-            generations,
-            seed,
-        } => {
-            optimize::run_weight_optimization(&genome, deals, generations, seed)?;
-        }
         Command::Prune {
             genome,
-            dataset,
+            deals,
+            seed,
             tolerance,
             passes,
             weights,
         } => {
-            prune::run_prune(&genome, &dataset, tolerance, passes, &weights)?;
+            prune::run_prune(&genome, deals, seed, tolerance, passes, &weights)?;
         }
     }
 
@@ -225,25 +210,6 @@ fn run_benchmark(
             .to_string()
     });
     std::fs::create_dir_all(&output_dir).ok();
-
-    let opt_weights_path = std::path::Path::new(&genome_path)
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("optimized_weights.json");
-
-    let mut opt_lead = None;
-    let mut opt_follow = None;
-
-    if opt_weights_path.exists() {
-        println!("Detected optimized weights file: {}", opt_weights_path.display());
-        if let Ok(file) = std::fs::File::open(&opt_weights_path) {
-            if let Ok(report) = serde_json::from_reader::<_, sueca_wann::optimize::OptimizedWeightsReport>(file) {
-                println!("Loaded optimized weights (best fitness: {:.4})", report.best_fitness);
-                opt_lead = Some(report.lead_weights);
-                opt_follow = Some(report.follow_weights);
-            }
-        }
-    }
 
     let mut bots = vec![
         benchmark::BotEntry {
@@ -311,16 +277,6 @@ fn run_benchmark(
                 "EliteHeuristicBot" | "OracleEnvelope" | "OracleFreeCard"
                     | "PhiUtilityOracle"
             )
-        });
-    }
-
-    if let (Some(lead_w), Some(follow_w)) = (opt_lead, opt_follow) {
-        bots.push(benchmark::BotEntry {
-            name: "WANN (Optimized)".into(),
-            bot_type: 100,
-            genome_path: Some(genome_path),
-            lead_weights: Some(lead_w),
-            follow_weights: Some(follow_w),
         });
     }
 
