@@ -199,11 +199,17 @@ output nodes — previously excluded). The canonical **symmetric** weight sweep 
 **preserved** (full WANN weight-agnosticism); only the output activation changes.
 The closed activation set remains {IDENTITY, NOT, THRESHOLD}; **no SIGMOID**.
 
-**Alternative substrate (asymmetric sweep).** Setting `sweep_weights = [0.5,1,2]`
-(positive-only) with IDENTITY outputs also unblocks positive knobs (a +1 bias
-yields knob +0.667, *continuously*) — Phase-0 card-match 0.624, best Lead 0.519.
-Slightly weaker WANN weight-agnosticism (sign no longer swept) but continuous
-knobs. Worth A/B-testing against THRESHOLD on Phase-1 game strength.
+**Alternative substrate (asymmetric sweep) — TESTED INFERIOR (A/B, 2026-06-25).**
+Setting `sweep_weights = [0.5,1,2]` (positive-only) with IDENTITY outputs also
+unblocks positive knobs (a +1 bias yields knob +0.667, *continuously*) — Phase-0
+card-match 0.624 (config `ab_asym_identity.toml`). A full 600-gen A/B run
+benchmarked the resulting champion at **38.1% vs Elite / 56.0% vs OldHeuristic
+(1000 deals)** vs the THRESHOLD champion's **55.2% / 68.0%** — i.e. the
+continuous-knob substrate is ~17 pts worse on game strength despite only ~2 pts
+behind on Phase-0 card-match. The "continuous knobs generalize better"
+hypothesis did not hold; THRESHOLD's stronger supervised signal wins. Kept as a
+config option (`output_activation = "identity"`, `sweep_weights = [0.5,1,2]`)
+but not recommended.
 
 **Crate dependency**: `sueca_wann` → `sueca_solver`. The solver is a pure game engine (rlib only, no PyO3). The wann crate contains WANN inference, evaluator, NEAT evolution, and CLI.
 
