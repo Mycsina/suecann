@@ -26,6 +26,8 @@ pub mod mutations;
 #[cfg(feature = "training")]
 pub mod optimize;
 #[cfg(feature = "training")]
+pub mod prune;
+#[cfg(feature = "training")]
 pub mod population;
 #[cfg(feature = "training")]
 pub mod runtime_data;

@@ -283,6 +283,43 @@ impl Genome {
         }
     }
 
+    /// Structural pruning: drop disabled connections, then iteratively remove
+    /// hidden nodes whose output feeds nothing (no enabled outgoing edge) and
+    /// their dangling incoming edges. Inputs/bias/outputs are never removed.
+    ///
+    /// This is **behaviour-preserving**: disabled connections don't fire, and a
+    /// node with no enabled outgoing edge is computed but never read. Note we do
+    /// NOT remove "constant-emitter" nodes (no incoming but has outgoing) — those
+    /// output a constant that downstream nodes depend on, so removing them would
+    /// change the network's output. Iterate to a fixpoint so removals cascade.
+    pub fn prune_structural(&mut self) {
+        use std::collections::HashSet;
+        // 1. Drop disabled connections outright.
+        self.conn_genes.retain(|c| c.enabled);
+
+        // 2. Iteratively evict dead-end hidden nodes (no enabled outgoing edge).
+        loop {
+            let mut has_outgoing: HashSet<usize> = HashSet::new();
+            for c in &self.conn_genes {
+                has_outgoing.insert(c.src);
+            }
+            let before = self.node_genes.len();
+            self.node_genes.retain(|n| {
+                if n.node_type != NodeType::HIDDEN {
+                    return true; // never prune input/bias/output
+                }
+                has_outgoing.contains(&n.id) // live iff it feeds something
+            });
+            // Remove edges whose endpoint was evicted.
+            let live: HashSet<usize> = self.node_genes.iter().map(|n| n.id).collect();
+            self.conn_genes
+                .retain(|c| live.contains(&c.src) && live.contains(&c.dst));
+            if self.node_genes.len() == before {
+                break; // fixpoint reached
+            }
+        }
+    }
+
     /// Fast structural fingerprint for deduplication.
     /// Hashes the sorted list of (innovation, sign) of enabled connections.
     /// Two genomes with identical enabled topology AND sign patterns will

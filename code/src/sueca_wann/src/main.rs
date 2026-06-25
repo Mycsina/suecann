@@ -1,6 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 
-use sueca_wann::{benchmark, checkpoint, compile_rules, config, constants, dataset, dataset_gen, evaluator, genome, hall_of_fame, map_elites, mutations, optimize, population, species, train, wann_network};
+use sueca_wann::{benchmark, checkpoint, compile_rules, config, constants, dataset, dataset_gen, evaluator, genome, hall_of_fame, map_elites, mutations, optimize, population, prune, species, train, wann_network};
 
 use clap::{Parser, Subcommand};
 
@@ -82,6 +82,23 @@ enum Command {
         #[arg(long, default_value = "42")]
         seed: u64,
     },
+    /// Prune a champion: remove connections that don't affect card-match, then
+    /// compact structurally. Writes <genome>_pruned.json next to the input.
+    Prune {
+        #[arg(long)]
+        genome: String,
+        #[arg(long, default_value = "expert_states_v7.npz")]
+        dataset: String,
+        /// Max card-match drop tolerated when removing a connection.
+        #[arg(long, default_value_t = 0.005)]
+        tolerance: f64,
+        /// Behavioural-pruning passes (each re-scans all enabled connections).
+        #[arg(long, default_value_t = 2)]
+        passes: usize,
+        /// Weight sweep (must match the genome's training sweep).
+        #[arg(long, default_value = "-2.0,-1.0,-0.5,0.5,1.0,2.0", value_delimiter = ',')]
+        weights: Vec<f64>,
+    },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -154,6 +171,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             seed,
         } => {
             optimize::run_weight_optimization(&genome, deals, generations, seed)?;
+        }
+        Command::Prune {
+            genome,
+            dataset,
+            tolerance,
+            passes,
+            weights,
+        } => {
+            prune::run_prune(&genome, &dataset, tolerance, passes, &weights)?;
         }
     }
 
