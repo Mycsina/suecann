@@ -112,6 +112,33 @@ The old `scripts/migrate_intents.py` flow is obsolete; there is no in-place
 
 Uses Differential Evolution (pop=50, F=0.5, CR=0.7) to optimize independent per-connection continuous weights within [-2.0, 2.0]. Saves `optimized_weights.json` in the genome's directory. The benchmark command auto-detects this file and adds a WANN (Optimized) entry.
 
+> **Caveat (2026-06-25): on the Stage-B THRESHOLD champion this HURTS badly.**
+> Per-connection continuous weights fight the weight-agnostic property the
+> topology was evolved under (sign-only + shared sweep). DE overfits the 200
+> training deals against an all-Heuristic field and the resulting weights
+> collapse: WANN (Optimized) benchmarks at 27.9% vs Elite vs 55.2% for the
+> sweep-averaged Champion (1000 deals). The sweep-averaged sign-only eval is the
+> correct way to run a WANN — `optimize-weights` is retained for experimentation
+> but is not recommended for production champions.
+
+## Pruning a Champion
+
+```bash
+./target/release/sueca_wann prune \
+  --genome code/checkpoints/stageb/2026-06-25-1/genomes/best_genome_final.json \
+  --dataset code/expert_states_v7.npz --tolerance 0.0 --passes 2
+```
+
+For each brain, iteratively disables enabled connections whose removal keeps
+Phase-0 card-match within `--tolerance` (on that brain's `AmILeading` split),
+then `Genome::prune_structural` compacts disabled connections + dead-end hidden
+nodes (behaviour-preserving). Writes `<genome>_pruned.json`. On the Stage-B
+champion at `--tolerance 0.0`: Lead 124→6 conns, Follow 73→10, card-match
+exactly preserved, game strength 52.5% vs Elite (from 55.2%) — i.e. a much
+smaller, interpretable genome at a ~3-pt strength cost. Card-match is a leaky
+proxy for game strength (over-prunes); a game-delta-gated prune is the natural
+next improvement. Lower `--tolerance` for safer pruning.
+
 ## Comparing Training Runs
 
 ```bash
@@ -191,7 +218,7 @@ knobs. Worth A/B-testing against THRESHOLD on Phase-1 game strength.
 - `constants.rs` — WANN layout dimensions (`INPUT_COUNT=35`, `OUTPUT_COUNT=6` φ-knobs, `PHI_FEATURE_COUNT=6`, `PhiFeature` enum)
 
 **Key modules in `sueca_wann`**:
-- `main.rs` — CLI entry point (train / benchmark / compile-rules / generate-dataset / optimize-weights subcommands)
+- `main.rs` — CLI entry point (train / benchmark / compile-rules / generate-dataset / optimize-weights / prune subcommands)
 - `wann_network.rs` — CSR-format WANN inference with zero-allocation forward pass
 - `evaluator.rs` — Bot simulation, delta-fitness evaluation
 - `train.rs` — Training loop, Phase 0/1 evaluation, HOF transfer
@@ -202,6 +229,7 @@ knobs. Worth A/B-testing against THRESHOLD on Phase-1 game strength.
 - `hall_of_fame.rs` — HOF management with sampling
 - `map_elites.rs` — MAP-Elites quality-diversity archive with grid export
 - `optimize.rs` — Differential Evolution weight optimization
+- `prune.rs` — Behavioural (card-match-gated) + structural genome pruning
 - `runtime_data.rs` — Runtime state snapshots for checkpoint inspection and resume fidelity
 - `constants.rs` — Evolutionary hyperparameters, feature/φ-knob name mappings
 - `benchmark.rs` — Tournament benchmarking
@@ -290,6 +318,11 @@ action vocabulary. The prior canonical champion **v6 (`2026-06-14-2`): 52.1% ± 
 vs Elite** was trained under the old 3-intent system and its genome is **not
 loadable** after this refactor (OUTPUT_COUNT and FIRST_HIDDEN_ID changed). The
 Stage B system is a fresh training run.
+
+**Canonical Stage-B champion (`stageb/2026-06-25-1`, THRESHOLD substrate):
+55.2% ± 3.1% vs Elite, 68.0% ± 2.9% vs OldHeuristic (1000-deal benchmark);
+Phase-1 delta +4.6 vs HeuristicBot** (peak). Beats the broken-substrate Stage-B
+run (flat −6 delta) and the legacy v6 (52.1% vs Elite).
 
 ### WANN Constraints
 
