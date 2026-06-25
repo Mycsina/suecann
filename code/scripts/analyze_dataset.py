@@ -1,4 +1,13 @@
-"""Quantitative analysis of expert dataset NPZ files."""
+"""Quantitative analysis of expert dataset NPZ files.
+
+NOTE: this script targets the LEGACY v1 (3-intent soft-label) dataset format.
+The Stage B resolver overhaul (2026-06-19) switched to a v2 **card-match**
+format: `states.npy` + `best_cards.npy` (u64 mask) + `ctx_*` arrays + a
+`version.npy` (=2) tag, with no `intents.npy`. On a v2 dataset this script will
+error at load; it is preserved for analyzing old/legacy datasets only. A v2-aware
+analyzer would report the `best_cards` mask-size distribution and the lead/follow
+split rather than per-intent class balance.
+"""
 import argparse
 import sys
 from pathlib import Path

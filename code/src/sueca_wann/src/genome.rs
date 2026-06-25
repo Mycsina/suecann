@@ -158,7 +158,33 @@ impl Genome {
     }
 
     pub fn initial() -> Self {
-        Self::new(None, None, 0)
+        Self::initial_with_output_act(ActivationFn::IDENTITY)
+    }
+
+    /// Build the base genome (35 inputs + 1 bias + 6 outputs, zero connections)
+    /// with output nodes set to the requested activation. Used to seed populations
+    /// under different substrates (e.g. THRESHOLD outputs so positive φ-knobs are
+    /// reachable under the weight sweep — see CLAUDE.md "Substrate decision").
+    pub fn initial_with_output_act(output_act: ActivationFn) -> Self {
+        let mut g = Self::new(None, None, 0);
+        for n in &mut g.node_genes {
+            if n.node_type == NodeType::OUTPUT {
+                n.activation_fn = output_act;
+            }
+        }
+        g
+    }
+
+    /// Parse an activation name ("identity" | "not" | "threshold") for config.
+    pub fn parse_activation(name: &str) -> Result<ActivationFn, String> {
+        match name.to_ascii_lowercase().as_str() {
+            "identity" | "id" => Ok(ActivationFn::IDENTITY),
+            "not" => Ok(ActivationFn::NOT),
+            "threshold" | "step" => Ok(ActivationFn::THRESHOLD),
+            _ => Err(format!(
+                "unknown activation '{name}' (expected identity | not | threshold)"
+            )),
+        }
     }
 
     // --- Node accessors ---

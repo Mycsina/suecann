@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Neurosymbolic AI that evolves Weight-Agnostic Neural Networks (WANNs) to play **Sueca** (Portuguese trick-taking card game). Networks use logical gates instead of traditional activations, output abstract play intents (not cards), and are compiled into human-readable IF/THEN rules.
+Neurosymbolic AI that evolves Weight-Agnostic Neural Networks (WANNs) to play **Sueca** (Portuguese trick-taking card game). Networks use logical gates instead of traditional activations, output 6 φ-utility knobs (not cards), and are compiled into human-readable IF/THEN rules.
 
 The training pipeline is a pure-Rust binary (`sueca_wann`) that calls into the Rust game engine (`sueca_solver`). Python is used only for cross-run comparison visualization (`code/scripts/compare_runs.py`).
 
@@ -69,38 +69,38 @@ Generates `compiled_rules.txt` (IF/THEN logic), `topology_graph.dot`, and `topol
 ## Generating Expert Dataset
 
 ```bash
-# Canonical v6 dataset (rollout teacher, supra-Elite labels):
+# Stage B card-match dataset (rollout teacher → free-card target, ~81% ceiling):
 ./target/release/sueca_wann generate-dataset \
   --n-worlds 200 --teacher rollout --target-count 15000 \
   --soft-balance-min-ratio 0.0 \
-  --output expert_states_v6.npz
+  --output expert_states_v7.npz
 ```
 
-Generates PIMC expert states for Phase 0 pretraining. Samples only the current player's turn (not all 4 seats) to ensure legal-move / perspective alignment.
-Outputs 35-feature belief states with 3-intent soft targets (MAX_FORCE, EFFICIENT_WIN, EQUITY_BUILDER).
+Generates card-match expert states for Phase 0 pretraining (dataset version 2).
+Samples the current player's turn via a mid-trick random walk (so ego-turn
+perspective, legal moves, and φ context all stay aligned). Each record stores:
+35-feature belief + a compact `PhiCtx` (trump, ego hand, trick cards, trick len)
++ a `best_cards` u64 bitmask of the teacher's best legal cards.
 
-**Teacher (`--teacher`, June 15):** `alphabeta` (default) is the deep PIMC with a *myopic* leaf eval
-(`state.team_02_score`) — it only ties Elite, capping imitation at ≈Elite. `rollout` uses
-`solve_pimc_rollout`: flat Monte-Carlo PIMC finishing each determinized world with **Elite playouts**.
-By the rollout policy-improvement theorem (1-ply + Elite playout ≥ Elite) it is **supra-Elite (62% vs
-Elite)** and ~1000× cheaper (15k states in ~11s). The canonical v6 dataset uses `--teacher rollout`.
+**Teacher (`--teacher`):** `rollout` (canonical) uses `solve_pimc_rollout_serial`:
+flat Monte-Carlo PIMC finishing each determinized world with **Elite playouts** —
+supra-Elite by the rollout policy-improvement theorem (1-ply + Elite playout ≥
+Elite). `alphabeta` is the deep PIMC with a myopic leaf eval (only ties Elite).
 
-**Labeling (June 14):** each decisive state is labeled with the intent whose *resolved card* has the
-best PIMC EV among the 3 (statistically-tied intents → uniform multi-label; all 3 tied → reject).
-The pre-filter rejects only fully-degenerate states (all 3 intents resolve to the same card). With
-the styled resolver the decision is effectively binary EFFICIENT-vs-EQUITY (MAX_FORCE uniquely best
-~1%, **0%** in the follow split), so generate with `--soft-balance-min-ratio 0.0` (a nonzero floor
-makes the balancer hunt the unfillable MAX_FORCE bucket forever) and set `use_class_weighting = false`
-(inverse-frequency weighting would give the ~1% bucket a huge noise weight).
+**Labeling (Stage B, card-match):** for each state the rollout teacher returns an
+EV for every legal card; `best_cards` = the legal cards within one stderr of the
+max EV (statistical ties are multi-label — the resolver gets full credit for any
+tied-best card). Forced (single-legal) and fully-ambiguous (all cards tied)
+states are rejected. Phase-0 fitness is the fraction of states where the
+resolver's card is in the mask. `soft_balance_min_ratio` and `use_class_weighting`
+are vestigial under card-match fitness (kept for config/CLI compatibility).
 
 ### Migrating Legacy Datasets
 
-Old datasets with 33-feature states and 4 intents must be regenerated (the feature indices changed).
-For intent-only migration (4→3), use:
-
-```bash
-python code/scripts/migrate_intents.py db_w40_d3_mar03.npz --output db_w40_d3_mar03_v2.npz
-```
+Old datasets (33-feature states, or the 3-intent soft-label format, or any
+version < 2) are **rejected at load time** by the version gate — regenerate.
+The old `scripts/migrate_intents.py` flow is obsolete; there is no in-place
+3-intent → 6-knob migration path (the target representation changed entirely).
 
 ## Optimizing Weights
 
@@ -136,20 +136,59 @@ Saves `code/checkpoints/run_comparison.png` with 4 panels: fitness, delta vs Heu
 ## Architecture
 
 ```
-Belief State (35 floats) → WANN (logical gates) → Oracle Intent (3 outputs) → Legal Subsystem → Card
+Belief State (35 floats) → WANN (logical gates) → φ-Utility Knobs (6 outputs) → φ-Resolver → Card
 ```
+
+**Resolver/action-space overhaul (Stage B, 2026-06-19).** The WANN output layer
+was widened from a 3-intent selector to a 6-dimensional continuous **knob**
+vector, one per hand-designed card-utility feature φ(card, state). The resolver
+plays `argmax_{legal} Σ_k knob_k · φ_k(card, state)` (see
+`heuristic::resolve_card_phi_utility`). This was driven by a measured ceiling
+decomposition: the 3-intent vocabulary capped at ~57% vs Elite while the free-card
+ceiling is ~81%, and a 6-feature linear utility recovers essentially all of that
+~24-point vocabulary gap. Design spec: `docs/superpowers/specs/2026-06-19-resolver-overhaul-design.md`.
+
+**Substrate decision (THRESHOLD outputs).** The φ-knobs are produced by
+sweep-averaging the **IDENTITY** output nodes and remapping `[0,1]→[-1,1]` via
+`outputs_to_knobs` (2·avg−1). This was the original choice and it is **broken**:
+the symmetric sweep `{−2,−1,−0.5,0.5,1,2}` clamps the three negative-weight
+outputs to 0, dragging the averaged output ≤ 0.5 → knob ≤ 0. A `+1` bias→output
+connection yields **knob −0.167**, so the WANN *cannot express a positive knob*
+and collapses to a poor all-negative constant (Phase-0 card-match 0.45, below
+even the best constant 0.54). Confirmed by Probe B2 (champion: all 6 knobs
+≤ 0, max = 0.000) and Probe C (representational probe).
+
+**Fix (Probe C, 2026-06-25): output nodes use THRESHOLD, not IDENTITY.** A
+THRESHOLD output driven by bias fires consistently across every sweep weight →
+averaged output 1.0 → **knob +1.0 reachable**. This lifts Phase-0 card-match
+**0.45 → 0.643** (≈ the 0.65 belief+φ GBM ceiling) in 60 gens; the new champion's
+WINS knob is +0.979 (was −0.544) and knobs are now belief-conditioned (the
+mean-constant card-match ~0.52 *lags* the WANN's 0.64 — the gap is the belief
+signal the old substrate couldn't use). THRESHOLD quantizes knobs to 7 levels;
+the quantization cost is ~0.007 (Probe B1). Configured via
+`population.output_activation = "threshold"` and
+`mutation.allow_output_act_mutation = true` (so `change_activation` can reach
+output nodes — previously excluded). The canonical **symmetric** weight sweep is
+**preserved** (full WANN weight-agnosticism); only the output activation changes.
+The closed activation set remains {IDENTITY, NOT, THRESHOLD}; **no SIGMOID**.
+
+**Alternative substrate (asymmetric sweep).** Setting `sweep_weights = [0.5,1,2]`
+(positive-only) with IDENTITY outputs also unblocks positive knobs (a +1 bias
+yields knob +0.667, *continuously*) — Phase-0 card-match 0.624, best Lead 0.519.
+Slightly weaker WANN weight-agnosticism (sign no longer swept) but continuous
+knobs. Worth A/B-testing against THRESHOLD on Phase-1 game strength.
 
 **Crate dependency**: `sueca_wann` → `sueca_solver`. The solver is a pure game engine (rlib only, no PyO3). The wann crate contains WANN inference, evaluator, NEAT evolution, and CLI.
 
 **Key modules in `sueca_solver`** (pure game engine):
 - `engine.rs` — Bitboard game state, card logic, beats comparison
 - `simulator.rs` — SuecaSimulatorGame wrapper with void tracking
-- `belief.rs` — Belief state encoder (33 floats from game state)
-- `heuristic.rs` — Card selection heuristics, intent-to-card resolver
-- `pimc.rs` — Perfect Information Monte Carlo solver with late-game minimax switch
+- `belief.rs` — Belief state encoder (35 floats from game state)
+- `heuristic.rs` — Card selection heuristics, **φ-utility resolver** (`compute_phi`, `PhiCtx`, `resolve_card_phi_utility`); legacy 3-intent styled resolver retained for ceiling diagnostics
+- `pimc.rs` — Perfect Information Monte Carlo solver with late-game minimax switch; `solve_pimc_rollout[_serial]` (supra-Elite rollout teacher)
 - `search.rs` — Alpha-beta search with Zobrist hashing and transposition table
 - `rng.rs` — Shared LCG random number generator
-- `constants.rs` — WANN layout dimension constants (INPUT_COUNT, OUTPUT_COUNT, etc.)
+- `constants.rs` — WANN layout dimensions (`INPUT_COUNT=35`, `OUTPUT_COUNT=6` φ-knobs, `PHI_FEATURE_COUNT=6`, `PhiFeature` enum)
 
 **Key modules in `sueca_wann`**:
 - `main.rs` — CLI entry point (train / benchmark / compile-rules / generate-dataset / optimize-weights subcommands)
@@ -164,11 +203,11 @@ Belief State (35 floats) → WANN (logical gates) → Oracle Intent (3 outputs) 
 - `map_elites.rs` — MAP-Elites quality-diversity archive with grid export
 - `optimize.rs` — Differential Evolution weight optimization
 - `runtime_data.rs` — Runtime state snapshots for checkpoint inspection and resume fidelity
-- `constants.rs` — Evolutionary hyperparameters, feature/intent name mappings
+- `constants.rs` — Evolutionary hyperparameters, feature/φ-knob name mappings
 - `benchmark.rs` — Tournament benchmarking
 - `compile_rules.rs` — Rule compiler, Graphviz DOT export, PNG rendering
-- `dataset_gen.rs` — PIMC expert dataset generation with ego-turn synchronization
-- `dataset.rs` — Expert dataset loading (NPZ reader; rejects datasets that don't match INPUT_COUNT=35)
+- `dataset_gen.rs` — Card-match expert dataset generation (rollout teacher → `best_cards` mask + `PhiCtx` per state; ego-turn synchronization)
+- `dataset.rs` — Expert dataset loading (NPZ reader; version + INPUT_COUNT=35 gate rejects stale datasets)
 - `checkpoint.rs` — Training state serialization (Bincode)
 - `config.rs` — TOML configuration loading
 
@@ -216,40 +255,50 @@ features (boss detection, suit counts, "can I win?" evaluation).
 | 33 | Known_Void_Suits_Count | Float | Suits where any player is known void / 4.0 |
 | 34 | Depleted_Suits_Count | Float | Fully-depleted suits / 4.0 |
 
-### Oracle Intents (3 outputs)
+### φ-Utility Knobs (6 outputs)
 
-MIN_FORCE removed — EFFICIENT_WIN subsumes its useful follow-player behavior
-(play cheapest winner, else concede). The resolver remaps WANN outputs 0,1,2
-to legacy resolver intents 0,2,3 internally.
+The WANN emits 6 knobs `w ∈ [-1,1]^6`, one per card-utility feature
+φ(card, state). The resolver plays `argmax_{legal} Σ_k w_k · φ_k(card, state)`
+(`heuristic::resolve_card_phi_utility_ctx`). Knobs are produced by sweep-averaging
+the THRESHOLD output nodes (each fires 0/1 per sweep weight; the average over the
+symmetric sweep lies in [0,1] and is remapped via `2x-1`). THRESHOLD (not IDENTITY)
+is required so a positive φ-knob is reachable — see "Substrate decision" above.
 
-| ID | Intent | Action | Strategic Meaning |
-|----|--------|--------|-------------------|
-| 0 | MAX_FORCE | Elite + control dials | When trump-long, lead a low trump to *draw* trumps; else aggressive |
-| 1 | EFFICIENT_WIN | == EliteHeuristicBot | Strong default — delegates exactly to `select_card_heuristic` |
-| 2 | EQUITY_BUILDER | Elite + tempo dials | Lead shortest side-suit (build void); duck cheap tricks (≤2pts) when not last; preserve trump |
+| ID | Knob | φ feature | Meaning (positive knob → prefer…) |
+|----|------|-----------|-----------------------------------|
+| 0 | RANK | `CARD_RANK/9` | high-rank cards |
+| 1 | POINTS | `CARD_POINTS/11` | high-point cards |
+| 2 | TRUMP | is trump | trumps |
+| 3 | WINS | would beat current winner | winning the trick now |
+| 4 | CAPTURES | trick points/30 if wins | capturing the points on the table |
+| 5 | VOID | last card of its suit in hand | playing the suit's last card (build/keep a void) |
 
-**Styled resolver (`select_card_styled` in `heuristic.rs`, June 14).** Each intent is a styled
-deviation *around* the strong Elite policy, not a weak standalone tactic. `resolve_intent` maps WANN
-output 0/1/2 → style 0/1/2 and calls `select_card_styled` (EFFICIENT delegates to Elite; MAX_FORCE/
-EQUITY add the dials above). Because every intent shares Elite's core, each pure intent benchmarks
-≈Elite individually (48/47/46% vs Elite, up from the old 20/37/25%) — so a policy collapse merely
-*ties* Elite while good mixing exceeds it. This raised-floor design removed the Phase-1 collapse basin
-and is what let the WANN finally beat Elite. The canonical champion is **v6 (`2026-06-14-2`): 52.1% ±
-1.8% vs Elite, n=3000** — iso-strength with the v5 champion (52.7%) but **4.5× fewer hidden gates**
-(29 vs 132), trained on the rollout-teacher dataset (prior project champion was 30.2%). The high floor
-is double-edged: realisable headroom above Elite is only ≈8 points, so the learned overlay is small.
+`PhiCtx` (trump, ego hand, trick cards, trick len) is the compact context φ is
+computed from — built live during play and serialized into the Phase-0 dataset.
+`PhiCtx::legal()` derives the follow-suit legal set, so the resolver always
+returns a legal card.
 
-All intents are resolved to legal plays contextually by the heuristic resolver, guaranteeing 100% legality.
-When WANN outputs tie, a random intent is chosen among the tied maximums (not deterministic argmax).
+**Why the overhaul.** Measured ceilings vs Elite (n=500–2000): WANN champion 52.3%,
+3-intent vocabulary envelope ~57%, free-card ceiling ~81%, and a continuous linear
+utility over these 6 features reaches ~81% (= free-card). The 3-intent vocabulary
+was the dominant ~24-point bottleneck; the φ-resolver recovers essentially all of
+it. Full decomposition in the design spec.
+
+**Legacy 3-intent resolver retained** (`select_card_styled`, `resolve_intent`) for
+the `OracleEnvelope` ceiling diagnostic only — it is no longer the production
+action vocabulary. The prior canonical champion **v6 (`2026-06-14-2`): 52.1% ± 1.8%
+vs Elite** was trained under the old 3-intent system and its genome is **not
+loadable** after this refactor (OUTPUT_COUNT and FIRST_HIDDEN_ID changed). The
+Stage B system is a fresh training run.
 
 ### WANN Constraints
 
 - **Gene representation**: Connection genes `[5,N]` (innovation, src, dst, sign ∈ {+1,−1}, enabled). Node genes `[4,M]` (id, type, activation_fn, aggregation_fn).
-- **Initialization**: 35 input + 1 bias + 3 output nodes (BIAS_ID=35, OUTPUT_START=36, FIRST_HIDDEN_ID=39). All genomes start with these base nodes and receive random connections.
+- **Initialization**: 35 input + 1 bias + 6 output nodes (BIAS_ID=35, OUTPUT_START=36, FIRST_HIDDEN_ID=42). All genomes start with these base nodes and receive random connections.
 - **Sign-only weights**: Connections carry only a sign (+1 or −1), not a learned weight. A shared weight W is used for evaluation. sign=-1 inverts the signal (1.0 - x) before aggregation.
 - **Aggregation functions** (3 only): SUM=0, MIN(AND)=1, MAX(OR)=2. **No MEAN** — it causes float-precision issues at the THRESHOLD boundary.
-- **Activation functions** (3 only): IDENTITY=0, NOT=1, THRESHOLD=2. **No SIGMOID** — it breaks IF/THEN rule extraction.
-- **All node outputs clamped to [0, 1]**.
+- **Activation functions** (3 only): IDENTITY=0, NOT=1, THRESHOLD=2. **No SIGMOID needed.** Output nodes use THRESHOLD (Probe C fix) so positive φ-knobs are reachable under the symmetric sweep; `change_activation` may target output nodes (`allow_output_act_mutation`). See "Substrate decision" above.
+- **All node outputs clamped to [0, 1]** (output knobs are then remapped to [-1,1]).
 - **Shared weight sweep**: Evaluate each topology at W ∈ {-2.0, -1.0, -0.5, 0.5, 1.0, 2.0}, including negative weights for inhibitory rule expression. Average fitness across all six weights for true weight-agnostic evaluation.
 
 ### Training Pipeline
@@ -262,7 +311,7 @@ are trained in parallel throughout and routed at play time by `BeliefFeature::Am
 **Phase 0 (gens 0–`phase0_gens`): Supervised pretraining.**
 * **Dataset Split:** Expert PIMC dataset is split into `lead_dataset` and `follow_dataset` using the `BeliefFeature::AmILeading` flag.
 * **PFS-NEAT:** Populations start with exactly 0 active connections. Mutations are classified as `Structural` (add_node, add_conn) or `NonStructural` (toggle, flip_sign, change_act, change_agg). Only structural mutations trigger PFS validation. Adaptive 2-stage sampling: quick K=25 check first; only borderline cases (within 2% accuracy) run the full configurable `pfs_sample_size` (default 100, down from original 1000). Degraded mutations are logged into a FIFO `TabuVetoList` of size 1000.
-* **Fitness:** Supervised classification accuracy on respective splits. No game simulation.
+* **Fitness:** Card-match accuracy — the fraction of states where the resolver's card (WANN → 6 knobs → `resolve_card_phi_utility_ctx`) is in the teacher's `best_cards` mask. No game simulation.
 * **Scratchpad reuse:** PFS evaluations reuse a single pre-allocated scratchpad buffer per child, avoiding repeated allocations in the breeding hot path.
 
 **Phase 1 (gens `phase0_gens`–`generations`): Co-evolutionary Self-play.**
@@ -285,7 +334,7 @@ are trained in parallel throughout and routed at play time by `BeliefFeature::Am
 - **Rank-based selection**: Raw fitness converted to normalized ranks before tournament selection for noise robustness.
 - **Multi-objective Pareto ranking**: 50% of the time, rank by (performance, simplicity) Pareto front with lexicographic tie-breaking; 50% by performance only. Prevents bloat while maintaining selection pressure.
 - **Hall of Fame**: Frozen champion archive (size 50). Sampled as partners/opponents during Phase 1.
-- **MAP-Elites**: 10×10 grid archiving behavioral specialists by intent preference and aggression. Sampled as opponents with 50% probability when HOF/MAP-Elites is selected (vs OldHeuristicBot baseline).
+- **MAP-Elites**: 10×10 grid archiving behavioral specialists by win-preference (mean φ-WINS knob) and aggression. Sampled as opponents with 50% probability when HOF/MAP-Elites is selected (vs OldHeuristicBot baseline).
 - **Mutations**: Add node, add connection, toggle connection, flip sign, change activation, change aggregation. No weight mutation. Classified as `Structural` (add_node, add_conn — triggers PFS) or `NonStructural` (all others — skips PFS).
 
 ## Code Conventions

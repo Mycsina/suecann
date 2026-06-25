@@ -1,8 +1,10 @@
 use crate::wann_network::RustWannNetwork;
 
 use sueca_solver::belief::encode_belief_state;
+use sueca_solver::constants::{OUTPUT_COUNT, OUTPUT_START, PHI_FEATURE_COUNT};
 use sueca_solver::heuristic::{
-    resolve_intent, select_card_heuristic, select_card_heuristic_old, select_card_random,
+    outputs_to_knobs, resolve_card_phi_utility, resolve_card_phi_utility_ctx, resolve_intent,
+    select_card_heuristic, select_card_heuristic_old, select_card_random, PhiCtx,
 };
 use sueca_solver::rng::LcgRng;
 use sueca_solver::simulator::SuecaSimulatorGame;
@@ -15,7 +17,11 @@ pub static ORACLE_STATS_ROLLOUT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default)]
 pub struct WannBehavior {
-    pub intent_counts: [usize; 3],
+    /// Sum of per-action knob values (mean knob vector × total_actions gives the
+    /// average φ-utility policy). Indexed by `PhiFeature`. Replaces the old
+    /// 3-bucket `intent_counts`; the MAP-Elites behavioral descriptor is now
+    /// derived from this (see `train.rs`).
+    pub knob_sums: [f64; PHI_FEATURE_COUNT],
     pub total_lead_points: usize,
     pub count_leads: usize,
     pub total_actions: usize,
@@ -63,25 +69,6 @@ pub enum SimulatorBot<'a> {
     },
 }
 
-/// Replica of heuristic.rs:would_beat — determines if `card` would beat the
-/// current best card in the trick. Returns true when leading (trick empty).
-#[inline(always)]
-fn would_beat_card(card: u8, game: &SuecaSimulatorGame) -> bool {
-    if game.current_trick_len == 0 {
-        return true;
-    }
-    let trump = game.state.trump;
-    let led_suit = sueca_solver::engine::CARD_SUIT[game.current_trick[0] as usize];
-    let mut best_card = game.current_trick[0];
-    for i in 1..game.current_trick_len {
-        let c = game.current_trick[i];
-        if sueca_solver::engine::GameState::beats_card(c, best_card, trump, led_suit) {
-            best_card = c;
-        }
-    }
-    sueca_solver::engine::GameState::beats_card(card, best_card, trump, led_suit)
-}
-
 impl<'a> SimulatorBot<'a> {
     pub fn select_card(
         &self,
@@ -119,50 +106,24 @@ impl<'a> SimulatorBot<'a> {
                 let n_weights = weights.len();
                 network.forward_batched(&belief, weights, scratchpad);
 
-                let mut sum_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
-                for w in 0..n_weights {
-                    sum_outputs[0] +=
-                        scratchpad[(sueca_solver::constants::OUTPUT_START + 0) * n_weights + w];
-                    sum_outputs[1] +=
-                        scratchpad[(sueca_solver::constants::OUTPUT_START + 1) * n_weights + w];
-                    sum_outputs[2] +=
-                        scratchpad[(sueca_solver::constants::OUTPUT_START + 2) * n_weights + w];
-                }
-
-                let mut mean_outputs = [0.0f64; sueca_solver::constants::OUTPUT_COUNT];
-                for i in 0..sueca_solver::constants::OUTPUT_COUNT {
-                    mean_outputs[i] = sum_outputs[i] / (n_weights as f64);
-                }
-
-                let adjusted_outputs = mean_outputs;
-
-                let mut max_val = adjusted_outputs[0];
-                for i in 1..sueca_solver::constants::OUTPUT_COUNT {
-                    if adjusted_outputs[i] > max_val {
-                        max_val = adjusted_outputs[i];
+                // Average the OUTPUT_COUNT knobs across the sweep (output nodes use
+                // IDENTITY, so sweep-averaging yields continuous values in [0,1]).
+                let mut mean_outputs = [0.0f64; OUTPUT_COUNT];
+                for i in 0..OUTPUT_COUNT {
+                    let mut s = 0.0f64;
+                    for w in 0..n_weights {
+                        s += scratchpad[(OUTPUT_START + i) * n_weights + w];
                     }
+                    mean_outputs[i] = s / (n_weights as f64);
                 }
 
-                let mut best_intents = [0usize; sueca_solver::constants::OUTPUT_COUNT];
-                let mut best_count = 0;
-                for i in 0..sueca_solver::constants::OUTPUT_COUNT {
-                    if (adjusted_outputs[i] - max_val).abs() < 1e-9 {
-                        best_intents[best_count] = i;
-                        best_count += 1;
-                    }
-                }
-
-                let chosen_intent = if best_count == 1 {
-                    best_intents[0]
-                } else {
-                    best_intents[rng.gen_range(0..best_count)]
-                };
-
-                let card = resolve_intent(chosen_intent, game, seat);
+                // Remap [0,1] → [-1,1] signed knobs and resolve via φ-utility.
+                let knobs = outputs_to_knobs(&mean_outputs);
+                let card = resolve_card_phi_utility(&knobs, game, seat);
 
                 if let Some(ref mut beh) = behavior {
-                    if chosen_intent < sueca_solver::constants::OUTPUT_COUNT {
-                        beh.intent_counts[chosen_intent] += 1;
+                    for k in 0..PHI_FEATURE_COUNT {
+                        beh.knob_sums[k] += knobs[k];
                     }
                     if game.current_trick_len == 0 {
                         beh.total_lead_points +=
@@ -190,42 +151,20 @@ impl<'a> SimulatorBot<'a> {
                     (follow_brain, follow_weights)
                 };
 
-                // Forward weighted pass
+                // Forward weighted pass (per-connection continuous weights;
+                // single weight so outputs are already the resolved knob values).
                 network.forward_weighted(&belief, brain_weights, scratchpad);
 
-                let adjusted_outputs = [
-                    scratchpad[sueca_solver::constants::OUTPUT_START],
-                    scratchpad[sueca_solver::constants::OUTPUT_START + 1],
-                    scratchpad[sueca_solver::constants::OUTPUT_START + 2],
-                ];
+                let mut outputs = [0.0f64; OUTPUT_COUNT];
+                outputs.copy_from_slice(&scratchpad[OUTPUT_START..OUTPUT_START + OUTPUT_COUNT]);
 
-                let mut max_val = adjusted_outputs[0];
-                for i in 1..sueca_solver::constants::OUTPUT_COUNT {
-                    if adjusted_outputs[i] > max_val {
-                        max_val = adjusted_outputs[i];
-                    }
-                }
-
-                let mut best_intents = [0usize; sueca_solver::constants::OUTPUT_COUNT];
-                let mut best_count = 0;
-                for i in 0..sueca_solver::constants::OUTPUT_COUNT {
-                    if (adjusted_outputs[i] - max_val).abs() < 1e-9 {
-                        best_intents[best_count] = i;
-                        best_count += 1;
-                    }
-                }
-
-                let chosen_intent = if best_count == 1 {
-                    best_intents[0]
-                } else {
-                    best_intents[rng.gen_range(0..best_count)]
-                };
-
-                let card = resolve_intent(chosen_intent, game, seat);
+                // Remap [0,1] → [-1,1] signed knobs and resolve via φ-utility.
+                let knobs = outputs_to_knobs(&outputs);
+                let card = resolve_card_phi_utility(&knobs, game, seat);
 
                 if let Some(ref mut beh) = behavior {
-                    if chosen_intent < sueca_solver::constants::OUTPUT_COUNT {
-                        beh.intent_counts[chosen_intent] += 1;
+                    for k in 0..PHI_FEATURE_COUNT {
+                        beh.knob_sums[k] += knobs[k];
                     }
                     if game.current_trick_len == 0 {
                         beh.total_lead_points +=
@@ -364,6 +303,8 @@ impl<'a> SimulatorBot<'a> {
                     return legal.trailing_zeros() as u8;
                 }
 
+                let ctx = PhiCtx::from_game(game, seat);
+
                 // Collect legal cards.
                 let mut legal_cards = [40u8; 10];
                 let mut legal_count = 0;
@@ -375,57 +316,16 @@ impl<'a> SimulatorBot<'a> {
                 }
                 let legal_slice = &legal_cards[..legal_count];
 
-                // Compute 6-D feature vector phi(c) for each legal card.
-                let mut phis = [[0.0f64; 6]; 10];
-                for i in 0..legal_count {
-                    let c = legal_slice[i];
-                    let suit = sueca_solver::engine::CARD_SUIT[c as usize];
-                    let beats = would_beat_card(c, game);
-                    let is_last_in_suit = (game.state.hands[seat as usize]
-                        & (0x3FFu64 << (suit as u64 * 10)))
-                    .count_ones()
-                        == 1;
-
-                    phis[i][0] = sueca_solver::engine::CARD_RANK[c as usize] as f64 / 9.0;
-                    phis[i][1] = sueca_solver::engine::CARD_POINTS[c as usize] as f64 / 11.0;
-                    phis[i][2] = if suit == game.state.trump { 1.0 } else { 0.0 };
-                    phis[i][3] = if beats { 1.0 } else { 0.0 };
-                    phis[i][4] = if beats {
-                        game.trick_points as f64 / 30.0
-                    } else {
-                        0.0
-                    };
-                    phis[i][5] = if is_last_in_suit { 1.0 } else { 0.0 };
-                }
-
-                // Build reachable set: sample 64 random w ∈ [-1,1]^6,
-                // each picks the legal card maximizing dot(w, phi(c)).
+                // Build reachable set: sample 64 random w ∈ [-1,1]^6, each picks
+                // the legal card maximizing dot(w, phi(c)) via the shared resolver.
                 let mut reachable = [false; 40];
                 for _ in 0..64 {
-                    let w: [f64; 6] = [
-                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
-                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
-                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
-                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
-                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
-                        (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0,
-                    ];
-                    let mut best_dot = f64::NEG_INFINITY;
-                    let mut best_c = legal_slice[0];
-                    for i in 0..legal_count {
-                        let phi = &phis[i];
-                        let dot = w[0] * phi[0]
-                            + w[1] * phi[1]
-                            + w[2] * phi[2]
-                            + w[3] * phi[3]
-                            + w[4] * phi[4]
-                            + w[5] * phi[5];
-                        if dot > best_dot {
-                            best_dot = dot;
-                            best_c = legal_slice[i];
-                        }
+                    let mut w = [0.0f64; PHI_FEATURE_COUNT];
+                    for k in 0..PHI_FEATURE_COUNT {
+                        w[k] = (rng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0;
                     }
-                    reachable[best_c as usize] = true;
+                    let c = resolve_card_phi_utility_ctx(&w, &ctx);
+                    reachable[c as usize] = true;
                 }
 
                 // Compute per-card EV via rollout, then pick the reachable card
@@ -643,8 +543,8 @@ pub fn evaluate_genome_delta(
                 &mut game_behavior,
             );
 
-            for i in 0..3 {
-                accum_behavior.intent_counts[i] += game_behavior.intent_counts[i];
+            for i in 0..PHI_FEATURE_COUNT {
+                accum_behavior.knob_sums[i] += game_behavior.knob_sums[i];
             }
             accum_behavior.total_lead_points += game_behavior.total_lead_points;
             accum_behavior.count_leads += game_behavior.count_leads;
@@ -741,6 +641,7 @@ mod tests {
                 generations: 3,
                 elitism: 1,
                 pareto_complexity_prob: 0.80,
+                output_activation: "identity".to_string(),
             },
             evaluation: crate::config::EvaluationConfig {
                 n_deals: 2,
@@ -764,6 +665,7 @@ mod tests {
                 p_change_act: 0.25,
                 p_change_agg: 0.15,
                 p_crossover: 0.40,
+                allow_output_act_mutation: false,
             },
             curriculum: crate::config::CurriculumConfig {
                 phase0_gens: 1,
@@ -917,10 +819,9 @@ mod tests {
         (game.state.team_02_score, game.state.team_13_score)
     }
 
-    // Dump (belief[35], rollout-optimal-intent) for DECISIVE states to CSV, so we
-    // can measure (in Python) whether the belief features can predict the winning
-    // intent at all. Sampled on the Elite-vs-Elite trajectory (the states faced
-    // when playing the opponent we must beat).
+    // Dump (belief[35], teacher-best-card) for accepted states to CSV, so we can
+    // measure (in Python) whether the belief features can predict the rollout
+    // teacher's free-card choice at all. Stage B card-match diagnostic.
     //   cargo test -p sueca_wann --release diagnostic_dump_intent_labels -- --nocapture --test-threads=1
     #[test]
     #[ignore = "on-demand diagnostic; run explicitly"]
@@ -929,9 +830,6 @@ mod tests {
         use rand::SeedableRng;
         use rand_pcg::Pcg64;
 
-        // Use the REAL PIMC-labeling extraction path (no balancer). Each accepted
-        // state carries the best-of-3-intent soft label. Dump (belief[35], argmax)
-        // so Python RF can measure whether the belief predicts the best intent.
         let config = crate::dataset_gen::DatasetConfig {
             n_worlds: 100,
             search_depth: 4,
@@ -941,30 +839,27 @@ mod tests {
             soft_balance_min_ratio: 0.0,
             diff_mode: false,
             fixed_worlds: None,
-            use_rollout_teacher: false,
+            use_rollout_teacher: true,
         };
         let n_deals: u64 = std::env::var("DUMP_DEALS").ok().and_then(|s| s.parse().ok()).unwrap_or(4000);
         let mut out = String::new();
-        let mut counts = [0usize; 3];
         let mut n = 0usize;
         for d in 0..n_deals {
             let mut rng = Pcg64::seed_from_u64(4242u64.wrapping_mul(1000).wrapping_add(d));
-            let (states, _rej) = crate::dataset_gen::generate_deal_states(&mut rng, &config, None);
-            for (belief, soft, _mask) in states {
-                let lab = (0..3)
-                    .max_by(|&a, &b| soft[a].partial_cmp(&soft[b]).unwrap())
-                    .unwrap();
-                counts[lab] += 1;
+            let (states, _rej) = crate::dataset_gen::generate_deal_states(&mut rng, &config);
+            for rec in states {
+                // Lowest-index best card (deterministic representative of the mask).
+                let best = rec.best_cards.trailing_zeros() as u8;
                 n += 1;
-                for v in belief.iter() {
+                for v in rec.belief.iter() {
                     out.push_str(&format!("{:.5},", v));
                 }
-                out.push_str(&format!("{}\n", lab));
+                out.push_str(&format!("{}\n", best));
             }
         }
-        let path = "/tmp/champ/intent_labels.csv";
+        let path = "/tmp/champ/best_card_labels.csv";
         std::fs::File::create(path).unwrap().write_all(out.as_bytes()).unwrap();
-        println!("Wrote {} PIMC-labeled states to {}  (label counts {:?})", n, path, counts);
+        println!("Wrote {} card-match states to {}", n, path);
     }
 
     // How good is Elite vs near-optimal (strong PIMC) play? This bounds what ANY
@@ -1397,5 +1292,163 @@ mod tests {
             println!("  (trained champion not found at {} — skipped)", champ_path);
         }
         println!("=================================================\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Probe B2: measure the trained champion's ACTUAL learned knob distribution
+    // across dataset states. If the 6 knobs collapse near 0 (→ "pick lowest card"),
+    // the substrate (IDENTITY + symmetric sweep-averaging) is failing to express
+    // non-zero knob values, explaining why the WANN (~0.45) underperforms even a
+    // constant knob vector (~0.54).
+    //   cargo test -p sueca_wann --release diagnostic_champion_knobs -- --nocapture --ignored
+    // -----------------------------------------------------------------------
+    #[test]
+    #[ignore = "on-demand diagnostic; needs a trained champion + dataset"]
+    fn diagnostic_champion_knobs() {
+        use crate::compile_rules::load_genome;
+        use crate::dataset::load_expert_dataset;
+        use sueca_solver::constants::{INPUT_COUNT, OUTPUT_COUNT, OUTPUT_START};
+        use sueca_solver::heuristic::outputs_to_knobs;
+
+        let champ_path = std::env::var("CHAMP_GENOME")
+            .unwrap_or_else(|_| "checkpoints/stageb/2026-06-24-1/genomes/best_genome_final.json".to_string());
+        let ds_path = std::env::var("CHAMP_DATASET")
+            .unwrap_or_else(|_| "expert_states_v7.npz".to_string());
+
+        let (lead_g, follow_g) = load_genome(&champ_path).expect("load champion");
+        let (lead_g, follow_g) = (lead_g.expect("lead brain"), follow_g.expect("follow brain"));
+        let lead_net = lead_g.to_rust_wann();
+        let follow_net = follow_g.to_rust_wann();
+        let ds = load_expert_dataset(&ds_path).expect("load dataset");
+        if ds.num_states == 0 { panic!("empty dataset"); }
+
+        let sweep = [-2.0f64, -1.0, -0.5, 0.5, 1.0, 2.0];
+        let nw = sweep.len();
+        let max_nodes = lead_net.num_nodes.max(follow_net.num_nodes);
+        let mut scratch = vec![0.0f64; max_nodes * nw];
+
+        let names = sueca_solver::constants::PHI_FEATURE_NAMES;
+        let mut sum = [0.0f64; 6];
+        let mut mn = [f64::INFINITY; 6];
+        let mut mx = [f64::NEG_INFINITY; 6];
+        let mut hist = [[0usize; 8]; 6]; // 8 bins over [-1,1]
+        let lead = crate::constants::BeliefFeature::AmILeading as usize;
+        let mut n = 0usize;
+        for i in 0..ds.num_states {
+            let base = i * INPUT_COUNT;
+            let mut bel = [0.0f64; INPUT_COUNT];
+            bel.copy_from_slice(&ds.states[base..base + INPUT_COUNT]);
+            let net = if (bel[lead] - 1.0).abs() < 1e-9 { &lead_net } else { &follow_net };
+            net.forward_batched(&bel, &sweep, &mut scratch);
+            let mut mean = [0.0f64; OUTPUT_COUNT];
+            for k in 0..OUTPUT_COUNT {
+                let mut s = 0.0;
+                for w in 0..nw { s += scratch[(OUTPUT_START + k) * nw + w]; }
+                mean[k] = s / nw as f64;
+            }
+            let knobs = outputs_to_knobs(&mean);
+            for k in 0..6 {
+                sum[k] += knobs[k];
+                if knobs[k] < mn[k] { mn[k] = knobs[k]; }
+                if knobs[k] > mx[k] { mx[k] = knobs[k]; }
+                let bin = (((knobs[k] + 1.0) / 2.0).clamp(0.0, 0.9999) * 8.0) as usize;
+                hist[k][bin] += 1;
+            }
+            n += 1;
+        }
+
+        println!("\n========== CHAMPION KNOB DISTRIBUTION ({} states) ==========", n);
+        println!(" {:<9} {:>7} {:>7} {:>7}   histogram ([-1 … +1])", "knob", "mean", "min", "max");
+        for k in 0..6 {
+            let mean = sum[k] / n as f64;
+            let bar: String = hist[k].iter()
+                .map(|&c| format!("{:3}", c * 100 / n.max(1)))
+                .collect::<Vec<_>>().join("]");
+            println!(" {:<9} {:>7.3} {:>7.3} {:>7.3}   {}", names[k], mean, mn[k], mx[k], bar);
+        }
+        // Effective-constant card-match: resolve with the MEAN knob vector everywhere.
+        use sueca_solver::heuristic::{resolve_card_phi_utility_ctx};
+        let mean_knobs: [f64; 6] = std::array::from_fn(|k| sum[k] / n as f64);
+        let mut hit = 0usize;
+        for i in 0..ds.num_states {
+            let ctx = ds.ctx(i);
+            let card = resolve_card_phi_utility_ctx(&mean_knobs, &ctx);
+            if (ds.best_cards[i] >> card) & 1 == 1 { hit += 1; }
+        }
+        println!(" card-match of the MEAN-knob constant: {:.3}  (cf. WANN ~0.45, best constant ~0.54)",
+                 hit as f64 / ds.num_states as f64);
+        println!(" (if mean-constant ≈ WANN, the WANN is barely using belief: its belief-conditioned");
+        println!("  knobs resolve to roughly the same cards as one fixed average vector.)");
+        println!("===========================================================\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // Probe C: REPRESENTATIONAL ceiling of each substrate config.
+    // For every (sweep, output-activation) combination, build a minimal genome
+    // with a single bias→output(k) connection (sign ±1) and read the φ-knob the
+    // sweep-averaged forward pass actually produces. This answers the cheap
+    // half of the substrate question — *can* a WANN topology express a positive
+    // knob at all under this config — without paying for a training run.
+    //   cargo test -p sueca_wann --release diagnostic_substrate_knob_range -- --nocapture --ignored
+    // -----------------------------------------------------------------------
+    #[test]
+    #[ignore = "on-demand diagnostic"]
+    fn diagnostic_substrate_knob_range() {
+        use crate::genome::{ActivationFn, ConnGene, Genome};
+        use sueca_solver::constants::{BIAS_ID, INPUT_COUNT, OUTPUT_START};
+
+        let sym = [-2.0f64, -1.0, -0.5, 0.5, 1.0, 2.0];
+        let asym = [0.5f64, 1.0, 2.0];
+
+        // Build a genome: all outputs use `act`; one bias→output(k) connection of `sign`.
+        let knob_for = |sweep: &[f64], act: ActivationFn, sign: i8, out_k: usize| -> f64 {
+            let mut g = Genome::initial_with_output_act(act);
+            let inno = 1000 + out_k;
+            g.add_connection(ConnGene::make(
+                inno,
+                BIAS_ID,
+                OUTPUT_START + out_k,
+                sign,
+                true,
+            ));
+            // sanity: the output nodes retained the requested activation
+            assert_eq!(
+                g.get_node(OUTPUT_START + out_k).map(|n| n.activation_fn),
+                Some(act),
+                "output activation not set"
+            );
+            let net = g.to_rust_wann();
+            let nw = sweep.len();
+            let mut scratch = vec![0.0f64; net.num_nodes * nw];
+            let belief = [0.0f64; INPUT_COUNT];
+            net.forward_batched(&belief, sweep, &mut scratch);
+            // sweep-averaged output value → remap to signed knob
+            let base = (OUTPUT_START + out_k) * nw;
+            let avg: f64 = (0..nw).map(|w| scratch[base + w]).sum::<f64>() / nw as f64;
+            2.0 * avg - 1.0
+        };
+
+        let configs: [(String, &[f64], ActivationFn); 4] = [
+            ("sym+IDENTITY  ".into(), &sym, ActivationFn::IDENTITY),
+            ("sym+THRESHOLD ".into(), &sym, ActivationFn::THRESHOLD),
+            ("asym+IDENTITY ".into(), &asym, ActivationFn::IDENTITY),
+            ("asym+THRESHOLD".into(), &asym, ActivationFn::THRESHOLD),
+        ];
+
+        println!("\n========== SUBSTRATE KNOB RANGE (bias→output, output 0) ==========");
+        println!(" {:<14} {:>10} {:>10}   (positive = reachable above knob 0)", "config", "+1 bias", "-1 bias");
+        for (name, sweep, act) in &configs {
+            let kp = knob_for(sweep, *act, 1, 0);
+            let kn = knob_for(sweep, *act, -1, 0);
+            println!(" {:<14} {:>10.3} {:>10.3}", name, kp, kn);
+        }
+        // Reference numbers:
+        //   sym+IDENTITY  : +1 bias → -0.167  (THE BUG: excitatory drive yields a NEGATIVE knob)
+        //   sym+THRESHOLD : +1 bias → +1.000  (fires at every weight → knob saturates +)
+        //   asym+IDENTITY : +1 bias → +0.667  (no negative weights to clamp to 0)
+        //   asym+THRESHOLD: +1 bias → +1.000
+        println!("\n A substrate is 'strongly representative' only if the +1-bias column is");
+        println!(" POSITIVE — otherwise the WANN cannot express the optimal positive-knob policy.");
+        println!("===================================================================\n");
     }
 }

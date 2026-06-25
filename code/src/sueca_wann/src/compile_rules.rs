@@ -522,7 +522,7 @@ pub fn compile_rules(genome: &Genome, weight: f64, output_dir: &str, prefix: &st
         out.push('\n');
     }
 
-    out.push_str("Decision Rules for Play Intents:\n");
+    out.push_str("Decision Rules for φ-Utility Knobs (WANN outputs, [-1,1] after [0,1]→2x-1 remap):\n");
     for out_idx in 0..OUTPUT_COUNT {
         let nid = OUTPUT_START + out_idx;
         let name = if out_idx < OUTPUT_COUNT {
@@ -656,61 +656,68 @@ mod tests {
 
     #[test]
     fn fold_detects_bias_only_constants_not_input_dependent_nodes() {
-        // hidden_39: fed only by BIAS -> constant 1.0
-        // hidden_42: fed by input feature 1 -> NOT constant
+        // h0: fed only by BIAS -> constant 1.0
+        // h1: fed by input feature 1 -> NOT constant
+        let h0 = FIRST_HIDDEN_ID;
+        let h1 = FIRST_HIDDEN_ID + 1;
         let hidden = vec![
-            hid(39, ActivationFn::IDENTITY, AggregationFn::SUM),
-            hid(42, ActivationFn::THRESHOLD, AggregationFn::SUM),
+            hid(h0, ActivationFn::IDENTITY, AggregationFn::SUM),
+            hid(h1, ActivationFn::THRESHOLD, AggregationFn::SUM),
         ];
         let conns = vec![
-            ConnGene::make(0, BIAS_ID, 39, 1, true),
-            ConnGene::make(1, 1, 42, 1, true),
+            ConnGene::make(0, BIAS_ID, h0, 1, true),
+            ConnGene::make(1, 1, h1, 1, true),
         ];
         let g = build(hidden, conns);
         let consts = fold_constants(&g, 1.0);
         assert_eq!(consts.get(&BIAS_ID), Some(&1.0));
-        assert_eq!(consts.get(&39), Some(&1.0)); // IDENTITY(BIAS) = 1.0
-        assert!(!consts.contains_key(&42)); // depends on a variable input
+        assert_eq!(consts.get(&h0), Some(&1.0)); // IDENTITY(BIAS) = 1.0
+        assert!(!consts.contains_key(&h1)); // depends on a variable input
     }
 
     #[test]
     fn fold_handles_no_input_node_as_zero() {
-        // hidden_40 has no enabled incoming -> runtime yields 0.0
-        let hidden = vec![hid(40, ActivationFn::IDENTITY, AggregationFn::SUM)];
+        // h0 has no enabled incoming -> runtime yields 0.0
+        let h0 = FIRST_HIDDEN_ID;
+        let hidden = vec![hid(h0, ActivationFn::IDENTITY, AggregationFn::SUM)];
         let g = build(hidden, vec![]);
         let consts = fold_constants(&g, 1.0);
-        assert_eq!(consts.get(&40), Some(&0.0));
+        assert_eq!(consts.get(&h0), Some(&0.0));
     }
 
     #[test]
     fn aliases_flatten_chains_with_negation_parity() {
-        // hidden_40 = IDENTITY(input0)            -> alias (input0, +)
-        // hidden_41 = IDENTITY(NOT hidden_40)     -> alias (input0, negated)
-        // hidden_42 = THRESHOLD(in1, in2)         -> real gate (not alias)
+        // h0 = IDENTITY(input0)        -> alias (input0, +)
+        // h1 = IDENTITY(NOT h0)        -> alias (input0, negated)
+        // h2 = THRESHOLD(in1, in2)     -> real gate (not alias)
+        let h0 = FIRST_HIDDEN_ID;
+        let h1 = FIRST_HIDDEN_ID + 1;
+        let h2 = FIRST_HIDDEN_ID + 2;
         let hidden = vec![
-            hid(40, ActivationFn::IDENTITY, AggregationFn::SUM),
-            hid(41, ActivationFn::IDENTITY, AggregationFn::MAX),
-            hid(42, ActivationFn::THRESHOLD, AggregationFn::SUM),
+            hid(h0, ActivationFn::IDENTITY, AggregationFn::SUM),
+            hid(h1, ActivationFn::IDENTITY, AggregationFn::MAX),
+            hid(h2, ActivationFn::THRESHOLD, AggregationFn::SUM),
         ];
         let conns = vec![
-            ConnGene::make(0, 0, 40, 1, true),
-            ConnGene::make(1, 40, 41, -1, true),
-            ConnGene::make(2, 1, 42, 1, true),
-            ConnGene::make(3, 2, 42, 1, true),
+            ConnGene::make(0, 0, h0, 1, true),
+            ConnGene::make(1, h0, h1, -1, true),
+            ConnGene::make(2, 1, h2, 1, true),
+            ConnGene::make(3, 2, h2, 1, true),
         ];
         let g = build(hidden, conns);
         let consts = fold_constants(&g, 1.0);
         let aliases = compute_aliases(&g, &consts, 1.0);
-        assert_eq!(aliases.get(&40), Some(&(0usize, false)));
-        assert_eq!(aliases.get(&41), Some(&(0usize, true))); // parity flipped
-        assert!(!aliases.contains_key(&42)); // 2 inputs -> not an alias
+        assert_eq!(aliases.get(&h0), Some(&(0usize, false)));
+        assert_eq!(aliases.get(&h1), Some(&(0usize, true))); // parity flipped
+        assert!(!aliases.contains_key(&h2)); // 2 inputs -> not an alias
     }
 
     #[test]
     fn aliases_disabled_off_unit_weight() {
         // alias equivalence only holds at W=1; map must be empty otherwise.
-        let hidden = vec![hid(40, ActivationFn::IDENTITY, AggregationFn::SUM)];
-        let conns = vec![ConnGene::make(0, 0, 40, 1, true)];
+        let h0 = FIRST_HIDDEN_ID;
+        let hidden = vec![hid(h0, ActivationFn::IDENTITY, AggregationFn::SUM)];
+        let conns = vec![ConnGene::make(0, 0, h0, 1, true)];
         let g = build(hidden, conns);
         let consts = fold_constants(&g, 2.0);
         assert!(compute_aliases(&g, &consts, 2.0).is_empty());

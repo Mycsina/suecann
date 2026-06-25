@@ -1,0 +1,53 @@
+# Probe: Fix 2 only — asymmetric (positive) sweep, IDENTITY outputs.
+# Question: can evolution reach continuous positive knobs (→ card-match > 0.45)?
+# Probe C showed +0.667 reachable CONTINUOUSLY — most expressive config.
+# Short Phase-0-only run (60 gens, pop 200) to measure evolvability.
+
+[population]
+pop_size = 200
+generations = 60
+elitism = 4
+pareto_complexity_prob = 0.50
+output_activation = "identity"
+
+[evaluation]
+n_deals = 64
+sweep_weights = [0.5, 1.0, 2.0]
+seed = 1337
+
+[species]
+compatibility_threshold = 1.4
+stagnation_limit = 40
+c_excess = 1.0
+c_disjoint = 1.0
+c_mismatch = 0.5
+min_species_size = 3
+max_species = 20
+
+[mutation]
+p_add_node = 0.15
+p_add_conn = 0.35
+p_toggle_conn = 0.05
+p_flip_sign = 0.10
+p_change_act = 0.10
+p_change_agg = 0.10
+p_crossover = 0.50
+allow_output_act_mutation = true
+
+[curriculum]
+phase0_gens = 60
+bulking_gens = 30
+phase0_dataset = "expert_states_v7.npz"
+min_gens_per_phase = 20
+adaptive_window = 10
+pfs_sample_size = 60
+class_balance_target = 30000
+soft_balance_min_ratio = 0.0
+use_class_weighting = false
+
+[hall_of_fame]
+hof_size = 20
+
+[output]
+checkpoint_dir = "checkpoints/probe"
+stats_file = "training_stats.csv"

@@ -105,9 +105,12 @@ pub const FEATURE_NAMES: [&str; 35] = [
     "Depleted_Suits_Count",
 ];
 
-// Oracle intent names (indexed by output neuron, 0..3).
-// MIN_FORCE removed — EFFICIENT_WIN subsumes its useful behavior.
-pub const OUTPUT_NAMES: [&str; 3] = ["MAX_FORCE", "EFFICIENT_WIN", "EQUITY_BUILDER"];
+// φ-utility knob names (indexed by output neuron, 0..OUTPUT_COUNT).
+// Stage B resolver overhaul: outputs are continuous knobs weighting the 6
+// card-utility features φ(card, state); the resolver picks
+// `argmax_{legal} Σ_k knob_k · φ_k`. Mirrors solver `PHI_FEATURE_NAMES`.
+pub const OUTPUT_NAMES: [&str; sueca_solver::constants::OUTPUT_COUNT] =
+    sueca_solver::constants::PHI_FEATURE_NAMES;
 
 // Number of worlds to use for the heuristic potential evaluation rollouts.
 pub const POTENTIAL_EVAL_WORLDS: usize = 5;

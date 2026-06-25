@@ -7,20 +7,27 @@ Evolves Weight-Agnostic Neural Networks (WANNs) to play Sueca, a Portuguese four
 ## Architecture
 
 ```
-Belief State (35 features) → WANN (Logical Gates) → Oracle Intent (3 outputs) → Heuristic Resolver → Card
+Belief State (35 features) → WANN (Logical Gates) → φ-Utility Knobs (6 outputs) → φ-Resolver → Card
 ```
 
 **Belief State.** 35 normalized floats encoding hand composition, trick state, void tracking, tactical affordances (boss detection, "can I win?" evaluation), game progress, side-suit depletion, secured points, and meta features.
 
-**WANN.** Weight-agnostic network with sign-only connections (±1), logical aggregations (SUM, MIN/AND, MAX/OR), and discrete activations (IDENTITY, NOT, THRESHOLD). No MEAN (float-precision issues at THRESHOLD boundary) and no SIGMOID (breaks IF/THEN rule extraction). Topologies are evaluated across a weight sweep W ∈ {−2.0, −1.0, −0.5, 0.5, 1.0, 2.0}.
+**WANN.** Weight-agnostic network with sign-only connections (±1), logical aggregations (SUM, MIN/AND, MAX/OR), and discrete activations (IDENTITY, NOT, THRESHOLD). No MEAN (float-precision issues at THRESHOLD boundary) and no SIGMOID. Output nodes use THRESHOLD so positive φ-knobs are reachable under the symmetric weight sweep (an IDENTITY output biases knobs ≤ 0 — see CLAUDE.md "Substrate decision"); `change_activation` may target output nodes. Topologies are evaluated across a weight sweep W ∈ {−2.0, −1.0, −0.5, 0.5, 1.0, 2.0}.
 
-**Oracle Intents.** Three abstract play archetypes that map to legal cards in any game state (MIN_FORCE removed — subsumed by EFFICIENT_WIN). Each is a **styled deviation around the strong Elite policy**, not a weak standalone tactic (see Resolver below):
+**φ-Utility Knobs.** The WANN emits 6 continuous knobs `w ∈ [-1,1]`, one per hand-designed card-utility feature φ(card, state):
 
-- **EFFICIENT_WIN (1)** — The strong default. Delegates exactly to `EliteHeuristicBot` (cheapest winner, else cheap cut, else concede).
-- **MAX_FORCE (0)** — Elite + control dials: when trump-long, lead a low trump to *draw* opponents' trumps; otherwise aggressive.
-- **EQUITY_BUILDER (2)** — Elite + tempo dials: lead the *shortest* side-suit to build a void to cut from; *duck* cheap tricks (≤2 pts) when not last; *preserve* trump rather than cut a cheap trick.
+| ID | Knob | φ feature | positive knob → prefer… |
+|----|------|-----------|-------------------------|
+| 0 | RANK | `CARD_RANK/9` | high-rank cards |
+| 1 | POINTS | `CARD_POINTS/11` | high-point cards |
+| 2 | TRUMP | is trump | trumps |
+| 3 | WINS | would beat current winner | winning the trick now |
+| 4 | CAPTURES | trick points/30 if wins | capturing the points on the table |
+| 5 | VOID | last card of its suit in hand | building/keeping a void |
 
-**Heuristic Resolver (`select_card_styled`).** Maps each intent to a legal card contextually. Because every intent shares Elite's core and only adds dials, each pure intent benchmarks at ≈Elite individually (48/47/46% vs Elite) — so a policy that collapses to one intent merely *ties* Elite, while good situational mixing exceeds it. This raised-floor design (June 14) is what let the WANN finally beat Elite; the prior weak-intent resolver (20/37/25%) created a Phase-1 collapse basin. All three intents always resolve to a legal move. When WANN outputs tie, a random choice is made among tied maximums (not deterministic argmax).
+**φ-Resolver (`resolve_card_phi_utility`).** Plays `argmax_{legal} Σ_k w_k · φ_k(card, state)`. `PhiCtx` (trump, ego hand, trick cards) is the compact context φ is computed from; `PhiCtx::legal()` derives the follow-suit legal set, so the resolver always returns a legal card.
+
+**Why this design (Stage B, 2026-06-19).** A measured ceiling decomposition drove the overhaul: the prior 3-intent action vocabulary capped at ~57% vs Elite while the free-card ceiling is ~81%, and a continuous linear utility over these 6 features reaches ~81% (= free-card). The 3-intent vocabulary was the dominant ~24-point bottleneck; the φ-resolver recovers essentially all of it. (The prior 3-intent resolver `select_card_styled` / `resolve_intent` is retained only for the `OracleEnvelope` ceiling diagnostic.) Full spec: `docs/superpowers/specs/2026-06-19-resolver-overhaul-design.md`.
 
 ### Belief State Layout (35 inputs, all in [0, 1])
 
@@ -67,13 +74,12 @@ Belief State (35 features) → WANN (Logical Gates) → Oracle Intent (3 outputs
 The dataset generator uses PIMC (Perfect Information Monte Carlo) with several quality filters:
 
 - **Mid-trick random walk**: plays 0-7 complete tricks + 0-3 extra cards, ending at a uniform random point within a trick (~25% lead, ~75% follow).
-- **Best-of-3-intent labeling** (June 14): each decisive state is labeled with the intent whose *resolved card* has the best PIMC EV among the 3 (statistically-tied intents → uniform multi-label; all 3 tied → reject). The old labeler kept a state only if some intent matched the *global* PIMC-best card — wrong target (the WANN can only choose among the 3 intents) and it discarded ~85% of states under the styled resolver.
-- **Degenerate-only pre-filter**: rejects only states where all 3 intents resolve to the *same* card. Keeps every state where the intent choice has any effect.
-- **Natural class distribution**: with the styled resolver the decision is effectively binary EFFICIENT-vs-EQUITY (MAX_FORCE is uniquely best ~1% of the time, **0%** in the follow split). Generate with `--soft-balance-min-ratio 0.0` (a nonzero floor makes the balancer hunt the unfillable MAX_FORCE bucket forever) and set `use_class_weighting = false` (inverse-frequency weighting would give the ~1% bucket a huge noise weight).
+- **Card-match labeling** (Stage B): for each state the rollout teacher returns an EV for every legal card; `best_cards` = the legal cards within one stderr of the max EV (statistical ties are multi-label — the resolver gets full credit for any tied-best card).
+- **Signal-preserving pre-filters**: forced (single-legal) and fully-ambiguous (all legal cards tied) states are rejected — they carry no card-selection signal.
 - **Futility stop**: ambiguous states exit PIMC early when the EV gap cannot plausibly become significant.
 - **Exact card equivalence**: zero-point cards in the same suit with no intervening remaining cards are collapsed in alpha-beta search (provably lossless via `mask_between` test).
 - **Killer-move heuristic**: 2-slot per-ply killer table in alpha-beta for ~30% more cutoffs.
-- **Holdout set**: 10% stratified across all 6 buckets for validation accuracy tracking.
+- **Holdout set**: 10% per split (lead/follow) for validation accuracy tracking.
 - **Diff mode**: `--diff-mode --fixed-worlds N` for controlled label comparison between pipeline versions.
 
 Generate with (the canonical v6 dataset uses the **rollout teacher** — see below):
@@ -81,7 +87,7 @@ Generate with (the canonical v6 dataset uses the **rollout teacher** — see bel
 code/target/release/sueca_wann generate-dataset \
   --n-worlds 200 --teacher rollout --target-count 15000 \
   --seed 42 --soft-balance-min-ratio 0.0 \
-  --output expert_states_v6.npz
+  --output expert_states_v7.npz
 ```
 
 ### Teacher selection (`--teacher`)
@@ -113,7 +119,7 @@ The June 14 "v5" champion (`2026-06-14-1`) also beat Elite (52.7%), but it was a
 | v5 (`2026-06-14-1`) | 52.7% ± 1.8% | 132 | 188 |
 | **v6 (`2026-06-14-2`)** | **52.1% ± 1.8%** | **29** (4.5× fewer) | **49** (3.8× fewer) |
 
-Both brains compile to a handful of human-readable IF/THEN steps (see `compile-rules` output). The surprising finding (full write-up in `problems.md`, Chapter 2): a **supra-Elite teacher does not raise the benchmark** — strength is *resolver-floored* (every intent resolves to an Elite-flavoured card, so the WANN can only pick *which* small deviation from Elite to apply), and the realisable headroom above the Elite floor is ≈8 points. What the stronger, cleaner teacher buys is a **simpler, genuinely interpretable champion at iso-strength**, not a stronger one. See `problems.md` for the full diagnosis (the project's first Elite-beating champion was 30.2%).
+Both brains compile to human-readable IF/THEN steps over the 6 φ-knobs (see `compile-rules` output). A measured ceiling decomposition (2026-06-19) drove the Stage B resolver overhaul: the prior 3-intent action vocabulary capped at ~57% vs Elite while the **free-card ceiling is ~81%**, and a continuous linear utility over 6 hand-designed card features reaches ~81% (= free-card). The 3-intent vocabulary was the dominant ~24-point bottleneck; the φ-resolver recovers essentially all of it. (Earlier finding that a supra-Elite teacher "does not raise the benchmark" was true *inside* the old 3-intent cage — the real reachable ceiling is ~31 points above Elite.) Full decomposition in the design spec and `ideas.md`; the project's first Elite-beating champion was 30.2%.
 
 ## Rust Crates
 
@@ -225,7 +231,7 @@ Generates the 15k-state PIMC expert dataset used for Phase 0 pretraining (rollou
 code/target/release/sueca_wann generate-dataset \
   --n-worlds 200 --teacher rollout --target-count 15000 \
   --soft-balance-min-ratio 0.0 \
-  --output expert_states_v6.npz
+  --output expert_states_v7.npz
 ```
 
 ### Generate Report Figures
@@ -350,19 +356,21 @@ and routed at play time by `BeliefFeature::AmILeading`.
 
 ### Stage 0 — Expert Dataset Generation (offline, one-time)
 
-`generate-dataset` produces a `.npz` of 35-feature belief states with 3-intent soft targets,
-sampled only at the *current player's* turn (legal-move / perspective aligned). The canonical
-v6 dataset uses the **rollout teacher** (`solve_pimc_rollout`): each determinized world is
-finished with Elite playouts, yielding supra-Elite labels (62% vs Elite) ~1000× cheaper than
-deep alpha-beta. Each decisive state is labeled with the intent whose *resolved card* has the
-best PIMC EV; states where all 3 intents resolve to the same card are rejected. See the
+`generate-dataset` produces a `.npz` (dataset version 2) of 35-feature belief states
+plus a compact `PhiCtx` (trump, ego hand, trick cards) and a `best_cards` u64 mask,
+sampled at the *current player's* turn (legal-move / perspective aligned). The
+canonical dataset uses the **rollout teacher** (`solve_pimc_rollout_serial`): each
+determinized world is finished with Elite playouts, yielding supra-Elite EVs. For
+each state the mask holds every legal card within one stderr of the best EV (ties
+are multi-label); forced and fully-ambiguous states are rejected. See the
 [Dataset Pipeline](#dataset-pipeline-2026-06-recovery) section for the filters and flags.
 
 ### Stage 1 — Phase 0: Supervised Pretraining (gens 0 → `phase0_gens`)
 
-WANNs are pretrained to match the expert intents by **classification accuracy** — no game
-simulation, so fitness variance is zero and the search focuses purely on establishing
-structural connectivity.
+WANNs are pretrained by **card-match accuracy** — the fraction of states where the
+resolver's card (WANN → 6 knobs → `resolve_card_phi_utility_ctx`) is in the teacher's
+`best_cards` mask. No game simulation, so fitness variance is zero and the search
+focuses purely on establishing structural connectivity.
 
 * **Dataset split.** The expert dataset is partitioned by the `AmILeading` flag into a
   `lead_dataset` and a `follow_dataset`; the Lead and Follow populations train on their own

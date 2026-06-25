@@ -1,5 +1,10 @@
 """Comprehensive quantitative analysis of an expert dataset NPZ file.
 
+DEPRECATED: targets the long-obsolete 33-feature / 4-intent format. The current
+dataset is the Stage B v2 card-match format (35-feature beliefs + `best_cards`
+u64 mask + `ctx_*` arrays). This script is preserved for historical analysis of
+very old checkpoints only and will not load modern datasets.
+
 Usage: python scripts/dataset_analysis.py [dataset.npz]
 """
 

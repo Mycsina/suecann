@@ -5,7 +5,7 @@ use sueca_solver::engine::{CARD_SUIT, CARD_RANK, CARD_POINTS};
 use sueca_wann::wann_network::RustWannNetwork;
 use sueca_wann::genome::JsonGenomeJoint;
 use sueca_solver::belief::encode_belief_state;
-use sueca_solver::heuristic::resolve_intent;
+use sueca_solver::heuristic::{outputs_to_knobs, resolve_card_phi_utility};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use rand_pcg::Pcg64;
@@ -292,32 +292,10 @@ impl WannSuecaGameSession {
                     mean_outputs[i] = sum_outputs[i] / (self.sweep_weights.len() as f64);
                 }
 
-                // Choose intent
-                let mut max_val = mean_outputs[0];
-                for i in 1..sueca_solver::constants::OUTPUT_COUNT {
-                    if mean_outputs[i] > max_val {
-                        max_val = mean_outputs[i];
-                    }
-                }
-
-                let mut best_intents = [0usize; sueca_solver::constants::OUTPUT_COUNT];
-                let mut best_count = 0;
-                for i in 0..sueca_solver::constants::OUTPUT_COUNT {
-                    if (mean_outputs[i] - max_val).abs() < 1e-9 {
-                        best_intents[best_count] = i;
-                        best_count += 1;
-                    }
-                }
-
-                // Random tie break
-                let chosen_intent = if best_count == 1 {
-                    best_intents[0]
-                } else {
-                    use rand::Rng;
-                    best_intents[self.rng.gen_range(0..best_count)]
-                };
-
-                resolve_intent(chosen_intent, &self.game, seat)
+                // φ-utility resolver: remap averaged outputs [0,1] → [-1,1] knobs,
+                // then pick argmax over legal cards of Σ knob_k · φ_k(card).
+                let knobs = outputs_to_knobs(&mean_outputs);
+                resolve_card_phi_utility(&knobs, &self.game, seat)
             }
         };
 

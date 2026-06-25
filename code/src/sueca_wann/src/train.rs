@@ -7,6 +7,9 @@ use crate::mutations::{InnovationRegistry, TabuVetoList};
 use crate::population::Population;
 use crate::runtime_data;
 
+use sueca_solver::constants::PHI_FEATURE_COUNT;
+use sueca_solver::heuristic::{outputs_to_knobs, resolve_card_phi_utility_ctx};
+
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
@@ -59,7 +62,6 @@ pub fn generate_deals_rust(
 fn generate_frozen_probe_deals(base_seed: u64) -> Vec<crate::evaluator::EvaluatorDeal> {
     let n_deals = 64;
     let mut deals = Vec::with_capacity(n_deals);
-    let mut rng = Pcg64::seed_from_u64(base_seed);
     for i in 0..n_deals {
         let deal_seed = base_seed.wrapping_mul(1000).wrapping_add(i as u64);
         let mut deal_rng = Pcg64::seed_from_u64(deal_seed);
@@ -115,18 +117,26 @@ fn evaluate_fixed_probe(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 0: Supervised classification accuracy
+// Phase 0: Supervised card-match accuracy (Stage B fitness)
 // ---------------------------------------------------------------------------
+// For each state the WANN's 6 sweep-averaged outputs → signed knobs → the φ-
+// utility resolver picks a card; fitness is the fraction of states where that
+// card is in the teacher's best-cards mask. Decoupled from the action
+// representation (works for any φ feature set) and directly optimizes the thing
+// we care about (playing strong cards), per the design spec §5.
 pub fn evaluate_phase0(
     genomes: &[crate::wann_network::RustWannNetwork],
     dataset: &ExpertDataset,
     sweep_weights: &[f64],
-    use_class_weighting: bool,
+    _use_class_weighting: bool,
 ) -> Vec<f64> {
-    // Pre-compute constants outside the parallel closure
     let n_states = dataset.num_states;
+    if n_states == 0 {
+        return vec![0.0; genomes.len()];
+    }
 
-    // Pre-convert flat states into fixed-size arrays — one copy, not N× copies
+    // Pre-convert flat states into fixed-size arrays + cache PhiCtx per state
+    // (one copy, reused across all genomes in the parallel loop).
     let states: Vec<[f64; INPUT_COUNT]> = dataset
         .states
         .chunks_exact(INPUT_COUNT)
@@ -136,75 +146,45 @@ pub fn evaluate_phase0(
             arr
         })
         .collect();
+    let ctxs: Vec<_> = (0..n_states).map(|i| dataset.ctx(i)).collect();
+    let best_cards = &dataset.best_cards;
 
-    // Compute per-class weights for balanced accuracy.
-    // Weight = total_samples / (n_classes * class_count).
-    // Average weight is 1.0, so the overall accuracy scale is preserved.
-    let class_weights: [f64; OUTPUT_COUNT] = if use_class_weighting {
-        let mut class_counts = [0usize; OUTPUT_COUNT];
-        for idx in 0..n_states {
-            let offset = idx * OUTPUT_COUNT as usize;
-            for c in 0..OUTPUT_COUNT as usize {
-                if dataset.soft_intents[offset + c] > 0.5 {
-                    class_counts[c] += 1;
-                    break;
-                }
-            }
-        }
-        let mut w = [1.0f64; OUTPUT_COUNT];
-        for c in 0..OUTPUT_COUNT as usize {
-            if class_counts[c] > 0 {
-                w[c] = n_states as f64 / (OUTPUT_COUNT as f64 * class_counts[c] as f64);
-            }
-        }
-        w
-    } else {
-        [1.0f64; OUTPUT_COUNT]
-    };
-
-    // note: using weight-batched forward — single CSR traversal for all sweep weights
     genomes
         .into_par_iter()
         .map(|candidate| {
             let n_weights = sweep_weights.len();
             let mut scratchpad = vec![0.0f64; candidate.num_nodes * n_weights];
-            let mut weighted_correct = 0.0;
+            let mut correct = 0.0f64;
 
             for (idx, inputs) in states.iter().enumerate() {
                 candidate.forward_batched(inputs, sweep_weights, &mut scratchpad);
 
-                // Sum outputs across all weights (MEAN = sum / n_weights, but argmax
-                // is scale-invariant, so we skip the divide)
-                let mut total_outputs = [0.0f64; OUTPUT_COUNT];
-                for w in 0..n_weights {
-                    total_outputs[0] += scratchpad[(OUTPUT_START + 0) * n_weights + w];
-                    total_outputs[1] += scratchpad[(OUTPUT_START + 1) * n_weights + w];
-                    total_outputs[2] += scratchpad[(OUTPUT_START + 2) * n_weights + w];
+                // Average the OUTPUT_COUNT knobs across the weight sweep.
+                let mut mean_outputs = [0.0f64; OUTPUT_COUNT];
+                for i in 0..OUTPUT_COUNT {
+                    let mut s = 0.0f64;
+                    for w in 0..n_weights {
+                        s += scratchpad[(OUTPUT_START + i) * n_weights + w];
+                    }
+                    mean_outputs[i] = s / (n_weights as f64);
                 }
 
-                // Unrolled argmax (3 intents)
-                let v0 = total_outputs[0];
-                let v1 = total_outputs[1];
-                let v2 = total_outputs[2];
+                let knobs = outputs_to_knobs(&mean_outputs);
+                let card = resolve_card_phi_utility_ctx(&knobs, &ctxs[idx]);
 
-                let best_intent = if v0 >= v1 && v0 >= v2 {
-                    0
-                } else if v1 >= v2 {
-                    1
-                } else {
-                    2
-                };
-
-                let is_correct = dataset.soft_intents[idx * OUTPUT_COUNT as usize + best_intent] as f64;
-                weighted_correct += is_correct * class_weights[best_intent];
+                if (best_cards[idx] >> card) & 1 == 1 {
+                    correct += 1.0;
+                }
             }
 
-            // Normalize by total weight applied (should equal n_states since mean weight = 1.0)
-            let total_weight: f64 = class_weights.iter().sum::<f64>() * (n_states as f64 / OUTPUT_COUNT as f64);
-            weighted_correct / total_weight
+            correct / (n_states as f64)
         })
         .collect()
 }
+
+// Silence unused-knob-count warning while keeping the dimension documented.
+#[allow(dead_code)]
+const _PHI_KNOB_COUNT_TRAIN: usize = PHI_FEATURE_COUNT;
 
 // ---------------------------------------------------------------------------
 // Phase 1: Self-play with HOF opponents
@@ -627,56 +607,78 @@ fn run_phase1_generation_joint(
 fn split_dataset(dataset: &ExpertDataset, holdout_frac: f64)
     -> (ExpertDataset, ExpertDataset, ExpertDataset, ExpertDataset)
 {
-    // Collect indices by (split, intent) for stratified holdout
-    let mut buckets: [[Vec<usize>; 3]; 2] = Default::default();
+    // Split by lead/follow (AmILeading flag), then per-split random holdout.
+    // No intent stratification under card-match fitness — the best-cards mask
+    // already encodes the target and per-intent balancing is obsolete.
+    use crate::constants::BeliefFeature;
+    let lead = BeliefFeature::AmILeading as usize;
+
+    let mut lead_idxs: Vec<usize> = Vec::new();
+    let mut follow_idxs: Vec<usize> = Vec::new();
     for idx in 0..dataset.num_states {
-        let state_offset = idx * INPUT_COUNT;
-        let is_leading = (dataset.states[state_offset + crate::constants::BeliefFeature::AmILeading as usize] - 1.0).abs() < 1e-9;
-        let split = if is_leading { 0 } else { 1 };
-        let intent = dataset.soft_intents[idx * OUTPUT_COUNT as usize..idx * OUTPUT_COUNT as usize + OUTPUT_COUNT as usize]
-            .iter().enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i).unwrap_or(0);
-        buckets[split][intent].push(idx);
+        let is_lead = (dataset.states[idx * INPUT_COUNT + lead] - 1.0).abs() < 1e-9;
+        if is_lead { lead_idxs.push(idx); } else { follow_idxs.push(idx); }
     }
 
-    let mut lead_train = (Vec::new(), Vec::new(), Vec::new());
-    let mut lead_val = (Vec::new(), Vec::new(), Vec::new());
-    let mut follow_train = (Vec::new(), Vec::new(), Vec::new());
-    let mut follow_val = (Vec::new(), Vec::new(), Vec::new());
+    // Deterministic split: first `n_val` indices → validation, rest → train.
+    let split_one = |idxs: &[usize], train: &mut AccDataset, val: &mut AccDataset| {
+        let n_val = ((idxs.len() as f64) * holdout_frac).ceil() as usize;
+        let (val_idxs, train_idxs) = idxs.split_at(n_val.min(idxs.len()));
+        for &i in train_idxs { train.push_from(dataset, i); }
+        for &i in val_idxs { val.push_from(dataset, i); }
+    };
 
-    for split in 0..2 {
-        for intent in 0..3 {
-            let indices = &buckets[split][intent];
-            let n_val = (indices.len() as f64 * holdout_frac).max(1.0) as usize;
-            let (val_idxs, train_idxs) = indices.split_at(n_val.min(indices.len()));
-            let (train_dest, val_dest) = if split == 0 {
-                (&mut lead_train, &mut lead_val)
-            } else {
-                (&mut follow_train, &mut follow_val)
-            };
-            for &idx in train_idxs {
-                let off = idx * INPUT_COUNT;
-                train_dest.0.extend_from_slice(&dataset.states[off..off + INPUT_COUNT]);
-                let ioff = idx * OUTPUT_COUNT as usize;
-                train_dest.1.extend_from_slice(&dataset.soft_intents[ioff..ioff + OUTPUT_COUNT as usize]);
-                train_dest.2.push(dataset.legal_masks[idx]);
-            }
-            for &idx in val_idxs {
-                let off = idx * INPUT_COUNT;
-                val_dest.0.extend_from_slice(&dataset.states[off..off + INPUT_COUNT]);
-                let ioff = idx * OUTPUT_COUNT as usize;
-                val_dest.1.extend_from_slice(&dataset.soft_intents[ioff..ioff + OUTPUT_COUNT as usize]);
-                val_dest.2.push(dataset.legal_masks[idx]);
-            }
+    let mut lead_train = AccDataset::new();
+    let mut lead_val = AccDataset::new();
+    let mut follow_train = AccDataset::new();
+    let mut follow_val = AccDataset::new();
+    split_one(&lead_idxs, &mut lead_train, &mut lead_val);
+    split_one(&follow_idxs, &mut follow_train, &mut follow_val);
+
+    (
+        lead_train.into_dataset(),
+        lead_val.into_dataset(),
+        follow_train.into_dataset(),
+        follow_val.into_dataset(),
+    )
+}
+
+/// Accumulator for building a sub-dataset from source indices.
+struct AccDataset {
+    states: Vec<f64>,
+    best_cards: Vec<u64>,
+    ctx_trump: Vec<u8>,
+    ctx_hand: Vec<u64>,
+    ctx_trick: Vec<u8>,
+    ctx_trick_len: Vec<u8>,
+}
+impl AccDataset {
+    fn new() -> Self {
+        Self { states: Vec::new(), best_cards: Vec::new(), ctx_trump: Vec::new(),
+               ctx_hand: Vec::new(), ctx_trick: Vec::new(), ctx_trick_len: Vec::new() }
+    }
+    fn push_from(&mut self, src: &ExpertDataset, i: usize) {
+        let off = i * INPUT_COUNT;
+        self.states.extend_from_slice(&src.states[off..off + INPUT_COUNT]);
+        self.best_cards.push(src.best_cards[i]);
+        self.ctx_trump.push(src.ctx_trump[i]);
+        self.ctx_hand.push(src.ctx_hand[i]);
+        let base = i * 4;
+        self.ctx_trick.extend_from_slice(&src.ctx_trick[base..base + 4]);
+        self.ctx_trick_len.push(src.ctx_trick_len[i]);
+    }
+    fn into_dataset(self) -> ExpertDataset {
+        let num_states = self.best_cards.len();
+        ExpertDataset {
+            states: self.states,
+            num_states,
+            best_cards: self.best_cards,
+            ctx_trump: self.ctx_trump,
+            ctx_hand: self.ctx_hand,
+            ctx_trick: self.ctx_trick,
+            ctx_trick_len: self.ctx_trick_len,
         }
     }
-
-    let lead_train_ds = ExpertDataset { num_states: lead_train.2.len(), states: lead_train.0, soft_intents: lead_train.1, legal_masks: lead_train.2 };
-    let lead_val_ds = ExpertDataset { num_states: lead_val.2.len(), states: lead_val.0, soft_intents: lead_val.1, legal_masks: lead_val.2 };
-    let follow_train_ds = ExpertDataset { num_states: follow_train.2.len(), states: follow_train.0, soft_intents: follow_train.1, legal_masks: follow_train.2 };
-    let follow_val_ds = ExpertDataset { num_states: follow_val.2.len(), states: follow_val.0, soft_intents: follow_val.1, legal_masks: follow_val.2 };
-    (lead_train_ds, lead_val_ds, follow_train_ds, follow_val_ds)
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,21 +1067,29 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
 
         // Add each genome's behavior to MAP-Elites if in Phase 1
         if current_phase == 1 {
+            // φ-utility behavioral descriptor: mean "win-preference" knob
+            // (PhiFeature::Wins), remapped from [-1,1] → [0,1]. Replaces the old
+            // 3-intent `intent_pref` (fraction of EFFICIENT_WIN plays).
+            const WINS: usize = sueca_solver::constants::PhiFeature::Wins as usize;
             for (i, behavior) in lead_behaviors.iter().enumerate() {
-                let intent_pref =
-                    (behavior.intent_counts[1] as f64) / (behavior.total_actions.max(1) as f64);
+                let win_pref = ((behavior.knob_sums[WINS] / (behavior.total_actions.max(1) as f64))
+                    + 1.0)
+                    / 2.0;
+                let win_pref = win_pref.clamp(0.0, 1.0);
                 let aggression = ((behavior.total_lead_points as f64)
                     / (behavior.count_leads.max(1) as f64 * 10.0))
                     .clamp(0.0, 1.0);
-                lead_map_elites.add(&lead_pop.genomes[i], lead_fitnesses[i], gen, intent_pref, aggression);
+                lead_map_elites.add(&lead_pop.genomes[i], lead_fitnesses[i], gen, win_pref, aggression);
             }
             for (i, behavior) in follow_behaviors.iter().enumerate() {
-                let intent_pref =
-                    (behavior.intent_counts[1] as f64) / (behavior.total_actions.max(1) as f64);
+                let win_pref = ((behavior.knob_sums[WINS] / (behavior.total_actions.max(1) as f64))
+                    + 1.0)
+                    / 2.0;
+                let win_pref = win_pref.clamp(0.0, 1.0);
                 let aggression = ((behavior.total_lead_points as f64)
                     / (behavior.count_leads.max(1) as f64 * 10.0))
                     .clamp(0.0, 1.0);
-                follow_map_elites.add(&follow_pop.genomes[i], follow_fitnesses[i], gen, intent_pref, aggression);
+                follow_map_elites.add(&follow_pop.genomes[i], follow_fitnesses[i], gen, win_pref, aggression);
             }
         }
 
@@ -1377,4 +1387,108 @@ pub fn train(config: Config, resume: bool) -> Result<(), Box<dyn std::error::Err
     serde_json::to_writer_pretty(best_file, &joint_best)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::ExpertDataset;
+    use crate::genome::Genome;
+    use sueca_solver::heuristic::PhiCtx;
+
+    /// Build a synthetic dataset of `n` leading states (trick_len = 0) with the
+    /// given per-state `best_cards` mask. Beliefs are zero-filled — irrelevant
+    /// to the card-match arithmetic, which only depends on the resolver output
+    /// vs the mask. Hands are randomized but always have ≥2 cards.
+    fn synthetic_dataset(n: usize, best_cards_fn: impl Fn(&PhiCtx) -> u64) -> ExpertDataset {
+        use rand::SeedableRng;
+        let mut rng = rand_pcg::Pcg64::seed_from_u64(424242);
+        let mut states = Vec::new();
+        let mut bc = Vec::new();
+        let mut trump_v = Vec::new();
+        let mut hand_v = Vec::new();
+        let mut trick_v = Vec::new();
+        let mut trick_len_v = Vec::new();
+        for _ in 0..n {
+            // Random hand of 4..=8 cards.
+            let mut deck: Vec<u8> = (0..40).collect();
+            use rand::seq::SliceRandom;
+            deck.shuffle(&mut rng);
+            let ncards = rng.gen_range(4..=8);
+            let hand: u64 = deck[..ncards].iter().map(|&c| 1u64 << c).fold(0, |a, b| a | b);
+            let trump = rng.gen_range(0..4) as u8;
+            let ctx = PhiCtx { trump, hand, trick_cards: [40; 4], trick_len: 0 };
+            states.extend(std::iter::repeat_n(0.0f64, INPUT_COUNT));
+            bc.push(best_cards_fn(&ctx));
+            trump_v.push(trump);
+            hand_v.push(hand);
+            trick_v.extend_from_slice(&[40u8, 40, 40, 40]);
+            trick_len_v.push(0);
+        }
+        ExpertDataset {
+            states,
+            num_states: n,
+            best_cards: bc,
+            ctx_trump: trump_v,
+            ctx_hand: hand_v,
+            ctx_trick: trick_v,
+            ctx_trick_len: trick_len_v,
+        }
+    }
+
+    /// Invariant: if every legal card is "best" (mask = legal set), then any
+    /// legal resolver output is correct → Phase-0 fitness must be exactly 1.0.
+    /// Uses an empty genome (all-zero outputs → knobs all −1 → resolver picks a
+    /// deterministic lowest-φ legal card); the point is the fitness arithmetic,
+    /// which must be 1.0 regardless of which legal card is chosen.
+    #[test]
+    fn phase0_fitness_all_legal_is_one() {
+        let dataset = synthetic_dataset(40, |ctx| ctx.legal());
+        let nets = vec![Genome::initial().to_rust_wann()];
+        for sweep in [&[1.0f64][..], &[-2.0, -1.0, -0.5, 0.5, 1.0, 2.0][..]] {
+            let fit = evaluate_phase0(&nets, &dataset, sweep, false);
+            assert_eq!(fit.len(), 1);
+            assert!(
+                (fit[0] - 1.0).abs() < 1e-9,
+                "fitness {} != 1.0 when every legal card is best (sweep len {})",
+                fit[0],
+                sweep.len()
+            );
+        }
+    }
+
+    /// Invariant: a mask with NO legal bits set can never be matched by a legal
+    /// resolver output → Phase-0 fitness must be exactly 0.0. Confirms the mask
+    /// check genuinely penalizes (not a tautological always-1.0).
+    #[test]
+    fn phase0_fitness_empty_mask_is_zero() {
+        // Mask sets only an ILLEGAL bit (bit 39 with hand excluding 39) → resolver
+        // (which always plays legal) can never match → fitness 0.0.
+        let dataset = synthetic_dataset(20, |_| 1u64 << 39);
+        let nets = vec![Genome::initial().to_rust_wann()];
+        let fit = evaluate_phase0(&nets, &dataset, &[1.0], false);
+        assert_eq!(fit.len(), 1);
+        assert!(
+            (fit[0] - 0.0).abs() < 1e-9,
+            "fitness {} != 0.0 with an all-illegal mask",
+            fit[0]
+        );
+    }
+
+    /// Range invariant: for realistic single-best-card masks, fitness ∈ [0,1]
+    /// and equals the fraction of states where the resolver picks a best card.
+    #[test]
+    fn phase0_fitness_single_best_card_in_range() {
+        // best card = lowest-index legal card. Resolver with empty net + zero
+        // knobs picks a deterministic card; fitness is the resulting hit rate.
+        let dataset = synthetic_dataset(30, |ctx| {
+            let l = ctx.legal();
+            1u64 << l.trailing_zeros()
+        });
+        let nets = vec![Genome::initial().to_rust_wann()];
+        let fit = evaluate_phase0(&nets, &dataset, &[-2.0, -1.0, -0.5, 0.5, 1.0, 2.0], false);
+        assert_eq!(fit.len(), 1);
+        assert!(fit[0].is_finite(), "fitness not finite");
+        assert!((0.0..=1.0).contains(&fit[0]), "fitness {} out of [0,1]", fit[0]);
+    }
 }

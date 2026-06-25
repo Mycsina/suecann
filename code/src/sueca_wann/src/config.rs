@@ -8,6 +8,16 @@ pub struct PopulationConfig {
     pub generations: usize,
     pub elitism: usize,
     pub pareto_complexity_prob: f64,
+    /// Output-node activation used to seed the population ("identity" | "not" |
+    /// "threshold"). THRESHOLD outputs can fire consistently across the weight
+    /// sweep → knob ≈ +1 is reachable; IDENTITY + symmetric sweep biases knobs
+    /// ≤ 0 (see CLAUDE.md "Substrate decision").
+    #[serde(default = "default_output_activation")]
+    pub output_activation: String,
+}
+
+fn default_output_activation() -> String {
+    "identity".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +61,11 @@ pub struct MutationConfig {
     pub p_change_act: f64,
     pub p_change_agg: f64,
     pub p_crossover: f64,
+    /// Allow `change_activation` to target OUTPUT nodes (default false preserves
+    /// legacy behaviour). Enabling lets evolution switch output activations
+    /// (IDENTITY ⇄ THRESHOLD ⇄ NOT) so the φ-knob representation is evolvable.
+    #[serde(default)]
+    pub allow_output_act_mutation: bool,
 }
 
 fn default_min_gens_per_phase() -> usize {

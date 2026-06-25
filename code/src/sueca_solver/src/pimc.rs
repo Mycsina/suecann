@@ -856,7 +856,7 @@ mod tests {
         // Player 0 hand: 10 hearts
         let mut my_hand = 0u64;
         for r in 0..10 {
-            my_hand |= 1u64 << (0 * 10 + r); // Hearts
+            my_hand |= 1u64 << r /* Hearts (suit 0) */; // Hearts
         }
 
         let played_cards = 0u64;
@@ -905,7 +905,7 @@ mod tests {
         // Player 0 hand: 10 hearts
         let mut my_hand = 0u64;
         for r in 0..10 {
-            my_hand |= 1u64 << (0 * 10 + r); // Hearts
+            my_hand |= 1u64 << r /* Hearts (suit 0) */; // Hearts
         }
 
         let played_cards = 0u64;
@@ -1144,7 +1144,7 @@ mod tests {
         // Set up a simple deal: player 0 has all hearts, others share remaining cards
         let mut my_hand = 0u64;
         for r in 0..10 {
-            my_hand |= 1u64 << (0 * 10 + r);
+            my_hand |= 1u64 << r /* Hearts (suit 0) */;
         }
         let voids = [0u8; 4];
         let target_sizes = [10, 10, 10, 10];
@@ -1192,7 +1192,7 @@ mod tests {
         // Player 0 hand: 5 hearts + 5 diamonds
         let mut my_hand = 0u64;
         for r in 0..5 {
-            my_hand |= 1u64 << (0 * 10 + r); // Hearts 0-4
+            my_hand |= 1u64 << r /* Hearts (suit 0) */; // Hearts 0-4
             my_hand |= 1u64 << (1 * 10 + r); // Diamonds 0-4
         }
 
@@ -1267,7 +1267,7 @@ mod tests {
         // to the 3 other players, but all 3 are void in hearts — impossible.
         let mut my_hand = 0u64;
         for r in 0..5 {
-            my_hand |= 1u64 << (0 * 10 + r); // 5 hearts
+            my_hand |= 1u64 << r /* Hearts (suit 0) */; // 5 hearts
             my_hand |= 1u64 << (1 * 10 + r); // 5 diamonds
         }
 

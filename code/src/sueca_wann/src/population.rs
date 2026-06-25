@@ -218,7 +218,11 @@ impl Population {
         let pop_size = config.population.pop_size;
 
         // --- Zero-connection genomes for PFS-NEAT ---
-        let base = Genome::initial();
+        let output_act = crate::genome::Genome::parse_activation(
+            &config.population.output_activation,
+        )
+        .unwrap_or_else(|e| panic!("invalid output_activation: {e}"));
+        let base = Genome::initial_with_output_act(output_act);
         let remaining_count = pop_size;
         for _ in 0..remaining_count {
             genomes.push(base.copy());
@@ -484,6 +488,7 @@ impl Population {
             let p_flip_sign = self.config.mutation.p_flip_sign;
             let p_change_act = self.config.mutation.p_change_act;
             let p_change_agg = self.config.mutation.p_change_agg;
+            let allow_output_act = self.config.mutation.allow_output_act_mutation;
             // Pre-generate seeds to avoid sharing rng across threads
             let seeds: Vec<u64> = (0..breeding_count).map(|_| rng.gen::<u64>()).collect();
 
@@ -524,6 +529,7 @@ impl Population {
                             p_flip_sign,
                             p_change_act,
                             p_change_agg,
+                            allow_output_act,
                         );
 
                         // PFS-NEAT: only validate structural mutations (topology changes).
@@ -665,6 +671,7 @@ impl Population {
             let p_flip_sign = 0.05;
             let p_change_act = 0.05;
             let p_change_agg = 0.05;
+            let allow_output_act = self.config.mutation.allow_output_act_mutation;
 
             crate::mutations::apply_mutations(
                 &mut clone,
@@ -677,6 +684,7 @@ impl Population {
                 p_flip_sign,
                 p_change_act,
                 p_change_agg,
+                allow_output_act,
             );
 
             self.genomes[idx] = clone;
@@ -748,27 +756,21 @@ pub fn evaluate_single_phase0_sample_scratchpad(
 
         network.forward_batched(&inputs, sweep_weights, scratchpad);
 
-        let mut total_outputs = [0.0f64; OUTPUT_COUNT];
-        for w in 0..n_weights {
-            total_outputs[0] += scratchpad[(OUTPUT_START + 0) * n_weights + w];
-            total_outputs[1] += scratchpad[(OUTPUT_START + 1) * n_weights + w];
-            total_outputs[2] += scratchpad[(OUTPUT_START + 2) * n_weights + w];
+        // Average the OUTPUT_COUNT knobs across the weight sweep, remap to
+        // signed knobs and resolve via the φ-utility resolver (card-match).
+        let mut mean_outputs = [0.0f64; OUTPUT_COUNT];
+        for i in 0..OUTPUT_COUNT {
+            let mut s = 0.0f64;
+            for w in 0..n_weights {
+                s += scratchpad[(OUTPUT_START + i) * n_weights + w];
+            }
+            mean_outputs[i] = s / (n_weights as f64);
         }
+        let knobs = sueca_solver::heuristic::outputs_to_knobs(&mean_outputs);
+        let ctx = dataset.ctx(idx);
+        let card = sueca_solver::heuristic::resolve_card_phi_utility_ctx(&knobs, &ctx);
 
-        // Unrolled argmax (3 intents)
-        let v0 = total_outputs[0];
-        let v1 = total_outputs[1];
-        let v2 = total_outputs[2];
-
-        let best_intent = if v0 >= v1 && v0 >= v2 {
-            0
-        } else if v1 >= v2 {
-            1
-        } else {
-            2
-        };
-
-        if dataset.soft_intents[idx * OUTPUT_COUNT + best_intent] > 0.0 {
+        if (dataset.best_cards[idx] >> card) & 1 == 1 {
             correct += 1;
         }
     }
@@ -1016,6 +1018,7 @@ pub fn breed_next_generation_joint(
         let p_flip_sign = lead_pop.config.mutation.p_flip_sign;
         let p_change_act = lead_pop.config.mutation.p_change_act;
         let p_change_agg = lead_pop.config.mutation.p_change_agg;
+        let allow_output_act = lead_pop.config.mutation.allow_output_act_mutation;
 
         let seeds: Vec<u64> = (0..breeding_count).map(|_| rng.gen::<u64>()).collect();
 
@@ -1063,6 +1066,7 @@ pub fn breed_next_generation_joint(
                         p_flip_sign,
                         p_change_act,
                         p_change_agg,
+                        allow_output_act,
                     );
 
                     apply_mutations(
@@ -1076,6 +1080,7 @@ pub fn breed_next_generation_joint(
                         p_flip_sign,
                         p_change_act,
                         p_change_agg,
+                        allow_output_act,
                     );
 
                     (child_lead, child_follow)

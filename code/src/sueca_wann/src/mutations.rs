@@ -306,8 +306,12 @@ pub fn mutate_flip_sign<R: Rng>(genome: &mut Genome, rng: &mut R) -> bool {
     }
 }
 
-pub fn mutate_change_activation<R: Rng>(genome: &mut Genome, rng: &mut R) -> bool {
-    let node = match pick_random_node(genome, rng, true, true, true) {
+pub fn mutate_change_activation<R: Rng>(
+    genome: &mut Genome,
+    rng: &mut R,
+    allow_output: bool,
+) -> bool {
+    let node = match pick_random_node(genome, rng, true, true, !allow_output) {
         Some(n) => n,
         None => return false,
     };
@@ -388,6 +392,7 @@ pub fn apply_mutations<R: Rng>(
     p_flip_sign: f64,
     p_change_act: f64,
     p_change_agg: f64,
+    allow_output_act: bool,
 ) -> MutationOutcome {
     let mut structural = false;
     let mut non_structural = false;
@@ -404,7 +409,7 @@ pub fn apply_mutations<R: Rng>(
     if rng.gen_bool(p_flip_sign) && mutate_flip_sign(genome, rng) {
         non_structural = true;
     }
-    if rng.gen_bool(p_change_act) && mutate_change_activation(genome, rng) {
+    if rng.gen_bool(p_change_act) && mutate_change_activation(genome, rng, allow_output_act) {
         non_structural = true;
     }
     if rng.gen_bool(p_change_agg) && mutate_change_aggregation(genome, rng) {

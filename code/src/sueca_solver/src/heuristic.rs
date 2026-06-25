@@ -743,6 +743,193 @@ pub fn select_card_from_outputs(
     resolve_intent(chosen_intent, game, seat)
 }
 
+// ===========================================================================
+// Stage B — φ-utility resolver (2026-06-19 resolver/action-space overhaul)
+// ===========================================================================
+//
+// The WANN now emits a 6-dimensional continuous knob vector `w ∈ [-1,1]^6`
+// (one knob per φ feature). The resolver scores every legal card by the linear
+// utility `U(card) = Σ_k w_k · φ_k(card, state)` and plays the argmax. The 6
+// hand-designed features were validated to recover ~81% of the free-card
+// ceiling (vs ~57% for the old 3-intent vocabulary) — see the design spec at
+// docs/superpowers/specs/2026-06-19-resolver-overhaul-design.md.
+//
+// `compute_phi` is the SINGLE source of truth for φ: it is called live during
+// play (Phase 1 inference, benchmark, WASM) AND offline during dataset
+// generation / Phase-0 training (via `PhiCtx`). Changing it requires a dataset
+// regeneration.
+//
+// Knob range: WANN output nodes use IDENTITY activation, so the sweep-averaged
+// output is continuous in [0,1]; `outputs_to_knobs` remaps it to [-1,1]. No
+// SIGMOID is needed — weight-agnosticism is preserved and the resolution is
+// sufficient for 6 features (7 sweep levels → 7^6 reachable knob vectors).
+
+/// Minimal game-state slice needed to compute φ and resolve a card. Compact so
+/// it can be serialized into the Phase-0 dataset without leaking opponent
+/// hands or reconstructing a full `SuecaSimulatorGame`.
+#[derive(Clone, Copy, Debug)]
+pub struct PhiCtx {
+    pub trump: u8,
+    /// Ego player's hand bitboard (full hand; `legal()` derives the follow-suit
+    /// subset). The `Void` φ feature also reads the full hand.
+    pub hand: u64,
+    /// Current trick cards, indexed `[0..trick_len)`. Unused slots are `40`.
+    pub trick_cards: [u8; 4],
+    pub trick_len: u8,
+}
+
+impl PhiCtx {
+    /// Build from a live game for the ego player at `seat`.
+    #[inline]
+    pub fn from_game(game: &SuecaSimulatorGame, seat: u8) -> Self {
+        let mut trick_cards = [40u8; 4];
+        let len = game.current_trick_len;
+        trick_cards[..len].copy_from_slice(&game.current_trick[..len]);
+        Self {
+            trump: game.state.trump,
+            hand: game.state.hands[seat as usize],
+            trick_cards,
+            trick_len: len as u8,
+        }
+    }
+
+    /// Led suit of the current trick (undefined when leading / `trick_len == 0`).
+    #[inline(always)]
+    fn led_suit(&self) -> u8 {
+        crate::engine::CARD_SUIT[self.trick_cards[0] as usize]
+    }
+
+    /// Sum of card points in the current trick (points on the table right now).
+    #[inline]
+    fn trick_points(&self) -> u8 {
+        let mut pts = 0u8;
+        for i in 0..self.trick_len as usize {
+            pts += crate::engine::CARD_POINTS[self.trick_cards[i] as usize];
+        }
+        pts
+    }
+
+    /// Legal-move bitboard derived from the hand + the follow-suit rule. When
+    /// following, you must play the led suit if you hold it; otherwise any card.
+    /// Matches `GameState::legal_moves()` but works off the compact context.
+    #[inline(always)]
+    pub fn legal(&self) -> u64 {
+        if self.trick_len == 0 {
+            return self.hand;
+        }
+        let led = self.led_suit();
+        let suited = self.hand & (0x3FFu64 << (led as u64 * 10));
+        if suited != 0 {
+            suited
+        } else {
+            self.hand
+        }
+    }
+}
+
+/// Does `card` beat the current best card in the trick (given a `PhiCtx`)?
+/// True when leading (empty trick). Mirrors the old `would_beat_card` but works
+/// off the compact context.
+#[inline]
+pub fn phi_would_beat(card: u8, ctx: &PhiCtx) -> bool {
+    if ctx.trick_len == 0 {
+        return true;
+    }
+    let trump = ctx.trump;
+    let led_suit = ctx.led_suit();
+    let mut best_card = ctx.trick_cards[0];
+    for i in 1..ctx.trick_len as usize {
+        let c = ctx.trick_cards[i];
+        if GameState::beats_card(c, best_card, trump, led_suit) {
+            best_card = c;
+        }
+    }
+    GameState::beats_card(card, best_card, trump, led_suit)
+}
+
+/// Compute the 6-feature card-utility vector φ(card, state). The canonical φ;
+/// used live (play) and offline (dataset/Phase-0). See `PhiFeature` for the
+/// feature definitions and keep in sync with `PHI_FEATURE_NAMES`.
+#[inline]
+pub fn compute_phi(card: u8, ctx: &PhiCtx) -> [f64; crate::constants::PHI_FEATURE_COUNT] {
+    let suit = crate::engine::CARD_SUIT[card as usize];
+    let beats = phi_would_beat(card, ctx);
+    // Last card of this suit in the ego hand → playing it creates/maintains a void.
+    let is_last_in_suit = (ctx.hand & (0x3FFu64 << (suit as u64 * 10))).count_ones() == 1;
+
+    let mut phi = [0.0f64; crate::constants::PHI_FEATURE_COUNT];
+    phi[crate::constants::PhiFeature::Rank as usize] =
+        crate::engine::CARD_RANK[card as usize] as f64 / 9.0;
+    phi[crate::constants::PhiFeature::Points as usize] =
+        crate::engine::CARD_POINTS[card as usize] as f64 / 11.0;
+    phi[crate::constants::PhiFeature::Trump as usize] = if suit == ctx.trump { 1.0 } else { 0.0 };
+    phi[crate::constants::PhiFeature::Wins as usize] = if beats { 1.0 } else { 0.0 };
+    phi[crate::constants::PhiFeature::Captures as usize] = if beats {
+        ctx.trick_points() as f64 / 30.0
+    } else {
+        0.0
+    };
+    phi[crate::constants::PhiFeature::Void as usize] = if is_last_in_suit { 1.0 } else { 0.0 };
+    phi
+}
+
+/// Remap sweep-averaged WANN outputs (continuous in [0,1]) to signed knobs in
+/// [-1,1]. This is the "[-1,1] remap" alternative the design spec (§7) lists
+/// alongside SIGMOID; it preserves weight-agnosticism (output nodes already
+/// carry IDENTITY activation, so sweep-averaging yields continuous values).
+#[inline]
+pub fn outputs_to_knobs(
+    outputs: &[f64; crate::constants::OUTPUT_COUNT],
+) -> [f64; crate::constants::PHI_FEATURE_COUNT] {
+    let mut knobs = [0.0f64; crate::constants::PHI_FEATURE_COUNT];
+    for k in 0..crate::constants::PHI_FEATURE_COUNT {
+        // clamp guards against any tiny numerical excursion past [0,1].
+        let o = outputs[k].clamp(0.0, 1.0);
+        knobs[k] = 2.0 * o - 1.0;
+    }
+    knobs
+}
+
+/// Resolve a card from a knob vector + context: argmax over LEGAL cards of the
+/// linear utility `Σ_k knob_k · φ_k(card)`. Tie-break by lowest card index
+/// (deterministic). Always returns a legal card (follow-suit respected via
+/// `PhiCtx::legal`); the hand is non-empty at any decision point.
+#[inline]
+pub fn resolve_card_phi_utility_ctx(
+    knobs: &[f64; crate::constants::PHI_FEATURE_COUNT],
+    ctx: &PhiCtx,
+) -> u8 {
+    let legal = ctx.legal();
+    let mut best_card = legal.trailing_zeros() as u8;
+    let mut best_score = f64::NEG_INFINITY;
+    let mut bits = legal;
+    while bits != 0 {
+        let c = bits.trailing_zeros() as u8;
+        bits &= bits - 1;
+        let phi = compute_phi(c, ctx);
+        let mut score = 0.0;
+        for k in 0..crate::constants::PHI_FEATURE_COUNT {
+            score += knobs[k] * phi[k];
+        }
+        if score > best_score {
+            best_score = score;
+            best_card = c;
+        }
+    }
+    best_card
+}
+
+/// Live-play convenience: resolve a card from a knob vector + game state.
+#[inline]
+pub fn resolve_card_phi_utility(
+    knobs: &[f64; crate::constants::PHI_FEATURE_COUNT],
+    game: &SuecaSimulatorGame,
+    seat: u8,
+) -> u8 {
+    let ctx = PhiCtx::from_game(game, seat);
+    resolve_card_phi_utility_ctx(knobs, &ctx)
+}
+
 pub fn select_card_heuristic_old(game: &SuecaSimulatorGame, seat: u8) -> u8 {
     let legal = game.state.legal_moves();
     let trump = game.state.trump;
@@ -970,5 +1157,211 @@ mod tests {
                 temp &= temp - 1;
             }
         }
+    }
+
+    // =========================================================================
+    // Stage B φ-resolver invariant tests (2026-06-19).
+    //
+    // These lock the correctness properties a smoke run cannot catch: the
+    // compact PhiCtx must reproduce the engine's legal set and trick-point
+    // total exactly, the resolver must always return a legal card, and the φ
+    // features must match their documented formulas. Fuzzed over random games.
+    // =========================================================================
+
+    /// Deal a shuffled Sueca deal into 4 hands of 10.
+    fn deal_random(rng: &mut LcgRng) -> ([u64; 4], u8) {
+        let mut deck: Vec<u8> = (0..40).collect();
+        for i in (1..40).rev() {
+            let j = rng.gen_range(0..((i + 1) as usize));
+            deck.swap(i, j);
+        }
+        let mut hands = [0u64; 4];
+        for p in 0..4 {
+            for c in 0..10 {
+                hands[p] |= 1u64 << deck[p * 10 + c];
+            }
+        }
+        let trump = rng.gen_range(0..4) as u8;
+        (hands, trump)
+    }
+
+    /// Walk a random game forward, calling `f(game)` at every decision point
+    /// (including the initial state) until the game ends.
+    fn walk_random_game<F: FnMut(&SuecaSimulatorGame)>(rng: &mut LcgRng, mut f: F) {
+        let (hands, trump) = deal_random(rng);
+        let first = rng.gen_range(0..4) as u8;
+        let mut game = SuecaSimulatorGame::new(hands, trump, first);
+        loop {
+            if game.state.trick_number >= 10 {
+                break;
+            }
+            f(&game);
+            let legal = game.state.legal_moves();
+            if legal == 0 {
+                break;
+            }
+            // play a random legal card
+            let n = legal.count_ones();
+            let idx = rng.gen_range(0..(n as usize));
+            let mut t = legal;
+            for _ in 0..idx {
+                t &= t - 1;
+            }
+            game.play_card(t.trailing_zeros() as u8);
+        }
+    }
+
+    #[test]
+    fn phi_ctx_legal_matches_engine_legal_moves() {
+        let mut rng = LcgRng::new(20260619);
+        for _ in 0..500 {
+            walk_random_game(&mut rng, |game| {
+                let seat = game.state.current_player;
+                let ctx = PhiCtx::from_game(game, seat);
+                assert_eq!(
+                    ctx.legal(),
+                    game.state.legal_moves(),
+                    "PhiCtx::legal() != legal_moves() at trick_len={} hand=0x{:X}",
+                    game.current_trick_len,
+                    game.state.hands[seat as usize]
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn phi_ctx_trick_points_matches_game() {
+        let mut rng = LcgRng::new(20260620);
+        for _ in 0..500 {
+            walk_random_game(&mut rng, |game| {
+                let seat = game.state.current_player;
+                let ctx = PhiCtx::from_game(game, seat);
+                assert_eq!(
+                    ctx.trick_points(),
+                    game.trick_points,
+                    "PhiCtx::trick_points() {} != game.trick_points {} at trick_len={}",
+                    ctx.trick_points(),
+                    game.trick_points,
+                    game.current_trick_len
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn resolve_phi_utility_always_returns_legal_card() {
+        let mut rng = LcgRng::new(20260621);
+        for _ in 0..500 {
+            walk_random_game(&mut rng, |game| {
+                let seat = game.state.current_player;
+                let legal = game.state.legal_moves();
+                if legal.count_ones() < 2 {
+                    return;
+                }
+                let ctx = PhiCtx::from_game(game, seat);
+                // Try many knob vectors (incl. all-zero and extremes). A local
+                // RNG avoids borrowing the outer rng that walk_random_game holds.
+                let mut krng = LcgRng::new(
+                    ((game.state.trick_number as u64) << 32)
+                        ^ (game.current_trick_len as u64)
+                        ^ (ctx.hand),
+                );
+                for trial in 0..32 {
+                    let knobs: [f64; crate::constants::PHI_FEATURE_COUNT] = if trial == 0 {
+                        [0.0; crate::constants::PHI_FEATURE_COUNT]
+                    } else if trial == 1 {
+                        [1.0; crate::constants::PHI_FEATURE_COUNT]
+                    } else if trial == 2 {
+                        [-1.0; crate::constants::PHI_FEATURE_COUNT]
+                    } else {
+                        let mut k = [0.0f64; crate::constants::PHI_FEATURE_COUNT];
+                        for ki in 0..k.len() {
+                            k[ki] = (krng.next_u64() as f64 / u64::MAX as f64) * 2.0 - 1.0;
+                        }
+                        k
+                    };
+                    let card = resolve_card_phi_utility_ctx(&knobs, &ctx);
+                    assert_ne!(
+                        (legal >> card) & 1,
+                        0,
+                        "resolver returned illegal card {} (knobs={:?}, legal=0x{:X})",
+                        card, knobs, legal
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn compute_phi_matches_documented_formulas() {
+        use crate::constants::PhiFeature;
+        let mut rng = LcgRng::new(20260622);
+        for _ in 0..500 {
+            walk_random_game(&mut rng, |game| {
+                let seat = game.state.current_player;
+                let ctx = PhiCtx::from_game(game, seat);
+                let mut bits = ctx.legal();
+                while bits != 0 {
+                    let c = bits.trailing_zeros() as u8;
+                    bits &= bits - 1;
+                    let phi = compute_phi(c, &ctx);
+                    let suit = crate::engine::CARD_SUIT[c as usize];
+
+                    // RANK / POINTS / TRUMP are exact card properties.
+                    assert!((phi[PhiFeature::Rank as usize]
+                        - crate::engine::CARD_RANK[c as usize] as f64 / 9.0)
+                        .abs()
+                        < 1e-12);
+                    assert!((phi[PhiFeature::Points as usize]
+                        - crate::engine::CARD_POINTS[c as usize] as f64 / 11.0)
+                        .abs()
+                        < 1e-12);
+                    assert_eq!(
+                        phi[PhiFeature::Trump as usize],
+                        if suit == ctx.trump { 1.0 } else { 0.0 }
+                    );
+                    // WINS must agree with phi_would_beat.
+                    assert_eq!(
+                        phi[PhiFeature::Wins as usize],
+                        if phi_would_beat(c, &ctx) { 1.0 } else { 0.0 }
+                    );
+                    // CAPTURES is trick_points/30 iff the card wins, else 0.
+                    let expect_cap = if phi_would_beat(c, &ctx) {
+                        ctx.trick_points() as f64 / 30.0
+                    } else {
+                        0.0
+                    };
+                    assert!((phi[PhiFeature::Captures as usize] - expect_cap).abs() < 1e-12);
+                    // VOID = last card of its suit in the ego hand.
+                    let suit_count = (ctx.hand & (0x3FFu64 << (suit as u64 * 10))).count_ones();
+                    assert_eq!(
+                        phi[PhiFeature::Void as usize],
+                        if suit_count == 1 { 1.0 } else { 0.0 }
+                    );
+                    // All features finite and in [0,1].
+                    for &v in &phi {
+                        assert!(v.is_finite() && (0.0..=1.0).contains(&v), "phi out of range: {}", v);
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn outputs_to_knobs_remap_is_signed_and_invertible() {
+        // [0,1] → [-1,1] linearly; endpoints and midpoint exact.
+        let z = outputs_to_knobs(&[0.0; crate::constants::OUTPUT_COUNT]);
+        let o = outputs_to_knobs(&[1.0; crate::constants::OUTPUT_COUNT]);
+        let h = outputs_to_knobs(&[0.5; crate::constants::OUTPUT_COUNT]);
+        for k in 0..crate::constants::PHI_FEATURE_COUNT {
+            assert!((z[k] + 1.0).abs() < 1e-12);
+            assert!((o[k] - 1.0).abs() < 1e-12);
+            assert!(h[k].abs() < 1e-12);
+        }
+        // Clamps excursions past [0,1].
+        let hi = outputs_to_knobs(&[1.5; crate::constants::OUTPUT_COUNT]);
+        let lo = outputs_to_knobs(&[-0.5; crate::constants::OUTPUT_COUNT]);
+        assert!(hi.iter().all(|&v| (v - 1.0).abs() < 1e-12));
+        assert!(lo.iter().all(|&v| (v + 1.0).abs() < 1e-12));
     }
 }
